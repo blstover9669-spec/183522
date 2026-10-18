@@ -61,12 +61,12 @@ void wm_invalidate_all(void) {
 }
 
 /* ---- geometry helpers -------------------------------------------------------------- */
-static bool framed(const window_t *w) { return !(w->flags & (WIN_FRAMELESS | WIN_POPUP)); }
+static bool framed(const window_t *w) { return !(w->flags & (WIN_FRAMELESS | WIN_POPUP)) && !w->fullscreen; }
 static bool drawn(const window_t *w) { return w->visible && !w->minimized && !w->closing; }
 
 static bool has_shadow(const window_t *w) {
     if (!theme_get()->shadows || (w->flags & WIN_NO_SHADOW) || w->layer == LAYER_DESKTOP) return false;
-    if (w->maximized) return false;
+    if (w->maximized || w->fullscreen) return false;
     return framed(w) || (w->flags & WIN_POPUP) || w->layer == LAYER_POPUP;
 }
 
@@ -529,7 +529,18 @@ void wm_focus(window_t *w) {
         wm_send(w, &ev);
         if (has_shadow(w)) wm_invalidate_window(w);
     }
+    wm_update_taskbar_visibility();
     wm_taskbar_changed();
+}
+
+/* The taskbar hides while a fullscreen window is active. */
+void wm_update_taskbar_visibility(void) {
+    if (!g_taskbar_win) return;
+    bool hide = wm_focused && wm_focused->fullscreen && drawn(wm_focused);
+    if (g_taskbar_win->visible == !hide) return;
+    g_taskbar_win->visible = !hide;
+    g_taskbar_win->need_paint = true;
+    wm_invalidate_window(g_taskbar_win);
 }
 
 static void focus_next(window_t *except) {
@@ -664,6 +675,7 @@ void win_minimize(window_t *w) {
     w->minimized = true;
     if (w->modal && win_is_valid(w->modal)) win_minimize(w->modal);
     if (w == wm_focused || (wm_focused && wm_focused->owner == w)) focus_next(w);
+    wm_update_taskbar_visibility();
     wm_taskbar_changed();
 }
 
@@ -706,6 +718,41 @@ void win_restore(window_t *w) {
     wm_invalidate_window(w);
 }
 
+void win_set_fullscreen(window_t *w, bool on) {
+    if (!w || w->closing || w->layer != LAYER_NORMAL || w->fullscreen == on) return;
+    wm_invalidate_window(w);
+    if (on) {
+        w->fs_saved_max = w->maximized;
+        w->fs_saved_frame = w->maximized ? w->normal_frame : w->frame;
+        w->maximized = false;
+        w->fullscreen = true;
+        w->radius = 0;
+        w->frame.x = 0;
+        w->frame.y = 0;
+        int ocw = w->cw;
+        w->cw = -1;   /* force reallocation even if the client size happens to match */
+        (void)ocw;
+        resize_client(w, scr_w, scr_h);
+    } else {
+        w->fullscreen = false;
+        rect_t f = w->fs_saved_frame;
+        w->radius = framed(w) ? 8 : 0;
+        w->frame.x = f.x;
+        w->frame.y = f.y;
+        w->cw = -1;
+        int cw = framed(w) ? f.w - 2 * WIN_BORDER : f.w, ch = framed(w) ? f.h - WIN_TITLE_H - WIN_BORDER : f.h;
+        resize_client(w, cw, ch);
+        if (w->fs_saved_max) { w->normal_frame = f; win_maximize(w); }
+    }
+    w->deco_dirty = framed(w);
+    wm_invalidate_window(w);
+    wm_focus(w);
+    wm_update_taskbar_visibility();
+    wm_taskbar_changed();
+}
+
+bool win_is_fullscreen(window_t *w) { return w && w->fullscreen; }
+
 /* ---- closing ------------------------------------------------------------------------------ */
 static void close_window(window_t *w, bool callbacks) {
     if (!w || w->closing || w->magic != WIN_MAGIC) return;
@@ -726,6 +773,7 @@ static void close_window(window_t *w, bool callbacks) {
         else focus_next(w);
     }
     timers_remove_window(w);
+    wm_update_taskbar_visibility();
     wm_taskbar_changed();
 }
 
@@ -944,7 +992,7 @@ static void update_hover(void) {
     /* cursor shape */
     int shape = CURSOR_ARROW;
     if (drag_mode == DRAG_RESIZE) shape = cursor_for_ht(drag_ht);
-    else if (ht == HT_CLIENT && w) shape = w->cursor;
+    else if (ht == HT_CLIENT && w) shape = w->widget_cursor ? w->widget_cursor : w->cursor;
     else shape = cursor_for_ht(ht);
     set_cursor_shape(shape);
 }
@@ -1041,6 +1089,9 @@ static void mouse_motion(int dx, int dy) {
         event_t ev;
         make_mouse_event(&ev, EV_MOUSE_MOVE, target);
         wm_send(target, &ev);
+        /* widgets may have changed the wanted cursor while handling the move */
+        if (win_is_valid(target) && drag_mode == DRAG_NONE && hit_test(target, wm_mouse_x, wm_mouse_y) == HT_CLIENT)
+            set_cursor_shape(target->widget_cursor ? target->widget_cursor : target->cursor);
     }
 }
 
@@ -1102,6 +1153,7 @@ static void mouse_down(int button) {
         drag_off_y = wm_mouse_y - w->frame.y;
         drag_start_x = wm_mouse_x;
         drag_start_y = wm_mouse_y;
+        drag_start_frame = w->maximized ? w->normal_frame : w->frame;
         drag_restore_pending = w->maximized;
         break;
     case HT_CLOSE: case HT_MAXIMIZE: case HT_MINIMIZE:

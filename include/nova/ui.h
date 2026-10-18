@@ -23,7 +23,7 @@ typedef void (*ui_menu_cb)(int item, void *ctx);
 enum widget_type {
     UI_BUTTON = 1, UI_LABEL, UI_TEXTBOX, UI_CHECKBOX, UI_RADIO, UI_SLIDER,
     UI_PROGRESS, UI_LISTBOX, UI_SCROLLBAR, UI_DROPDOWN, UI_TABS, UI_MENUBAR,
-    UI_IMAGE, UI_CUSTOM
+    UI_IMAGE, UI_CUSTOM, UI_TEXTAREA
 };
 
 /* ---- creation ------------------------------------------------------------- */
@@ -96,6 +96,32 @@ void ui_textbox_set_maxlen(widget_t *w, int maxlen);
 /* Called when Enter is pressed (the main callback fires on every edit). */
 void ui_textbox_on_submit(widget_t *w, widget_cb cb, void *ctx);
 void ui_textbox_select_all(widget_t *w);
+
+/* ---- multi-line text areas ------------------------------------------------------------
+ * A scrolling multi-line editor: caret, mouse/keyboard selection, clipboard,
+ * undo/redo (Ctrl+Z / Ctrl+Y), Tab inserts a tab, optional line numbers.
+ * Default font FONT_MONO (ui_set_font to change). ui_get_text/ui_set_text access
+ * the whole text; the main callback (ui_set_callback) fires on every edit. */
+widget_t   *ui_textarea(window_t *win, int x, int y, int w, int h, const char *text);
+void        ui_textarea_set_readonly(widget_t *w, bool ro);
+void        ui_textarea_set_line_numbers(widget_t *w, bool on);
+void        ui_textarea_set_tab_width(widget_t *w, int spaces);
+void        ui_textarea_insert(widget_t *w, const char *text);    /* at the caret, replaces selection */
+void        ui_textarea_append(widget_t *w, const char *text);    /* at the end, scrolls to it (logs) */
+int         ui_textarea_length(widget_t *w);
+int         ui_textarea_line_count(widget_t *w);
+void        ui_textarea_get_cursor(widget_t *w, int *line, int *col);   /* 0-based */
+void        ui_textarea_set_cursor(widget_t *w, int line, int col);
+void        ui_textarea_select(widget_t *w, int start, int end);       /* byte offsets */
+void        ui_textarea_get_selection(widget_t *w, int *start, int *end);
+/* Find text starting after the caret (wraps around); selects it. Returns false if not found. */
+bool        ui_textarea_find(widget_t *w, const char *needle, bool match_case);
+bool        ui_textarea_modified(widget_t *w);
+void        ui_textarea_set_modified(widget_t *w, bool m);
+void        ui_textarea_undo(widget_t *w);
+void        ui_textarea_redo(widget_t *w);
+/* Called when the caret moves (e.g. to show "Ln 3, Col 7" in a status bar). */
+void        ui_textarea_on_cursor(widget_t *w, widget_cb cb, void *ctx);
 
 /* ---- lists (listbox, dropdown, tabs) --------------------------------------------------- */
 int         ui_list_add(widget_t *w, const char *text);   /* returns index */

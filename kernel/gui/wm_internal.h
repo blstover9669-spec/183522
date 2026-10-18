@@ -43,10 +43,14 @@ struct window {
     rect_t paint_rect;         /* client coords */
     bool deco_dirty;
     int cursor;
+    int widget_cursor;         /* cursor requested by the widget under the mouse (0 = none) */
     int hover_ht;              /* title button under the mouse */
     int pressed_ht;
     int radius;                /* corner radius used by the compositor */
     int opacity;               /* 0..255; < 255 while fading in */
+    bool fullscreen;           /* covers the whole screen, no decorations */
+    rect_t fs_saved_frame;     /* frame before going fullscreen */
+    bool fs_saved_max;
     uint32_t fade_start;       /* g_ticks when the fade-in began */
     bool mouse_inside;
     /* widgets */
@@ -79,6 +83,7 @@ bool      wm_any_popup(void);
 window_t *wm_create_ex(const char *title, int cw, int ch, uint32_t flags, int layer);
 void      wm_set_frame(window_t *w, rect_t frame);
 void      wm_focus(window_t *w);
+void      wm_update_taskbar_visibility(void);
 void      wm_taskbar_changed(void);
 uint32_t  wm_frame_serial(void);
 bool      wm_screenshot(void);

@@ -116,6 +116,10 @@ bool        win_is_focused(window_t *win);
 bool        win_is_minimized(window_t *win);
 bool        win_is_maximized(window_t *win);
 bool        win_is_valid(window_t *win);  /* still open? (safe on stale pointers) */
+/* Fullscreen: no decorations, covers the whole screen (the taskbar hides while
+   the window is active). An EV_RESIZE with the screen size follows. */
+void        win_set_fullscreen(window_t *win, bool on);
+bool        win_is_fullscreen(window_t *win);
 void        win_set_cursor(window_t *win, int cursor);   /* CURSOR_* while over the client */
 uint32_t    win_flags(window_t *win);
 const struct app_desc *win_get_app(window_t *win);

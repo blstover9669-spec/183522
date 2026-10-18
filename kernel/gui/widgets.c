@@ -3,61 +3,12 @@
  * checkboxes, radio buttons, sliders, progress bars, list boxes, scroll bars,
  * dropdowns, tabs, menu bars, images, custom widgets and popup menus.
  */
-#include "wm_internal.h"
-
-#define LIST_ROW_H 26
-#define SB_W 12
-#define MAX_MENUS 10
-
-typedef struct menu_def {
-    char title[32];
-    char *items;           /* '|' separated */
-    ui_menu_cb cb;
-    void *ctx;
-    int x, w;              /* title position within the bar */
-} menu_def_t;
-
-struct widget {
-    int type;
-    window_t *win;
-    rect_t r;
-    bool visible, enabled, dead;
-    char *text;
-    widget_cb cb;  void *ctx;     /* main callback (click / change / select)  */
-    widget_cb cb2; void *ctx2;    /* submit (textbox) / activate (listbox)     */
-    int value, min, max;
-    int total, page;              /* scrollbar */
-    int group;                    /* radio group */
-    const font_t *font;
-    int align;
-    uint32_t color;
-    intptr_t tag;
-    bool hover, pressed, is_default;
-    /* text box */
-    int cursor, anchor, scroll_x, maxlen;
-    bool password;
-    char *placeholder;
-    /* lists */
-    char **items;
-    intptr_t *item_data;
-    int nitems, cap;
-    int scroll, hover_item;
-    ui_list_icon_fn icon_fn;
-    bool sb_drag;
-    int sb_drag_off;
-    /* menubar */
-    menu_def_t menus[MAX_MENUS];
-    int nmenus, open_menu;
-    window_t *popup;
-    /* image / custom */
-    const surface_t *img;
-    ui_custom_draw_fn draw_fn;
-    ui_custom_event_fn event_fn;
-    struct widget *next;
-};
+#include "widget_internal.h"
 
 static int blink_timer;
-static bool blink_on = true;
+static void blink_tick(void *ctx);
+static void blink_tick_fn(void *ctx) { blink_tick(ctx); }
+bool ui_blink_on = true;
 
 /* ---- helpers ------------------------------------------------------------------- */
 static const font_t *wfont(widget_t *w) { return w->font ? w->font : FONT_UI; }
@@ -78,11 +29,15 @@ static void fire(widget_t *w, widget_cb cb, void *ctx) {
     if (cb && alive(w)) cb(w, ctx);
 }
 
+void ui_fire(widget_t *w, widget_cb cb, void *ctx) { fire(w, cb, ctx); }
+bool ui_alive(widget_t *w) { return alive(w); }
+void ui_start_blink(void) { if (!blink_timer) blink_timer = timer_add(530, blink_tick_fn, NULL, true); }
+
 static void blink_tick(void *ctx) {
     (void)ctx;
-    blink_on = !blink_on;
+    ui_blink_on = !ui_blink_on;
     window_t *f = wm_focused;
-    if (f && f->focus_widget && f->focus_widget->type == UI_TEXTBOX && !f->focus_widget->dead)
+    if (f && f->focus_widget && (f->focus_widget->type == UI_TEXTBOX || f->focus_widget->type == UI_TEXTAREA) && !f->focus_widget->dead)
         ui_invalidate(f->focus_widget);
 }
 
@@ -107,7 +62,10 @@ static widget_t *widget_new(window_t *win, int type, int x, int y, int w, int h)
     return wd;
 }
 
+widget_t *ui_widget_new(window_t *win, int type, int x, int y, int w, int h) { return widget_new(win, type, x, y, w, h); }
+
 static void widget_free(widget_t *w) {
+    if (w->type == UI_TEXTAREA) textarea_free(w);
     kfree(w->text);
     kfree(w->placeholder);
     for (int i = 0; i < w->nitems; i++) kfree(w->items[i]);
@@ -137,7 +95,7 @@ static bool focusable(widget_t *w) {
     if (!w->visible || !w->enabled || w->dead) return false;
     switch (w->type) {
     case UI_BUTTON: case UI_TEXTBOX: case UI_CHECKBOX: case UI_RADIO: case UI_SLIDER:
-    case UI_LISTBOX: case UI_DROPDOWN: case UI_TABS: case UI_CUSTOM:
+    case UI_LISTBOX: case UI_DROPDOWN: case UI_TABS: case UI_CUSTOM: case UI_TEXTAREA:
         return true;
     default:
         return false;
@@ -275,6 +233,7 @@ int ui_menubar_add(widget_t *mb, const char *title, const char *items, ui_menu_c
 /* ---- generic operations ----------------------------------------------------------- */
 void ui_set_text(widget_t *w, const char *text) {
     if (!w) return;
+    if (w->type == UI_TEXTAREA) { textarea_set_text(w, text); return; }
     set_text_raw(w, text);
     if (w->type == UI_TEXTBOX) {
         int n = (int)strlen(w->text);
@@ -354,7 +313,7 @@ void ui_focus(widget_t *w) {
     if (old == w) return;
     w->win->focus_widget = w;
     if (old) ui_invalidate(old);
-    blink_on = true;
+    ui_blink_on = true;
     ui_invalidate(w);
 }
 
@@ -768,7 +727,7 @@ static void paint_textbox(surface_t *s, widget_t *w) {
             gfx_fill_rect(s, sx, r.y + 4, sw, r.h - 8, color_alpha(t->selection_bg, 110));
         }
         gfx_text(s, x0, ty, txt, w->enabled ? t->field_text : t->disabled_text, f);
-        if (focused && blink_on) {
+        if (focused && ui_blink_on) {
             int cx = x0 + font_text_width_n(f, txt, w->cursor);
             gfx_fill_rect(s, cx, ty, 1, font_height(f), t->field_text);
         }
@@ -943,6 +902,9 @@ static void paint_widget(surface_t *s, widget_t *w) {
     case UI_CUSTOM:
         if (w->draw_fn) w->draw_fn(w, s, r);
         break;
+    case UI_TEXTAREA:
+        textarea_paint(s, w);
+        break;
     default:
         break;
     }
@@ -1078,7 +1040,7 @@ static bool textbox_key(widget_t *w, const event_t *ev) {
         if (nav && !shift) w->anchor = w->cursor;
         (void)moved;
     }
-    blink_on = true;
+    ui_blink_on = true;
     tb_ensure_visible(w);
     ui_invalidate(w);
     if (changed) fire(w, w->cb, w->ctx);
@@ -1099,6 +1061,7 @@ static void set_hover(window_t *win, widget_t *w) {
     if (old) { old->hover = false; old->hover_item = old->type == UI_MENUBAR && old->open_menu >= 0 ? old->hover_item : -1; ui_invalidate(old); }
     win->hover_widget = w;
     if (w) { w->hover = true; ui_invalidate(w); }
+    win->widget_cursor = (w && w->enabled && (w->type == UI_TEXTBOX || w->type == UI_TEXTAREA)) ? CURSOR_IBEAM : 0;
 }
 
 static int slider_value_at(widget_t *w, int x, int y) {
@@ -1268,7 +1231,7 @@ static bool widget_mouse(widget_t *w, const event_t *ev) {
             w->cursor = pos;
             if (!(ev->mods & MOD_SHIFT)) w->anchor = pos;
             w->pressed = true;
-            blink_on = true;
+            ui_blink_on = true;
             ui_invalidate(w);
         } else if (ev->type == EV_MOUSE_MOVE && w->pressed) {
             int pos = font_hit_test(wfont(w), w->text, ev->x - (w->r.x + 8) + w->scroll_x);
@@ -1325,6 +1288,8 @@ static bool widget_mouse(widget_t *w, const event_t *ev) {
     }
     case UI_CUSTOM:
         return w->event_fn ? w->event_fn(w, ev) : false;
+    case UI_TEXTAREA:
+        return textarea_event(w, ev);
     default:
         (void)win;
         return false;
@@ -1332,6 +1297,7 @@ static bool widget_mouse(widget_t *w, const event_t *ev) {
 }
 
 static bool widget_key(widget_t *w, const event_t *ev) {
+    if (w->type == UI_TEXTAREA) return textarea_event(w, ev);
     if (w->type == UI_TEXTBOX) {
         if (ev->type == EV_CHAR || ev->type == EV_KEY_DOWN) return textbox_key(w, ev);
         return false;
@@ -1464,7 +1430,8 @@ bool ui_dispatch(window_t *win, const event_t *ev) {
     case EV_KEY_DOWN: case EV_CHAR: case EV_KEY_UP: {
         widget_t *f = win->focus_widget;
         if (f && (f->dead || !f->visible || !f->enabled)) f = NULL;
-        if (ev->type == EV_KEY_DOWN && ev->key == KEY_TAB && !(ev->mods & (MOD_CTRL | MOD_ALT)) && ui_wants_tab(win)) {
+        if (ev->type == EV_KEY_DOWN && ev->key == KEY_TAB && !(ev->mods & (MOD_CTRL | MOD_ALT)) && ui_wants_tab(win) &&
+            !(f && f->type == UI_TEXTAREA && textarea_wants_tab(f) && !(ev->mods & MOD_SHIFT))) {
             focus_cycle(win, ev->mods & MOD_SHIFT);
             return true;
         }

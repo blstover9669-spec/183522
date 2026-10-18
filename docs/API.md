@@ -225,6 +225,8 @@ rect_t win_frame_rect(w), win_client_rect(w);   /* screen coordinates */
 bool  win_is_focused(w), win_is_minimized(w), win_is_maximized(w);
 bool  win_is_valid(w);      /* safe on stale pointers: is this window still open? */
 void  win_set_cursor(w, CURSOR_IBEAM);          /* shape while over the client area */
+void  win_set_fullscreen(w, true); bool win_is_fullscreen(w);  /* games, slideshows: no frame,
+                                                   whole screen, taskbar hidden while active */
 void  win_post_event(w, intptr_t data);         /* deliver EV_USER later from the main loop */
 window_t *win_create_dialog(window_t *owner, title, cw, ch, flags);
 ```
@@ -458,6 +460,7 @@ window. Callbacks have the signature `void cb(widget_t *w, void *ctx)`.
 | `ui_button(win, x, y, w, h, label, cb, ctx)` | - | clicked / Space / Enter (default button) |
 | `ui_label(win, x, y, w, h, text)` | - | - (wraps when too long; `ui_set_align`, `ui_set_font`, `ui_set_color`) |
 | `ui_textbox(win, x, y, w, h, text)` | - (`ui_get_text`) | every edit (`ui_set_callback`); Enter -> `ui_textbox_on_submit` |
+| `ui_textarea(win, x, y, w, h, text)` | - (`ui_get_text` = whole text) | every edit; caret moves -> `ui_textarea_on_cursor` |
 | `ui_checkbox(win, x, y, w, h, label, checked, cb, ctx)` | 0/1 | toggled |
 | `ui_radio(win, x, y, w, h, label, group, checked, cb, ctx)` | 0/1 | selected (others in the group clear) |
 | `ui_slider(win, x, y, w, h, min, max, value, cb, ctx)` | position | moved (drag, wheel, arrows). Vertical if `h > w` |
@@ -478,6 +481,21 @@ ui_set_tag / ui_get_tag, ui_invalidate, ui_button_set_default`.
 Text boxes: single line, caret, mouse/Shift selection, Ctrl+A/C/X/V,
 Ctrl+Left/Right word jumps, Home/End; `ui_textbox_set_placeholder`,
 `ui_textbox_set_password`, `ui_textbox_set_maxlen`, `ui_textbox_select_all`.
+
+Text areas (multi-line editor, default font `FONT_MONO`): scrollbars, mouse
+and Shift selection, double-click selects a word, Ctrl+A/C/X/V, Ctrl+Z/Y
+undo/redo, Tab inserts a tab (Shift+Tab still moves focus), Enter keeps the
+indentation, smart Home, Ctrl+Home/End, PgUp/PgDn, Ctrl+Up/Down scroll, wheel
+(+Shift = horizontal). Other Ctrl shortcuts (Ctrl+S, Ctrl+F...) reach your
+handler. Functions: `ui_textarea_set_readonly, ui_textarea_set_line_numbers,
+ui_textarea_set_tab_width, ui_textarea_insert` (at the caret),
+`ui_textarea_append` (at the end - log views), `ui_textarea_length,
+ui_textarea_line_count, ui_textarea_get_cursor / set_cursor` (0-based line,
+column), `ui_textarea_select / get_selection` (byte offsets),
+`ui_textarea_find(w, needle, match_case)`, `ui_textarea_modified /
+set_modified, ui_textarea_undo / redo, ui_textarea_on_cursor`. CRLF is
+normalised to LF. The Widget Gallery's "Text area" tab shows it with line
+numbers and a Ln/Col status bar.
 
 Lists (listbox, dropdown, tabs share these): `ui_list_add` (returns index),
 `ui_list_insert, ui_list_remove, ui_list_clear, ui_list_count, ui_list_get,

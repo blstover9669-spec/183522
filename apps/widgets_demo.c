@@ -6,8 +6,9 @@
 
 typedef struct {
     widget_t *tabs, *slider, *progress, *text, *pass, *list, *drop, *status, *sb, *check;
-    widget_t *page[2][32];
-    int npage[2];
+    widget_t *page[3][32];
+    int npage[3];
+    widget_t *area;
 } gallery_t;
 
 static void set_status(gallery_t *g, const char *fmt, ...) {
@@ -20,7 +21,7 @@ static void set_status(gallery_t *g, const char *fmt, ...) {
 }
 
 static void show_page(gallery_t *g, int p) {
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 3; i++)
         for (int j = 0; j < g->npage[i]; j++) ui_set_visible(g->page[i][j], i == p);
 }
 
@@ -43,6 +44,12 @@ static void on_list(widget_t *w, void *ctx) { set_status(ctx, "Selected: %s", ui
 static void on_list_act(widget_t *w, void *ctx) { set_status(ctx, "Activated: %s", ui_get_text(w)); }
 static void on_drop(widget_t *w, void *ctx) { set_status(ctx, "Dropdown: %s", ui_get_text(w)); }
 static void on_sb(widget_t *w, void *ctx) { set_status(ctx, "Scrollbar: %d", ui_get_value(w)); }
+static void on_caret(widget_t *w, void *ctx) {
+    int ln, col;
+    ui_textarea_get_cursor(w, &ln, &col);
+    set_status(ctx, "Ln %d, Col %d  |  %d lines%s", ln + 1, col + 1, ui_textarea_line_count(w),
+               ui_textarea_modified(w) ? "  |  modified" : "");
+}
 
 static void input_done(const char *text, void *ctx) {
     if (text) set_status(ctx, "Input box returned \"%s\"", text);
@@ -81,6 +88,9 @@ static void gallery_event(window_t *win, const event_t *ev) {
         if (ev->button == MOUSE_RIGHT)
             ui_popup_menu(win, ev->x, ev->y, "Cut\tCtrl+X|Copy\tCtrl+C|Paste\tCtrl+V|-|!Disabled item|Select all", menu_cb, g);
         break;
+    case EV_KEY_DOWN:
+        if (ev->key == KEY_F11) win_set_fullscreen(win, !win_is_fullscreen(win));   /* F11: fullscreen */
+        break;
     case EV_RESIZE:
         ui_move(g->status, 10, ev->h - 26, ev->w - 20, 24);
         break;
@@ -109,6 +119,7 @@ static void gallery_launch(const char *arg) {
     g->tabs = ui_tabs(win, 10, UI_MENUBAR_H + 6, 540, 34, on_tab, g);
     ui_list_add(g->tabs, "Controls");
     ui_list_add(g->tabs, "Lists & dialogs");
+    ui_list_add(g->tabs, "Text area");
 
     int y = UI_MENUBAR_H + 54;
     /* page 0 */
@@ -166,6 +177,13 @@ static void gallery_launch(const char *arg) {
     add(g, 1, ui_button(win, 280, y + 166, 200, 32, "Notification", on_notify, g));
     g->sb = add(g, 1, ui_scrollbar(win, 500, y, 14, 220, true, on_sb, g));
     ui_scrollbar_set(g->sb, 1000, 200, 300);
+
+    /* page 2: multi-line text area with line numbers */
+    y = UI_MENUBAR_H + 54;
+    g->area = add(g, 2, ui_textarea(win, 20, y, 520, 330,
+        "/* A multi-line text area */\n#include <nova.h>\n\nint main(void) {\n\tprintf(\"Hello, NovaOS!\\n\");\n\treturn 0;\n}\n"));
+    ui_textarea_set_line_numbers(g->area, true);
+    ui_textarea_on_cursor(g->area, on_caret, g);
 
     g->status = ui_label(win, 10, 470 - 26, 540, 24, "Ready.");
     show_page(g, 0);
