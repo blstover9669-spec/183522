@@ -1,0 +1,28 @@
+# build outputs (any build directory: build/, build-foo/, ...)
+/build/
+/build-*/
+*.o
+*.d
+*.elf
+*.iso
+
+# disk images and emulator state
+*.img
+*.qcow2
+*.vdi
+*.vmdk
+*.vhd
+*.raw
+
+# screenshots / test output
+shots/
+/shots-*/
+*.ppm
+serial*.log
+
+# editor / OS cruft
+*.swp
+*~
+.DS_Store
+__pycache__/
+*.pyc
