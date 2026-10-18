@@ -235,17 +235,17 @@ uint32_t g_mem_total;
 
 void memory_init(void) {
     uintptr_t kend = ((uintptr_t)__kernel_end + 0xFFF) & ~(uintptr_t)0xFFF;
-    uint64_t best_start = 0, best_len = 0;
-    g_mem_total = 0;
+    uint64_t best_start = 0, best_len = 0, total = 0;
     for (int i = 0; i < g_boot.mmap_count; i++) {
         if (g_boot.mmap[i].type != 1) continue;
         uint64_t s = g_boot.mmap[i].addr, e = s + g_boot.mmap[i].len;
-        g_mem_total += (uint32_t)g_boot.mmap[i].len;
+        total += g_boot.mmap[i].len;
         if (e > 0xF0000000ull) e = 0xF0000000ull;   /* stay below typical MMIO */
         if (e <= kend) continue;
         if (s < kend) s = kend;
         if (e > s && e - s > best_len) { best_start = s; best_len = e - s; }
     }
+    g_mem_total = total > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)total;
     if (!best_len) {
         /* no map: fall back to mem_upper (KiB above 1 MiB) */
         uint64_t e = 0x100000ull + (uint64_t)g_boot.mem_upper_kb * 1024;

@@ -106,6 +106,9 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  'insmod vbe' \
 	  'insmod vga' \
 	  'set gfxpayload=1024x768x32,1024x768x24,800x600x32,auto' \
+	  'set color_normal=light-gray/black' \
+	  'set menu_color_normal=light-gray/black' \
+	  'set menu_color_highlight=white/blue' \
 	  '' \
 	  'menuentry "NovaOS" {' \
 	  '  multiboot /boot/kernel.elf $(CMDLINE)' \

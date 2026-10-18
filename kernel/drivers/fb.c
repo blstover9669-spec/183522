@@ -79,6 +79,9 @@ bool fb_init(int want_w, int want_h) {
     bool have_mb = g_boot.has_fb;
     bool bga = bga_available();
     bool want_specific = want_w > 0 && want_h > 0;
+    if (g_boot.fb_addr)
+        klog("fb: bootloader framebuffer %ux%ux%u type %u pitch %u at %p%s", g_boot.fb_width, g_boot.fb_height,
+             g_boot.fb_bpp, g_boot.fb_type, g_boot.fb_pitch, (void *)(uintptr_t)g_boot.fb_addr, have_mb ? "" : " (unusable)");
 
     if (have_mb && !(want_specific && bga && ((uint32_t)want_w != g_boot.fb_width || (uint32_t)want_h != g_boot.fb_height))) {
         g_fb.addr = (uint8_t *)(uintptr_t)g_boot.fb_addr;

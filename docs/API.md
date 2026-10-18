@@ -683,7 +683,9 @@ therefore copy the CD-ROM (ATAPI, usually the secondary master in VirtualBox)
 sector by sector to the hard disk and keep the serialised VFS
 (`vfs_serialize`) in sectors after the image. `sys_boot_drive()` returns the
 BIOS drive GRUB booted from (0x80 = first hard disk), so the system can tell
-whether it runs from an installation and load the saved tree at boot.
+whether it runs from an installation and load the saved tree at boot (QEMU's
+`-kernel` loader also reports 0x80 - always validate a signature on disk
+too).
 
 In use by the kernel: IRQ0 (PIT), IRQ1 + IRQ12 (i8042 keyboard/mouse), COM1
 polled (no IRQ). Free: IRQ 3, 4, 5, 7, 9, 10, 11, 14, 15 (IDE uses 14/15).

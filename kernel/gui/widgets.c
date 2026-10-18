@@ -1408,9 +1408,11 @@ bool ui_dispatch(window_t *win, const event_t *ev) {
         widget_t *w = widget_at(win, ev->x, ev->y);
         if (!w || !w->enabled) return false;
         if (focusable(w)) ui_focus(w);
-        win->capture_widget = w;
         set_hover(win, w);
-        return widget_mouse(w, ev);
+        /* passive widgets (labels, images, progress bars) let clicks through to the app */
+        bool consumed = widget_mouse(w, ev);
+        if (consumed && alive(w)) win->capture_widget = w;
+        return consumed;
     }
     case EV_MOUSE_UP: {
         widget_t *cap = win->capture_widget;
