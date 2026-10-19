@@ -133,6 +133,7 @@ struct term {
     /* cursor blink */
     bool blink_on, focused;
     int blink_timer;
+    bool eat_char;              /* drop the EV_CHAR of a key that ended an animation */
 
     /* selection (absolute line, column) and scrollbar dragging */
     bool sel_drag, has_sel, sel_moved;

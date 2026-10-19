@@ -267,8 +267,8 @@ int term_cmd_calc(tctx_t *c, int argc, char **argv) {
     if (argc < 2) {
         if (!tc_tty(c)) { tc_err(c, "usage: calc EXPRESSION"); return 2; }
         c->t->mode = TERM_MODE_CALC;
-        tc_puts(c, "\x1b[1;96mcalc\x1b[0m interactive mode - enter expressions, "
-                   "\x1b[1mexit\x1b[0m or Ctrl+C to leave. 'ans' is the last result.\n");
+        tc_puts(c, "\x1b[1;96mcalc\x1b[0m interactive mode \x1b[90m-\x1b[0m type expressions, "
+                   "\x1b[1mexit\x1b[0m or \x1b[1mCtrl+C\x1b[0m to leave \x1b[90m(ans = last result)\x1b[0m\n");
         return 0;
     }
     char buf[TERM_INPUT_MAX];
