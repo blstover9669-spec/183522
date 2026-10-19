@@ -136,11 +136,21 @@ static void list_draw(widget_t *w, surface_t *s, rect_t r) {
         size_str(d->sectors * 512, size, sizeof size);
         gfx_text_ellipsis(s, c.x + 84, ty + 1, c.w - 84 - 90, d->model, tc, FONT_UI_BOLD);
         gfx_text_aligned(s, rect_make(c.x, ty - 1, c.w - 16, 20), size, tc, FONT_UI_LARGE, ALIGN_RIGHT);
-        char why[96] = "";
-        if (!ok) install_check_disk(i, why, sizeof why);
-        if (why[0]) snprintf(line, sizeof line, "%s  \x95  %s", d->location, why);
-        else if (install_disk_has_novaos(i)) snprintf(line, sizeof line, "%s  \x95  NovaOS is installed on this disk", d->location);
-        else snprintf(line, sizeof line, "%s  \x95  IDE hard disk", d->location);
+        /* short status after the location; the long reasons would be cut off */
+        char why[96] = "", need[24];
+        int code = ok ? DISK_OK : install_check_disk(i, why, sizeof why);
+        if (install_is_boot_disk(i)) {
+            snprintf(line, sizeof line, "%s  \x95  System disk (in use)", d->location);
+        } else if (code == DISK_ENOSPC) {
+            size_str(INSTALL_MIN_BYTES, need, sizeof need);
+            snprintf(line, sizeof line, "%s  \x95  Too small (needs %s)", d->location, need);
+        } else if (why[0]) {
+            snprintf(line, sizeof line, "%s  \x95  %s", d->location, why);
+        } else if (install_disk_has_novaos(i)) {
+            snprintf(line, sizeof line, "%s  \x95  NovaOS is installed here", d->location);
+        } else {
+            snprintf(line, sizeof line, "%s  \x95  IDE hard disk", d->location);
+        }
         gfx_text_ellipsis(s, c.x + 84, ty + 24, c.w - 120, line, ok ? text_dim(t) : t->disabled_text, FONT_UI);
         if (sel) {
             gfx_fill_circle_aa(s, c.x + c.w - 22, ty + 32, 9, t->accent);
@@ -270,9 +280,9 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
     gfx_fill_triangle(s, ax1 - 12, ccy - 8, ax1 - 12, ccy + 8, ax1, ccy, t->accent);
     draw_drive(s, CX + CW - 130, ccy - 24, 84, 48, false);
 
-    y = hy + 86 + 16;
+    y = hy + 86 + 14;
     gfx_text(s, CX, y, "Before you start", t->window_text, FONT_UI_BOLD);
-    y += 24;
+    y += 22;
     char req[128], need[24];
     size_str(INSTALL_MIN_BYTES, need, sizeof need);
     snprintf(req, sizeof req, "You need a hard disk of at least %s (64 MB or more recommended).", need);
@@ -280,10 +290,10 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
     y += bullet(s, t, y, "Everything on the disk you choose will be erased.");
     y += bullet(s, t, y, "Installing takes less than a minute.");
     if (persist_active()) {
-        y += 4;
+        y += 2;
         ui_draw_glyph(s, UI_GLYPH_INFO, CX, y, 18, t->accent);
         gfx_text_wrapped(s, rect_make(CX + 26, y, CW - 26, H - FOOT_H - y),
-                         "NovaOS is already running from a hard disk. You can install it to another disk.",
+                         "NovaOS is running from a hard disk. You can install it on another disk.",
                          text_dim(t), FONT_UI);
     }
     (void)in;
