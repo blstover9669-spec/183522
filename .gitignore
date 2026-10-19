@@ -26,3 +26,6 @@ serial*.log
 .DS_Store
 __pycache__/
 *.pyc
+
+# agent worktrees
+/.claude/worktrees/
