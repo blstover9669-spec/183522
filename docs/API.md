@@ -675,20 +675,23 @@ pci_device_count, pci_get_device, pci_find_class(class, subclass),
 pci_find_device(vendor, device), pci_enable(dev)` (`pci_device_t` has
 bus/slot/func, ids, class codes, `irq_line`, `bar[6]`).
 
-Notes for disk / installer work (no ATA driver is included in the
-foundation): the ISO produced by `make` is a *hybrid* image - written raw to
-the start of a hard disk it boots from that disk via GRUB (verified in QEMU
-with `-drive file=NovaOS.iso,if=ide,index=0 -boot c`). An installer can
-therefore copy the CD-ROM (ATAPI, usually the secondary master in VirtualBox)
-sector by sector to the hard disk and keep the serialised VFS
-(`vfs_serialize`) in sectors after the image. `sys_boot_drive()` returns the
-BIOS drive GRUB booted from (0x80 = first hard disk), so the system can tell
-whether it runs from an installation and load the saved tree at boot (QEMU's
-`-kernel` loader also reports 0x80 - always validate a signature on disk
-too).
+**Hard disks, persistence, installer.** `#include <nova/disk.h>` (not
+included by `nova.h`; the header documents every call):
+`disk_count() / disk_get(i)` (IDE hard disks found at boot: model, size,
+location; ATAPI CD drives are skipped), `disk_read / disk_write(disk, lba,
+count, buf)` (512-byte sectors, polled PIO - keep each call to a few dozen
+sectors inside an app callback), `disk_flush`, `disk_rescan`,
+`disk_format_size`, `disk_strerror`. On an installed system (`boot=disk` on
+the command line) the VFS is saved to the disk automatically;
+`persist_active()`, `persist_get_info(&info)` (dirty, saving, last save,
+capacity), `persist_save()` (synchronous - e.g. a terminal `sync` command)
+and `persist_save_async()`. The installer back end (`install_begin /
+install_step / install_progress ...`) is what `apps/installer.c` drives from
+a window timer. Disk layout: `kernel/disk/diskfmt.h`.
 
 In use by the kernel: IRQ0 (PIT), IRQ1 + IRQ12 (i8042 keyboard/mouse), COM1
-polled (no IRQ). Free: IRQ 3, 4, 5, 7, 9, 10, 11, 14, 15 (IDE uses 14/15).
+polled (no IRQ), IDE polled with device interrupts off (no IRQ). Free:
+IRQ 3, 4, 5, 7, 9, 10, 11, 14, 15.
 Paging is off: physical addresses (MMIO BARs, ACPI tables) are directly
 accessible. The heap occupies the largest RAM region above the kernel; there
 is no physical page allocator - `kmalloc` large aligned buffers if a device
