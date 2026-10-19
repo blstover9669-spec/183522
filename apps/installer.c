@@ -243,9 +243,12 @@ static int paint_title(surface_t *s, const theme_t *t, const char *title, const 
     return y;
 }
 
-static void bullet(surface_t *s, const theme_t *t, int y, const char *text) {
+/* A bullet point; long text wraps. Returns the vertical space used, so the
+   next bullet starts below all of this one's lines. */
+static int bullet(surface_t *s, const theme_t *t, int y, const char *text) {
     gfx_fill_circle_aa(s, CX + 10, y + 8, 3, t->accent);
-    gfx_text_wrapped(s, rect_make(CX + 24, y, CW - 24, 40), text, t->window_text, FONT_UI);
+    int h = gfx_text_wrapped(s, rect_make(CX + 24, y, CW - 24, 80), text, t->window_text, FONT_UI);
+    return MAX(h, font_height(FONT_UI)) + 5;
 }
 
 static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
@@ -254,9 +257,9 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
                         "NovaOS straight from the disk - no CD needed - and your files are kept when "
                         "you restart or shut down.");
     /* hero illustration: CD -> arrow -> disk */
-    int hy = y + 18;
-    ui_draw_panel(s, rect_make(CX, hy, CW, 96));
-    int ccx = CX + 92, ccy = hy + 48;
+    int hy = y + 14;
+    ui_draw_panel(s, rect_make(CX, hy, CW, 86));
+    int ccx = CX + 92, ccy = hy + 43;
     gfx_fill_circle_aa(s, ccx, ccy, 32, RGB(210, 216, 230));
     for (int i = 0; i < 6; i++)
         gfx_circle_aa(s, ccx, ccy, 14 + i * 3, 1.2, color_hsv(200 + i * 25, 0.35, 0.95));
@@ -267,18 +270,19 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
     gfx_fill_triangle(s, ax1 - 12, ccy - 8, ax1 - 12, ccy + 8, ax1, ccy, t->accent);
     draw_drive(s, CX + CW - 130, ccy - 24, 84, 48, false);
 
-    y = hy + 116;
+    y = hy + 86 + 16;
     gfx_text(s, CX, y, "Before you start", t->window_text, FONT_UI_BOLD);
     y += 24;
     char req[128], need[24];
     size_str(INSTALL_MIN_BYTES, need, sizeof need);
     snprintf(req, sizeof req, "You need a hard disk of at least %s (64 MB or more recommended).", need);
-    bullet(s, t, y, req);
-    bullet(s, t, y + 22, "Everything on the disk you choose will be erased.");
-    bullet(s, t, y + 44, "Installing takes less than a minute.");
+    y += bullet(s, t, y, req);
+    y += bullet(s, t, y, "Everything on the disk you choose will be erased.");
+    y += bullet(s, t, y, "Installing takes less than a minute.");
     if (persist_active()) {
-        ui_draw_glyph(s, UI_GLYPH_INFO, CX, y + 72, 18, t->accent);
-        gfx_text_wrapped(s, rect_make(CX + 26, y + 72, CW - 26, 40),
+        y += 4;
+        ui_draw_glyph(s, UI_GLYPH_INFO, CX, y, 18, t->accent);
+        gfx_text_wrapped(s, rect_make(CX + 26, y, CW - 26, H - FOOT_H - y),
                          "NovaOS is already running from a hard disk. You can install it to another disk.",
                          text_dim(t), FONT_UI);
     }
