@@ -18,6 +18,12 @@ int wm_taskbar_h = 48;
 int wm_cursor_shape = CURSOR_ARROW;
 uint32_t wm_click_serial;
 
+/* main-loop statistics and hooks used by the services (kernel/services) */
+volatile uint32_t wm_stat_idle_ms;            /* ms spent halted, waiting for interrupts */
+uint32_t wm_stat_events;                      /* events delivered to windows             */
+uint32_t wm_last_input_tick;                  /* g_ticks of the last input event          */
+bool (*wm_input_filter)(const input_event_t *ev);   /* true = swallow (screensaver)     */
+
 static int scr_w, scr_h;
 static int next_win_id = 1;
 static int cascade_idx;
@@ -811,6 +817,7 @@ void wm_send(window_t *w, const event_t *ev) {
     if (!w || w->closing || w->magic != WIN_MAGIC) return;
     const app_desc_t *saved = wm_current_app;
     wm_current_app = w->app;
+    wm_stat_events++;
     if (!ui_dispatch(w, ev) && w->handler && !w->closing) w->handler(w, ev);
     wm_current_app = saved;
 }
@@ -1307,6 +1314,7 @@ static void key_event(const input_event_t *ie) {
             return;
         }
         if (ie->key == KEY_PRINTSCREEN) { wm_screenshot(); return; }
+        if ((mods & MOD_WIN) && (ie->key == 'r' || ie->key == 'R')) { wm_close_popups(NULL); shell_run_dialog(); return; }
     } else {
         if ((ie->key == KEY_LWIN || ie->key == KEY_RWIN) && win_key_alone) {
             win_key_alone = false;
@@ -1329,6 +1337,8 @@ static void process_input(void) {
     input_event_t ev;
     int adx = 0, ady = 0;
     while (input_pop(&ev)) {
+        wm_last_input_tick = g_ticks;
+        if (wm_input_filter && wm_input_filter(&ev)) continue;
         if (ev.type == IN_MOUSE) {
             if (ev.buttons == wm_mouse_buttons && ev.dz == 0) {
                 adx += ev.dx;
@@ -1461,6 +1471,10 @@ void wm_run(void) {
             if (due && (int32_t)(due - g_ticks) <= 0) busy = true;
         }
         if (busy) __asm__ volatile("sti");
-        else __asm__ volatile("sti; hlt");
+        else {
+            uint32_t t0 = g_ticks;
+            __asm__ volatile("sti; hlt");
+            wm_stat_idle_ms += g_ticks - t0;
+        }
     }
 }
