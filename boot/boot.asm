@@ -27,7 +27,7 @@ section .bss
 align 16
 global kernel_stack_bottom, kernel_stack_top
 kernel_stack_bottom:
-    resb 256 * 1024             ; 256 KiB kernel stack (apps run on it too)
+    resb 1024 * 1024            ; 1 MiB kernel stack (apps run on it too)
 kernel_stack_top:
 
 section .text.entry

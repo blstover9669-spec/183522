@@ -69,6 +69,9 @@ void pic_eoi(int irq);
 void pit_init(uint32_t hz);
 void fpu_init(void);
 void cpu_detect(void);
+void paging_init(void);
+void stack_guard_init(void);
+void stack_guard_check(void);
 void isr_dump_regs(regs_t *r);
 
 extern volatile uint32_t g_ticks;     /* milliseconds since PIT start */

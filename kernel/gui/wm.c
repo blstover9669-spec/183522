@@ -1437,6 +1437,7 @@ void wm_init(void) {
 void wm_run(void) {
     klog("wm: entering main loop");
     for (;;) {
+        stack_guard_check();
         process_input();
         timers_run();
         apply_pending_resize(false);

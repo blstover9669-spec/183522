@@ -42,6 +42,7 @@ static void parse_resolution(int *w, int *h) {
 }
 
 void kmain(uint32_t magic, uint32_t mbi) {
+    stack_guard_init();
     serial_init();
     serial_write("\n");
     klog("NovaOS %s kernel %s booting", NOVA_VERSION, NOVA_KERNEL_VERSION);
@@ -56,6 +57,8 @@ void kmain(uint32_t magic, uint32_t mbi) {
     cpu_detect();
     klog("cpu: %s (%s)", g_cpu_name, g_cpu_vendor);
     memory_init();
+    acpi_init();          /* reads the BIOS data area in page 0: before paging */
+    paging_init();
     pit_init(1000);
     speaker_init();
     __asm__ volatile("sti");
@@ -85,7 +88,6 @@ void kmain(uint32_t magic, uint32_t mbi) {
     __asm__ volatile("sti");
     splash_progress(25, "Reading the clock...");
     rtc_init();
-    acpi_init();
     srand(sys_time() ^ g_ticks);
     timers_init();
     run_initcalls(INIT_DRIVER);

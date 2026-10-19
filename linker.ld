@@ -36,6 +36,9 @@ SECTIONS
         KEEP(*(.ksyms))
     }
 
+    . = ALIGN(4K);
+    __ro_end = .;              /* [__kernel_start, __ro_end) is mapped read-only */
+
     .data ALIGN(4K) : {
         *(.data .data.*)
     }

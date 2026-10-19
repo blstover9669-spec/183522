@@ -175,7 +175,17 @@ void kpanic(const char *fmt, ...) {
 
 void panic_exception(regs_t *r, const char *name) {
     char msg[200];
-    snprintf(msg, sizeof msg, "CPU exception %u: %s at EIP=%08x", r->int_no, name, r->eip);
+    if (r->int_no == 14) {
+        uint32_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        const char *what = cr2 < 4096 ? "NULL pointer dereference"
+                         : (r->err_code & 1) && (r->err_code & 2) ? "write to read-only memory"
+                         : "invalid memory access";
+        snprintf(msg, sizeof msg, "Page fault: %s (%s address %08x) at EIP=%08x", what,
+                 (r->err_code & 2) ? "writing" : "reading", cr2, r->eip);
+    } else {
+        snprintf(msg, sizeof msg, "CPU exception %u: %s at EIP=%08x", r->int_no, name, r->eip);
+    }
     do_panic(msg, r);
     for (;;) {}
 }
