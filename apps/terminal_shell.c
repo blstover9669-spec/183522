@@ -1511,27 +1511,42 @@ static int cmd_hexdump(tctx_t *c, int argc, char **argv) {
     uint32_t start = MIN((uint32_t)skip, len);
     uint32_t end = MIN(len, start + (uint32_t)limit);
     bool tty = c->out->tty;
+    static const char hexd[] = "0123456789abcdef";
+    /* formatted by hand (no printf per byte): 190 KB dumps in a few tens of ms */
+    char *line = malloc(320);              /* worst case (all zero bytes, colour) is 251 */
+    if (!line) { free(data); return 1; }
     for (uint32_t off = start; off < end; off += 16) {
-        /* build the whole line, then write it once */
-        char line[256], ascii[20];
-        int o = snprintf(line, sizeof line, "%s%08x%s  ", tty ? T_GRAY : "", off, tty ? T_RESET : "");
+        int o = 0;
+        if (tty) { memcpy(line + o, T_GRAY, 5); o += 5; }
+        for (int sh = 28; sh >= 0; sh -= 4) line[o++] = hexd[(off >> sh) & 15];
+        if (tty) { memcpy(line + o, T_RESET, 4); o += 4; }
+        line[o++] = ' ';
+        line[o++] = ' ';
+        char ascii[17];
         int a = 0;
         for (int k = 0; k < 16; k++) {
             if (off + (uint32_t)k < end) {
                 unsigned char b = d[off + k];
-                if (tty && b == 0) o += snprintf(line + o, sizeof line - (size_t)o, T_GRAY "00" T_RESET " ");
-                else o += snprintf(line + o, sizeof line - (size_t)o, "%02x ", b);
+                if (tty && b == 0) { memcpy(line + o, T_GRAY "00" T_RESET, 11); o += 11; }
+                else { line[o++] = hexd[b >> 4]; line[o++] = hexd[b & 15]; }
+                line[o++] = ' ';
                 ascii[a++] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
             } else {
-                o += snprintf(line + o, sizeof line - (size_t)o, "   ");
+                line[o++] = ' '; line[o++] = ' '; line[o++] = ' ';
             }
             if (k == 7) line[o++] = ' ';
         }
-        ascii[a] = 0;
-        o += snprintf(line + o, sizeof line - (size_t)o, " %s|%s%s%s|%s\n", tty ? T_GRAY : "", tty ? T_CYAN : "",
-                      ascii, tty ? T_GRAY : "", tty ? T_RESET : "");
+        line[o++] = ' ';
+        if (tty) { memcpy(line + o, T_GRAY "|" T_CYAN, 11); o += 11; }
+        else line[o++] = '|';
+        memcpy(line + o, ascii, (size_t)a);
+        o += a;
+        if (tty) { memcpy(line + o, T_GRAY "|" T_RESET, 10); o += 10; }
+        else line[o++] = '|';
+        line[o++] = '\n';
         tc_write(c, line, o);
     }
+    free(line);
     if (end < len && !explicit_limit)
         tc_printf(c, "%s... %u more bytes (use -n %u to see everything)" T_RESET "\n", col(c, T_GRAY), len - end, len);
     else
@@ -2235,6 +2250,9 @@ static int cmd_which(tctx_t *c, int argc, char **argv) {
 
 static int cmd_sh(tctx_t *c, int argc, char **argv) {
     if (argc < 2) { tc_err(c, "usage: sh SCRIPT"); return 2; }
+    /* the script's commands are queued and run after this pipeline, so their
+       output cannot be piped or redirected */
+    if (!c->out->tty || c->has_in) { tc_err(c, "%s: scripts cannot be used in pipes or redirections", argv[0]); return 1; }
     uint32_t size;
     char *data = read_text(c, argv[0], argv[1], &size);
     if (!data) return 1;
