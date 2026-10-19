@@ -40,13 +40,21 @@ SECTIONS
     __ro_end = .;              /* [__kernel_start, __ro_end) is mapped read-only */
 
     .data ALIGN(4K) : {
+        __data_start = .;
         *(.data .data.*)
+        . = ALIGN(4);
+        __data_end = .;        /* the installer writes [__kernel_start, __data_end) to disk */
     }
 
     .bss ALIGN(4K) (NOLOAD) : {
         __bss_start = .;
         *(COMMON)
         *(.bss .bss.*)
+        /* pristine copy of .data taken by boot.asm before any C code runs */
+        . = ALIGN(16);
+        __data_snapshot = .;
+        . += SIZEOF(.data);
+        . = ALIGN(4);
         __bss_end = .;
     }
 

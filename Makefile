@@ -65,6 +65,16 @@ $(BUILD)/obj/%.asm.o: %.asm
 	@echo "  AS    $<"
 	@$(AS) $(ASFLAGS) $< -o $@
 
+# Disk boot loader (bootloader/*.asm, flat binaries) embedded into the kernel by
+# kernel/disk/blobs.asm so the installer can write it to a hard disk.
+$(BUILD)/bootloader/%.bin: bootloader/%.asm
+	@mkdir -p $(dir $@)
+	@echo "  AS    $<"
+	@$(AS) -f bin $< -o $@
+
+$(BUILD)/obj/kernel/disk/blobs.asm.o: $(BUILD)/bootloader/mbr.bin $(BUILD)/bootloader/stage2.bin
+$(BUILD)/obj/kernel/disk/blobs.asm.o: ASFLAGS += -I$(BUILD)/bootloader/
+
 # Two-pass link: kernel0.elf with an empty symbol table, then the final kernel with
 # the real one (the .ksyms section sits after all code, so no function moves).
 $(BUILD)/ksyms_stub.c: tools/gensyms.py
@@ -117,6 +127,11 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  'menuentry "NovaOS (safe graphics 800x600)" {' \
 	  '  set gfxpayload=800x600x32,800x600x24,auto' \
 	  '  multiboot /boot/kernel.elf res=800x600 $(CMDLINE)' \
+	  '  boot' \
+	  '}' \
+	  'menuentry "Boot from the first hard disk (installed NovaOS)" {' \
+	  '  set root=(hd0)' \
+	  '  chainloader +1' \
 	  '  boot' \
 	  '}' \
 	  'menuentry "Reboot" {' \
