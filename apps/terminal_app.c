@@ -947,7 +947,11 @@ static void sb_drag_to(term_t *t, int y) {
 }
 
 static void term_mouse(term_t *t, const event_t *ev) {
-    if (t->job.active && t->job.paint) return;
+    if (t->job.active && t->job.paint) {
+        /* a click ends an animation, like any key */
+        if (ev->type == EV_MOUSE_DOWN) term_job_stop(t, false);
+        return;
+    }
     int w = win_width(t->win);
     switch (ev->type) {
     case EV_MOUSE_DOWN:
