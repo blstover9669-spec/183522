@@ -108,6 +108,18 @@ void cmd_printf(cmd_writer_t *out, const char *fmt, ...) {
     kfree(big);
 }
 
+char *cmd_resolve_path(cmd_writer_t *out, const char *path, char *buf) {
+    const char *cwd = out && out->cwd && out->cwd[0] == '/' ? out->cwd : "/home/user";
+    char tmp[VFS_PATH_MAX];
+    if (!path || !*path) path = ".";
+    if (path[0] == '~' && (path[1] == 0 || path[1] == '/')) {
+        snprintf(tmp, sizeof tmp, "/home/user%s", path + 1);
+        path = tmp;
+    }
+    if (vfs_normalize(cwd, path, buf) != 0) strlcpy(buf, path, VFS_PATH_MAX);
+    return buf;
+}
+
 static void buffer_write(cmd_writer_t *w, const char *s, int n) {
     cmd_buffer_t *b = (cmd_buffer_t *)w;
     if (b->len + n + 1 > b->cap) {

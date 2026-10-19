@@ -111,6 +111,7 @@ void      taskbar_wallpaper_changed(void);
 void      startmenu_open(void);
 void      shell_autorun(void);
 bool      startmenu_just_closed(void);
+void      shell_note_launch(const app_desc_t *app, const char *arg);   /* kernel/shell/open.c */
 
 /* apps */
 void      app_icon_cache_clear(void);

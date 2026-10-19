@@ -65,6 +65,7 @@ bool app_launch(const app_desc_t *app, const char *arg) {
             }
     }
     klog("apps: launching %s%s%s", app->name, arg ? " " : "", arg ? arg : "");
+    shell_note_launch(app, arg);           /* recent items */
     const app_desc_t *saved = wm_current_app;
     wm_current_app = app;
     app->launch(arg);
@@ -92,6 +93,11 @@ static bool type_matches(const char *list, const char *ext) {
 }
 
 const app_desc_t *app_for_file(const char *path) {
+    /* file associations (user defaults, REGISTER_FILETYPE, descriptors) */
+    if (path && !vfs_is_dir(path)) {
+        const app_desc_t *a = assoc_default_app(path);
+        if (a) return a;
+    }
     const char *ext = vfs_extension(path);
     for (int i = 0; i < napps; i++)
         if (type_matches(apps[i]->file_types, ext)) return apps[i];

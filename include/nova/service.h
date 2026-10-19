@@ -118,6 +118,7 @@ struct cmd_writer {
     void (*write)(cmd_writer_t *w, const char *s, int n);
     void *ctx;
     int flags;                 /* CMD_ANSI: the output understands ANSI colours */
+    const char *cwd;           /* directory for relative paths (NULL = /home/user) */
 };
 #define CMD_ANSI 0x1
 
@@ -145,6 +146,9 @@ int  command_run_line(const char *line, cmd_writer_t *out);
 void cmd_write(cmd_writer_t *out, const char *s, int n);
 void cmd_puts(cmd_writer_t *out, const char *s);
 void cmd_printf(cmd_writer_t *out, const char *fmt, ...) PRINTF_LIKE(2, 3);
+/* Resolve a command argument to an absolute path: "~" = /home/user, relative
+   paths start at out->cwd. buf has VFS_PATH_MAX bytes. Returns buf. */
+char *cmd_resolve_path(cmd_writer_t *out, const char *path, char *buf);
 /* A writer that collects output into a growing heap string (free(*buf) after). */
 typedef struct { cmd_writer_t w; char *buf; int len, cap; } cmd_buffer_t;
 void cmd_buffer_init(cmd_buffer_t *b);

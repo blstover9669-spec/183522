@@ -19,13 +19,13 @@ static void fmt_uptime(uint32_t ms, char *buf, int n) {
 }
 
 static void list_services(cmd_writer_t *out) {
-    cmd_printf(out, "%s%-10s %-9s %-9s %-8s %s%s\n", C_BOLD(out), "SERVICE", "STATE", "AUTOSTART", "UPTIME", "DESCRIPTION", C_RESET(out));
+    cmd_printf(out, "%s%-12s %-9s %-9s %-8s %s%s\n", C_BOLD(out), "SERVICE", "STATE", "AUTOSTART", "UPTIME", "DESCRIPTION", C_RESET(out));
     for (int i = 0; i < service_count(); i++) {
         service_status_t st;
         service_status_at(i, &st);
         char up[16] = "-";
         if (st.state == SVC_RUNNING) fmt_uptime(st.uptime_ms, up, sizeof up);
-        cmd_printf(out, "%-10s %s%-9s%s %-9s %-8s %s\n", st.name, state_color(out, st.state), service_state_name(st.state),
+        cmd_printf(out, "%-12s %s%-9s%s %-9s %-8s %s\n", st.name, state_color(out, st.state), service_state_name(st.state),
                    C_RESET(out), st.autostart ? "yes" : "no", up, st.description);
     }
 }

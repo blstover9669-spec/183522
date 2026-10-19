@@ -20,7 +20,9 @@ void shell_recent_add_app(const char *app_name);
 /* The Open With dialog's capable-app list (assoc.c). */
 bool assoc_app_handles(const app_desc_t *a, const char *path);
 
-/* Command output window used by the Run dialog (run.c). */
+/* Command output window used by the Run dialog (shell_dialogs.c). */
 void shell_show_output(const char *title, const char *text);
+/* The hidden "Run" app (run.c): owner of the Run dialog and output windows. */
+const app_desc_t *shell_run_app(void);
 
 #endif
