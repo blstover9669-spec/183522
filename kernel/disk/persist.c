@@ -84,7 +84,7 @@ static struct {
     bool saving, again;
     int timer;
     uint8_t *buf;
-    uint32_t len, nsec, done, gen, crc;
+    uint32_t len, nsec, done, gen, crc, started;
     int slot;
 } P = { .disk = -1, .newest = -1 };
 
@@ -310,14 +310,17 @@ static void async_tick(void *ctx) {
         uint32_t n = MIN(SLICE_SECTORS, P.nsec - P.done);
         r = disk_write(P.disk, slot_lba(P.slot) + 1 + P.done, n, P.buf + P.done * 512);
         if (r) break;
+        /* checksum computed slice by slice too, so no single step takes long */
+        uint32_t off = P.done * 512, cl = MIN(n * 512, P.len - MIN(off, P.len));
+        P.crc = crc32_update(P.crc, P.buf + off, cl);
         P.done += n;
     }
     if (r == DISK_OK && P.done < P.nsec) return;     /* more next tick */
-    uint32_t len = P.len, gen = P.gen, crc = P.crc;
+    uint32_t len = P.len, gen = P.gen, crc = P.crc, started = P.started;
     if (r == DISK_OK) r = commit(P.slot, len, crc);
     cancel_async();
     if (r == DISK_OK) P.saved_gen = gen;
-    report(r, len, t0, "background");
+    report(r, len, started, "background");
     if (r == DISK_OK && P.again && dirty()) { P.again = false; persist_save_async(); }
 }
 
@@ -328,10 +331,11 @@ void persist_save_async(void) {
     P.again = false;
     int r = serialize(&P.buf, &P.len, &P.gen);
     if (r) { report(r, 0, g_ticks, "background"); return; }
-    P.crc = crc32_buf(P.buf, P.len);
+    P.crc = 0;
     P.nsec = (P.len + 511) / 512;
     P.done = 0;
     P.slot = P.newest == 0 ? 1 : 0;
+    P.started = g_ticks;
     P.saving = true;
     P.timer = timer_add(5, async_tick, NULL, true);
     if (!P.timer) { cancel_async(); persist_save(); }
