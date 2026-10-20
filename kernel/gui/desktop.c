@@ -116,7 +116,8 @@ static void desktop_paint(window_t *win, const event_t *ev) {
     if (g_wallpaper) gfx_blit_rect(s, pr.x, pr.y, g_wallpaper, pr.x, pr.y, pr.w, pr.h);
     for (int i = 0; i < nicons; i++) {
         dicon_t *d = &icons[i];
-        if (!rect_overlaps(d->r, pr)) continue;
+        /* a two-line label's descenders reach a few pixels into the cell below */
+        if (!rect_overlaps(rect_make(d->r.x, d->r.y, d->r.w, d->r.h + 16), pr)) continue;
         bool sel = i == selected, hov = i == hovered;
         if (sel || hov) {
             uint32_t c = sel ? color_alpha(theme_get()->accent, 120) : RGBA(255, 255, 255, 40);
@@ -141,7 +142,7 @@ static int icon_at(int x, int y) {
 }
 
 static void invalidate_icon(int i) {
-    if (i >= 0 && i < nicons) win_invalidate_rect(g_desktop_win, icons[i].r.x, icons[i].r.y, icons[i].r.w, icons[i].r.h);
+    if (i >= 0 && i < nicons) win_invalidate_rect(g_desktop_win, icons[i].r.x, icons[i].r.y, icons[i].r.w, icons[i].r.h + 16);
 }
 
 static void open_icon(int i) {
