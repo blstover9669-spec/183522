@@ -329,7 +329,7 @@ static void paint_confirm(inst_t *in, surface_t *s, const theme_t *t) {
     char sys[24];
     size_str(install_system_bytes(), sys, sizeof sys);
     rows[nr].k = "System";
-    snprintf(rows[nr++].v, sizeof rows[0].v, "%s with its boot loader (%s)", sys_version(), sys);
+    snprintf(rows[nr++].v, sizeof rows[0].v, "%s + boot loader (%s)", sys_version(), sys);
     rows[nr].k = "Your files";
     if (ui_get_value(in->copy)) {
         char fs[24];
