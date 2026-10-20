@@ -225,6 +225,7 @@ int  term_cmd_calc(tctx_t *c, int argc, char **argv);
 
 /* ---- terminal_fun.c --------------------------------------------------------- */
 int term_cmd_neofetch(tctx_t *c, int argc, char **argv);
+void term_print_logo(term_t *t);
 int term_cmd_cowsay(tctx_t *c, int argc, char **argv);
 int term_cmd_fortune(tctx_t *c, int argc, char **argv);
 int term_cmd_sl(tctx_t *c, int argc, char **argv);

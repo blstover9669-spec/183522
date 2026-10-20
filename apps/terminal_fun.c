@@ -33,6 +33,11 @@ static const char *const s_logo_color[] = {
 };
 #define LOGO_W 20
 
+/* The big coloured "N" (logo rows up to the wordmark), used by the startup banner. */
+void term_print_logo(term_t *t) {
+    for (int r = 0; r < 9; r++) term_printf(t, "%s%s" T_RESET "\n", s_logo_color[r], s_logo[r]);
+}
+
 static void trim_copy(const char *s, char *out, int size) {
     while (*s == ' ') s++;
     strlcpy(out, s, (size_t)size);

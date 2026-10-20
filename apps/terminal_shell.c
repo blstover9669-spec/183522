@@ -719,21 +719,17 @@ void term_shell_prompt(term_t *t) {
     } else {
         char p[VFS_PATH_MAX];
         pretty_path(t->cwd, p, sizeof p);
-        term_printf(t, T_RESET "\x1b[1;92m%s@%s" T_RESET ":\x1b[1;94m%s" T_RESET "%s$ " T_RESET,
-                    TERM_USER, TERM_HOST, p, t->status ? T_BRED : "");
+        term_printf(t, T_RESET "\x1b[1;94m%s" T_RESET "%s%%>" T_RESET " ",
+                    p, t->status ? T_BRED : "\x1b[1;96m");
         update_title(t);
     }
     t->input_on = true;
 }
 
 void term_shell_banner(term_t *t) {
-    datetime_t dt;
-    sys_datetime(&dt);
-    term_printf(t, "\x1b[1;94m \x99 " T_RESET T_BOLD "%s" T_RESET T_GRAY "  \xB7  " TERM_SHELL_NAME " " TERM_SHELL_VER
-                "  \xB7  %s %d %s, %02d:%02d" T_RESET "\n",
-                sys_version(), sys_weekday_name(dt.weekday), dt.day, sys_month_name(dt.month), dt.hour, dt.minute);
-    term_puts(t, T_GRAY "   Type " T_RESET T_BOLD "help" T_RESET T_GRAY " for commands, " T_RESET T_BOLD "apps" T_RESET
-                 T_GRAY " for applications, " T_RESET T_BOLD "neofetch" T_RESET T_GRAY " for system info." T_RESET "\n\n");
+    term_puts(t, T_BOLD "NOVA CMD / V1.0" T_RESET "\n\n");
+    term_print_logo(t);
+    term_puts(t, "\n");
 }
 
 static void calc_line(term_t *t, const char *line) {

@@ -6,7 +6,8 @@
 ;   2. load the flat kernel image (header.kernel_lba / kernel_sectors) through a
 ;      bounce buffer at 1000:0000 and copy it above 1 MiB in unreal mode
 ;   3. collect the E820 memory map, INT 12h / E801 memory sizes
-;   4. pick a VBE linear framebuffer mode: 1024x768x32, 800x600x32, 1024x768x24
+;   4. pick a VBE linear framebuffer mode: the size given by "res=WxH" on the
+;      command line if any, then 1024x768x32, 800x600x32, 1024x768x24
 ;      (4F00 / 4F01 / 4F02); if none works the kernel falls back to BGA
 ;   5. build a Multiboot 1 information structure (mem, boot device, cmdline,
 ;      mmap, loader name, VBE + framebuffer fields)
@@ -343,6 +344,11 @@ setup_video:
     jne .fail
     cmp dword [VBE_INFO], 'VESA'
     jne .fail
+    ; "res=WxH" on the command line (GRUB's safe graphics entry, carried over by
+    ; the installer): try that size first, then the usual list
+    call parse_res
+    mov si, wanted_res
+    jnc .try_next_wanted
     mov si, wanted
 .try_next_wanted:
     mov ax, [si]
@@ -373,6 +379,77 @@ setup_video:
 .fail:
     mov si, msg_novbe
     call print
+    ret
+
+; parse_res: look for "res=WxH" (640..4096 x 480..4096) in the command line of the
+; install header. CF clear: wanted_res holds W x H x 32 and W x H x 24.
+parse_res:
+    mov si, HDR_CMDLINE
+.scan:
+    cmp byte [si], 0
+    je .none
+    cmp dword [si], 'res='
+    jne .advance
+    cmp si, HDR_CMDLINE             ; start of an option: first or after a space
+    je .found
+    cmp byte [si - 1], ' '
+    je .found
+.advance:
+    inc si
+    cmp si, HDR_CMDLINE + 252
+    jb .scan
+.none:
+    stc
+    ret
+.found:
+    add si, 4
+    call parse_dec
+    jc .none
+    mov bx, ax
+    mov al, [si]
+    or al, 0x20                     ; 'x' or 'X'
+    cmp al, 'x'
+    jne .none
+    inc si
+    call parse_dec
+    jc .none
+    cmp bx, 640
+    jb .none
+    cmp bx, 4096
+    ja .none
+    cmp ax, 480
+    jb .none
+    cmp ax, 4096
+    ja .none
+    mov [wanted_res + 0], bx
+    mov [wanted_res + 2], ax
+    mov [wanted_res + 6], bx
+    mov [wanted_res + 8], ax
+    clc
+    ret
+
+; parse_dec: decimal number at DS:SI (at most 5 digits) -> AX, SI past it; CF if none
+parse_dec:
+    xor ax, ax
+    xor cx, cx
+.digit:
+    movzx dx, byte [si]
+    sub dx, '0'
+    cmp dx, 9
+    ja .end
+    imul ax, ax, 10
+    add ax, dx
+    inc si
+    inc cx
+    cmp cx, 5
+    jb .digit
+.end:
+    test cx, cx
+    jz .bad
+    clc
+    ret
+.bad:
+    stc
     ret
 
 ; find_mode: search the VBE mode list for want_w x want_h x want_bpp with a usable
@@ -550,7 +627,13 @@ have_fb:    db 0
 dots:       db 0
 boot_drive: db 0x80
 
-; preferred modes, in order (width, height, bpp)
+; preferred modes, in order (width, height, bpp); wanted_res is filled in from
+; "res=WxH" and runs on into the default list
+wanted_res:
+    dw 0, 0
+    db 32, 0
+    dw 0, 0
+    db 24, 0
 wanted:
     dw 1024, 768
     db 32, 0

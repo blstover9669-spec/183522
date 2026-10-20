@@ -144,6 +144,8 @@ static void game_over(snake_t *g, bool won) {
     g->state = ST_OVER;
     g->won = won;
     g->acc = g->interval;          /* render the final position */
+    int stored = arcade_hiscore_get("snake");   /* another Snake window may have set a higher one */
+    if (stored > g->best) g->best = stored;
     if (g->score > g->best) {
         g->best = g->score;
         g->new_best = true;
