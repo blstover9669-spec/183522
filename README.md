@@ -13,8 +13,21 @@ your files across restarts.
 * Double-buffered compositor with dirty rectangles, anti-aliased fonts
   (Inter + DejaVu Sans Mono), rounded windows and soft drop shadows
 * Window manager: move, resize, maximize, minimize, snap to screen edges,
-  Alt+Tab, z-order, focus; taskbar with live clock + calendar, searchable
-  Start menu, desktop icons, toast notifications, boot splash
+  Alt+Tab, z-order, focus; taskbar with pinned apps, live clock + calendar,
+  Start menu with recent items and app / file / command search, desktop
+  icons for apps and files, boot splash
+* Background services run by a service manager (autostart, restart on
+  failure, per-service logs, system log in /system/log/syslog):
+  notifications (stacking toasts), screensaver (starfield + aurora), alarms,
+  autosave, file indexer, system monitor - managed in the **Services** app
+  or with `service` / `systemctl`
+* Opening things: file associations with user-changeable defaults, Open With
+  and Properties dialogs, desktop context menus (Open / Open With / Rename /
+  Delete / Properties, New Folder / New Text File), Run dialog (Win+R) with
+  autocomplete, taskbar pinning, a registry of shell commands any file can
+  extend (`REGISTER_COMMAND`)
+* Hand-drawn system icon library (folders, file types, devices, status
+  icons) tuned for 16, 32 and 48 px - no image files, no emoji
 * Widget toolkit: buttons, labels, text boxes, checkboxes, radio buttons,
   sliders, progress bars, list boxes, scroll bars, dropdowns, tabs, menu bars,
   context menus, message/input/file dialogs
@@ -152,8 +165,16 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
   Windows key or Ctrl+Esc) and type to search.
 * Drag windows by the title bar; drag to the top edge to maximize or to the
   left/right edge to snap. Alt+Tab switches windows, Alt+F4 closes one.
-* Right-click the desktop for wallpapers and dark mode. The clock opens a
-  calendar; the speaker icon mutes the PC speaker.
+* Right-click the desktop for new folders / text files, wallpapers and dark
+  mode; right-click a file icon to open it with another app, rename, delete
+  it or see its properties. The clock opens a calendar; the speaker icon
+  mutes the PC speaker.
+* Win+R (or *Run...* in the Start menu) opens an app, file, folder or command
+  by name. Right-click a Start menu entry or a taskbar button to pin the app
+  to the taskbar.
+* Background services (notifications, screensaver, alarms, ...) are listed in
+  the **Services** app (System); `service list`, `notify`, `alarm +5 Tea`,
+  `logs` and `assoc` work in the Terminal and the Run dialog.
 * PrintScreen saves a screenshot to `/home/user/Pictures`.
 
 ## Repository layout
@@ -166,7 +187,10 @@ kernel/      arch (GDT/IDT/PIC/PIT/FPU), core (boot info, heap, log, panic, powe
              disk (installer back end, file persistence),
              gfx (surfaces, primitives, text, images, generated fonts),
              gui (window manager, compositor, desktop, taskbar, Start menu,
-             widgets, dialogs, theme), fs (VFS), lib (libc/libm)
+             widgets, dialogs, theme, icon library), fs (VFS), lib (libc/libm),
+             services (service manager, syslog, command registry, built-in
+             daemons), shell (file associations, shell_open, Open With /
+             Properties / Run dialogs, pins, recent items)
 apps/        applications (each file registers itself with REGISTER_APP)
 include/     public API (nova.h and nova/*.h) and the libc headers
 tools/       shot.py (headless QEMU test driver), genfont.py, gensyms.py

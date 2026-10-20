@@ -660,6 +660,13 @@ window_t *ui_popup_menu(window_t *win, int x, int y, const char *items, ui_menu_
     return ui_popup_menu_at(win, c.x + x, c.y + y, items, cb, ctx);
 }
 
+/* A context menu over another popup (e.g. the Start menu) that leaves it open. */
+window_t *ui_popup_menu_nested(window_t *owner, int sx, int sy, const char *items, ui_menu_cb cb, void *ctx) {
+    for (window_t *w = wm_top; w; w = w->below)
+        if ((w->flags & WIN_POPUP) && w != owner && !w->closing && !strcmp(w->title, "menu")) win_close(w);
+    return popup_menu_create(owner, sx, sy, items, cb, ctx, NULL, 0, -1);
+}
+
 static void menubar_open(widget_t *mb, int idx) {
     if (mb->popup && win_is_valid(mb->popup)) win_close(mb->popup);
     mb->popup = NULL;

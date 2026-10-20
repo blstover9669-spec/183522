@@ -96,6 +96,7 @@ bool      ui_dispatch(window_t *w, const event_t *ev);   /* true if consumed */
 void      ui_paint_all(window_t *w);
 void      ui_destroy_all(window_t *w);
 bool      ui_wants_tab(window_t *w);
+window_t *ui_popup_menu_nested(window_t *owner, int sx, int sy, const char *items, ui_menu_cb cb, void *ctx);
 
 /* cursor (cursor.c) */
 void      cursor_draw(surface_t *dst, int x, int y, int shape);
@@ -111,6 +112,7 @@ void      taskbar_wallpaper_changed(void);
 void      startmenu_open(void);
 void      shell_autorun(void);
 bool      startmenu_just_closed(void);
+void      shell_note_launch(const app_desc_t *app, const char *arg);   /* kernel/shell/open.c */
 
 /* apps */
 void      app_icon_cache_clear(void);

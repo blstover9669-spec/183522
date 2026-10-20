@@ -115,6 +115,22 @@ and prefer the keyboard (`key:meta_l` opens the Start menu): the pointer
 starts again at the top-left corner but shot.py still remembers the old
 position.
 
+### Services, notifications, Run dialog
+
+Every syslog line is mirrored to serial as `[tag] message`, so services can
+be waited for with `serial:`: `services: N registered, M started`,
+`[notifyd] Title: body` (every notification), `[screensaver] activated after
+N s idle` / `dismissed`, `[alarmd] alarm N: message`, `[indexer] indexed N
+files and folders`. `screensaver=SECONDS` shortens the idle timeout.
+`key:meta_l-r` opens the Run dialog, which also runs registered commands:
+
+```sh
+tools/shot.py --kernel build/kernel.elf --cmdline "screensaver=4" --out shots-svc ready \
+    key:meta_l-r wait:0.3 "type:notify Mail 3 new\n" wait:0.8 shot:toast \
+    "serial:[screensaver] activated" wait:2 shot:saver move:500,400 wait:0.5 shot:back
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Services" ready wait:1 shot:services
+```
+
 ### Finding coordinates
 
 * Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about

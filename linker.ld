@@ -30,6 +30,27 @@ SECTIONS
         __initcalls_end = .;
     }
 
+    /* Background services: REGISTER_SERVICE(...). */
+    .services ALIGN(4) : {
+        __services_start = .;
+        KEEP(*(.services))
+        __services_end = .;
+    }
+
+    /* Shell commands: REGISTER_COMMAND(name, help, fn). */
+    .commands ALIGN(4) : {
+        __commands_start = .;
+        KEEP(*(.commands))
+        __commands_end = .;
+    }
+
+    /* File type associations: REGISTER_FILETYPE(ext, app, description, icon). */
+    .filetypes ALIGN(4) : {
+        __filetypes_start = .;
+        KEEP(*(.filetypes))
+        __filetypes_end = .;
+    }
+
     /* Kernel symbol table for stack traces (tools/gensyms.py). Kept after all code
        and read-only data so generating it does not move any function. */
     .ksyms ALIGN(4) : {

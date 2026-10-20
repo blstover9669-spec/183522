@@ -45,7 +45,21 @@ static void add_icon(const app_desc_t *app, const char *name, bool is_dir) {
     strlcpy(d->name, name, sizeof d->name);
 }
 
+static uint32_t listing_sig;
+
+static uint32_t listing_signature(void) {
+    vfs_dirent_t ents[64];
+    int n = vfs_list(DESKTOP_DIR, ents, 64);
+    uint32_t h = 2166136261u ^ (uint32_t)n;
+    for (int i = 0; i < n && i < 64; i++) {
+        for (const char *p = ents[i].name; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+        h = (h ^ (ents[i].is_dir ? 0x5Au : 0xA5u)) * 16777619u;
+    }
+    return h;
+}
+
 static void rebuild(void) {
+    listing_sig = listing_signature();
     nicons = 0;
     for (int i = 0; i < app_count(); i++) {
         const app_desc_t *a = app_get(i);
@@ -102,7 +116,8 @@ static void desktop_paint(window_t *win, const event_t *ev) {
     if (g_wallpaper) gfx_blit_rect(s, pr.x, pr.y, g_wallpaper, pr.x, pr.y, pr.w, pr.h);
     for (int i = 0; i < nicons; i++) {
         dicon_t *d = &icons[i];
-        if (!rect_overlaps(d->r, pr)) continue;
+        /* a two-line label's descenders reach a few pixels into the cell below */
+        if (!rect_overlaps(rect_make(d->r.x, d->r.y, d->r.w, d->r.h + 16), pr)) continue;
         bool sel = i == selected, hov = i == hovered;
         if (sel || hov) {
             uint32_t c = sel ? color_alpha(theme_get()->accent, 120) : RGBA(255, 255, 255, 40);
@@ -111,7 +126,11 @@ static void desktop_paint(window_t *win, const event_t *ev) {
         }
         int ix = d->r.x + (d->r.w - ICON_SZ) / 2, iy = d->r.y + 8;
         if (d->app) app_draw_icon(s, d->app, ix, iy, ICON_SZ);
-        else ui_draw_glyph(s, d->is_dir ? UI_GLYPH_FOLDER : UI_GLYPH_FILE, ix + 2, iy + 2, ICON_SZ - 4, 0);
+        else {
+            char path[VFS_PATH_MAX];
+            vfs_join(DESKTOP_DIR, d->name, path);
+            icon_draw(icon_for_path(path), s, ix, iy, ICON_SZ);
+        }
         draw_label(s, d->r, d->name, sel);
     }
 }
@@ -123,7 +142,7 @@ static int icon_at(int x, int y) {
 }
 
 static void invalidate_icon(int i) {
-    if (i >= 0 && i < nicons) win_invalidate_rect(g_desktop_win, icons[i].r.x, icons[i].r.y, icons[i].r.w, icons[i].r.h);
+    if (i >= 0 && i < nicons) win_invalidate_rect(g_desktop_win, icons[i].r.x, icons[i].r.y, icons[i].r.w, icons[i].r.h + 16);
 }
 
 static void open_icon(int i) {
@@ -132,29 +151,124 @@ static void open_icon(int i) {
     if (d->app) { app_launch(d->app, NULL); return; }
     char path[VFS_PATH_MAX];
     vfs_join(DESKTOP_DIR, d->name, path);
-    if (d->is_dir) {
-        if (!app_launch_by_name("Files", path) && !app_launch_by_name("File Manager", path))
-            ui_message_box(NULL, "Desktop", "No file manager is installed.", MB_OK | MB_ICON_INFO, NULL, NULL);
-    } else if (!app_open_file(path)) {
+    if (!shell_open(path) && !vfs_exists(path)) {
         char msg[200];
-        snprintf(msg, sizeof msg, "There is no app associated with \"%s\".", d->name);
-        ui_message_box(NULL, "Open file", msg, MB_OK | MB_ICON_WARNING, NULL, NULL);
+        snprintf(msg, sizeof msg, "\"%s\" no longer exists.", d->name);
+        ui_message_box(NULL, "Open", msg, MB_OK | MB_ICON_WARNING, NULL, NULL);
+        desktop_redraw();
     }
 }
 
 static void about_ok(int r, void *c) { (void)r; (void)c; }
 
+/* the icon a context menu / dialog acts on (by name: the icon list may be rebuilt meanwhile) */
+static char target_name[VFS_NAME_MAX];
+static const app_desc_t *target_app;
+
+static void select_by_name(const char *name) {
+    for (int i = 0; i < nicons; i++)
+        if (!icons[i].app && !strcmp(icons[i].name, name)) { invalidate_icon(selected); selected = i; invalidate_icon(i); return; }
+}
+
+static void error_box(const char *title, const char *what, int err) {
+    char msg[200];
+    snprintf(msg, sizeof msg, "%s: %s.", what, vfs_strerror(err));
+    ui_message_box(NULL, title, msg, MB_OK | MB_ICON_ERROR, NULL, NULL);
+}
+
+static void unique_name(const char *base, const char *ext, char *out, size_t n) {
+    char path[VFS_PATH_MAX];
+    for (int k = 1; k < 1000; k++) {
+        if (k == 1) snprintf(out, n, "%s%s", base, ext);
+        else snprintf(out, n, "%s %d%s", base, k, ext);
+        vfs_join(DESKTOP_DIR, out, path);
+        if (!vfs_exists(path)) return;
+    }
+}
+
+static bool valid_name(const char *name) {
+    if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) {
+        ui_message_box(NULL, "Desktop", "That name is not valid. Names cannot be empty or contain '/'.", MB_OK | MB_ICON_WARNING, NULL, NULL);
+        return false;
+    }
+    return true;
+}
+
+static void new_item_done(const char *text, void *ctx) {
+    bool folder = (intptr_t)ctx == 1;
+    if (!text || !valid_name(text)) return;
+    char path[VFS_PATH_MAX];
+    vfs_join(DESKTOP_DIR, text, path);
+    if (vfs_exists(path)) { error_box(folder ? "New Folder" : "New Text File", text, VFS_EEXIST); return; }
+    int r = folder ? vfs_mkdir(path) : vfs_create(path);
+    if (r < 0) { error_box(folder ? "New Folder" : "New Text File", text, r); return; }
+    desktop_redraw();
+    select_by_name(text);
+}
+
+static void new_item(bool folder) {
+    char name[VFS_NAME_MAX];
+    unique_name(folder ? "New folder" : "New text file", folder ? "" : ".txt", name, sizeof name);
+    ui_input_box(NULL, folder ? "New Folder" : "New Text File", folder ? "Name of the new folder:" : "Name of the new text file:",
+                 name, new_item_done, (void *)(intptr_t)(folder ? 1 : 0));
+}
+
+static void rename_done(const char *text, void *ctx) {
+    (void)ctx;
+    if (!text || !strcmp(text, target_name) || !valid_name(text)) return;
+    char from[VFS_PATH_MAX], to[VFS_PATH_MAX];
+    vfs_join(DESKTOP_DIR, target_name, from);
+    vfs_join(DESKTOP_DIR, text, to);
+    if (vfs_exists(to)) { error_box("Rename", text, VFS_EEXIST); return; }
+    int r = vfs_rename(from, to);
+    if (r < 0) { error_box("Rename", target_name, r); return; }
+    desktop_redraw();
+    select_by_name(text);
+}
+
+static void delete_done(int result, void *ctx) {
+    (void)ctx;
+    if (result != MB_RESULT_YES) return;
+    char path[VFS_PATH_MAX];
+    vfs_join(DESKTOP_DIR, target_name, path);
+    int r = vfs_remove_recursive(path);
+    if (r < 0) error_box("Delete", target_name, r);
+    selected = -1;
+    desktop_redraw();
+}
+
+static void file_action(int action) {
+    char path[VFS_PATH_MAX];
+    vfs_join(DESKTOP_DIR, target_name, path);
+    switch (action) {
+    case 0: shell_open(path); break;
+    case 1: shell_open_with_dialog(path); break;
+    case 3: ui_input_box(NULL, "Rename", "New name:", target_name, rename_done, NULL); break;
+    case 4: {
+        char msg[200];
+        snprintf(msg, sizeof msg, "Delete \"%s\"%s? This cannot be undone.", target_name,
+                 vfs_is_dir(path) ? " and everything in it" : "");
+        ui_message_box(NULL, "Delete", msg, MB_YESNO | MB_ICON_WARNING, delete_done, NULL);
+        break;
+    }
+    case 6: shell_properties(path); break;
+    default: break;
+    }
+}
+
 static void desktop_menu(int item, void *ctx) {
     (void)ctx;
     switch (item) {
-    case 0: rebuild(); win_invalidate(g_desktop_win); break;
-    case 1: theme_set_wallpaper((theme_get()->wallpaper + 1) % (theme_wallpaper_count())); break;
-    case 2: theme_set_dark(!theme_get()->dark); break;
-    case 3:
+    case 0: new_item(true); break;
+    case 1: new_item(false); break;
+    case 3: rebuild(); win_invalidate(g_desktop_win); break;
+    case 5: theme_set_wallpaper((theme_get()->wallpaper + 1) % (theme_wallpaper_count())); break;
+    case 6: theme_set_dark(!theme_get()->dark); break;
+    case 7:
         if (!app_launch_by_name("Settings", NULL))
             ui_message_box(NULL, "Settings", "The Settings app is not installed.", MB_OK, about_ok, NULL);
         break;
-    case 5:
+    case 9:
         if (!app_launch_by_name("About", NULL))
             ui_message_box(NULL, "About NovaOS", sys_version(), MB_OK, about_ok, NULL);
         break;
@@ -163,8 +277,23 @@ static void desktop_menu(int item, void *ctx) {
 }
 
 static void icon_menu(int item, void *ctx) {
-    int i = (int)(intptr_t)ctx;
-    if (item == 0) open_icon(i);
+    (void)ctx;
+    if (target_app) {
+        if (item == 0) app_launch(target_app, NULL);
+        else if (item == 1) shell_set_pinned(target_app->name, !shell_is_pinned(target_app->name));
+        return;
+    }
+    file_action(item);
+}
+
+static void show_icon_menu(window_t *win, int i, int x, int y) {
+    dicon_t *d = &icons[i];
+    strlcpy(target_name, d->name, sizeof target_name);
+    target_app = d->app;
+    if (d->app)
+        ui_popup_menu(win, x, y, shell_is_pinned(d->app->name) ? "Open|Unpin from taskbar" : "Open|Pin to taskbar", icon_menu, NULL);
+    else
+        ui_popup_menu(win, x, y, "Open|Open With...|-|Rename...|Delete|-|Properties", icon_menu, NULL);
 }
 
 static void desktop_handler(window_t *win, const event_t *ev) {
@@ -184,8 +313,9 @@ static void desktop_handler(window_t *win, const event_t *ev) {
         int h = icon_at(ev->x, ev->y);
         if (h != selected) { invalidate_icon(selected); selected = h; invalidate_icon(selected); }
         if (ev->button == MOUSE_RIGHT) {
-            if (h >= 0) ui_popup_menu(win, ev->x, ev->y, "Open", icon_menu, (void *)(intptr_t)h);
-            else ui_popup_menu(win, ev->x, ev->y, "Refresh|Next wallpaper|Toggle dark mode|Settings...|-|About NovaOS", desktop_menu, NULL);
+            if (h >= 0) show_icon_menu(win, h, ev->x, ev->y);
+            else ui_popup_menu(win, ev->x, ev->y, "New Folder|New Text File|-|Refresh|-|Next wallpaper|Toggle dark mode|Settings...|-|About NovaOS",
+                               desktop_menu, NULL);
         }
         break;
     }
@@ -200,6 +330,16 @@ static void desktop_handler(window_t *win, const event_t *ev) {
         else if (ev->key == KEY_RIGHT) s = s < 0 ? 0 : s + rows;
         else if (ev->key == KEY_LEFT) s = s < 0 ? 0 : s - rows;
         else if (ev->key == KEY_ENTER) { open_icon(selected); break; }
+        else if ((ev->key == KEY_DELETE || ev->key == KEY_F2) && selected >= 0 && selected < nicons && !icons[selected].app) {
+            strlcpy(target_name, icons[selected].name, sizeof target_name);
+            target_app = NULL;
+            file_action(ev->key == KEY_DELETE ? 4 : 3);
+            break;
+        }
+        else if (ev->key == KEY_MENU && selected >= 0 && selected < nicons) {
+            show_icon_menu(win, selected, icons[selected].r.x + 44, icons[selected].r.y + 44);
+            break;
+        }
         else break;
         s = CLAMP(s, 0, nicons - 1);
         invalidate_icon(selected);
@@ -209,10 +349,10 @@ static void desktop_handler(window_t *win, const event_t *ev) {
     }
     case EV_TIMER:
         if (vfs_generation() != vfs_gen_seen) {
-            int before = nicons;
-            rebuild();
-            (void)before;
-            win_invalidate(win);
+            /* repaint only when ~/Desktop itself changed (not on every log/config write) */
+            uint32_t sig = listing_signature();
+            vfs_gen_seen = vfs_generation();
+            if (sig != listing_sig) { rebuild(); win_invalidate(win); }
         }
         break;
     default:
