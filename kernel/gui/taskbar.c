@@ -10,11 +10,18 @@ static surface_t *tb_bg;         /* blurred + tinted wallpaper strip */
 #define TRAY_W 34
 #define SHOWDESK_W 8
 
+#define PIN_W 40
+#define MAX_PINNED 16
+#define HIT_PIN(i) (-10 - (i))     /* hit codes of pinned app buttons */
+
 typedef struct { window_t *win; rect_t r; } tbtn_t;
 static tbtn_t btns[64];
 static int nbtns;
-static int hover_btn = -1;       /* -1 none, -2 start, -3 clock, -4 sound, -5 show desktop, >=0 task */
-static int pressed_btn = -100;
+typedef struct { const app_desc_t *app; rect_t r; } tpin_t;
+static tpin_t pinbtns[MAX_PINNED];
+static int npinbtns;
+static int hover_btn = -1;       /* -1 none, -2 start, -3 clock, -4 sound, -5 show desktop, >=0 task, <=-10 pin */
+static int pressed_btn = -1000;
 static int last_minute = -1;
 
 /* box blur of a strip (horizontal + vertical passes) */
@@ -87,11 +94,26 @@ static rect_t clock_rect(void) { return rect_make(screen_width() - SHOWDESK_W - 
 static rect_t sound_rect(void) { rect_t c = clock_rect(); return rect_make(c.x - TRAY_W - 2, 4, TRAY_W, wm_taskbar_h - 8); }
 static rect_t showdesk_rect(void) { return rect_make(screen_width() - SHOWDESK_W, 0, SHOWDESK_W, wm_taskbar_h); }
 
+static void layout_pins(void) {
+    npinbtns = 0;
+    int n = MIN(shell_pin_count(), MAX_PINNED);
+    for (int i = 0; i < n; i++) {
+        const app_desc_t *a = app_find(shell_pin_get(i));
+        if (!a) continue;
+        pinbtns[npinbtns].app = a;
+        pinbtns[npinbtns].r = rect_make(START_W + 8 + npinbtns * (PIN_W + 2), 4, PIN_W, wm_taskbar_h - 8);
+        npinbtns++;
+    }
+}
+
+static int pins_end(void) { return npinbtns ? START_W + 8 + npinbtns * (PIN_W + 2) + 6 : START_W + 4; }
+
 static void layout_buttons(void) {
     window_t *list[64];
     int n = win_list(list, 64);
     if (n > 64) n = 64;
-    int x0 = START_W + 10, x1 = sound_rect().x - 8;
+    layout_pins();
+    int x0 = pins_end() + 6, x1 = sound_rect().x - 8;
     int avail = x1 - x0;
     int bw = n ? MIN(BTN_MAXW, avail / n - 4) : BTN_MAXW;
     if (bw < 44) bw = 44;
@@ -132,6 +154,16 @@ static void taskbar_paint(window_t *win, const event_t *ev) {
     if (hover_btn == -2 || startmenu_is_open())
         gfx_fill_rounded_rect(s, sr.x, sr.y, sr.w, sr.h, 6, startmenu_is_open() ? t->taskbar_active : t->taskbar_hover);
     ui_draw_logo(s, sr.x + (sr.w - 28) / 2, sr.y + (sr.h - 28) / 2, 28);
+
+    /* pinned apps */
+    for (int i = 0; i < npinbtns; i++) {
+        rect_t r = pinbtns[i].r;
+        if (hover_btn == HIT_PIN(i)) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 6, t->taskbar_hover);
+        app_draw_icon(s, pinbtns[i].app, r.x + (r.w - 24) / 2, r.y + (r.h - 24) / 2 - 1, 24);
+        if (app_window_count(pinbtns[i].app) > 0)
+            gfx_fill_circle_aa(s, r.x + r.w / 2.0, r.y + r.h - 2.5, 2, color_alpha(t->taskbar_text, 150));
+    }
+    if (npinbtns) gfx_vline(s, pins_end() - 2, 12, wm_taskbar_h - 24, color_alpha(t->taskbar_text, 50));
 
     /* window buttons */
     for (int i = 0; i < nbtns; i++) {
@@ -182,6 +214,7 @@ static int hit(int x, int y) {
     if (rect_contains(clock_rect(), x, y)) return -3;
     if (rect_contains(sound_rect(), x, y)) return -4;
     if (rect_contains(showdesk_rect(), x, y)) return -5;
+    for (int i = 0; i < npinbtns; i++) if (rect_contains(pinbtns[i].r, x, y)) return HIT_PIN(i);
     for (int i = 0; i < nbtns; i++) if (rect_contains(btns[i].r, x, y)) return i;
     return -1;
 }
@@ -279,6 +312,7 @@ static void show_calendar(void) {
 static void task_menu_cb(int item, void *ctx) {
     window_t *w = win_find_by_id((int)(intptr_t)ctx);
     if (!w) return;
+    if (item == 6 && w->app) { shell_set_pinned(w->app->name, !shell_is_pinned(w->app->name)); return; }
     switch (item) {
     case 0: win_focus(w); break;
     case 1: win_minimize(w); break;
@@ -286,6 +320,29 @@ static void task_menu_cb(int item, void *ctx) {
     case 4: if (w->flags & WIN_CONFIRM_CLOSE) { event_t ev = { .type = EV_CLOSE_REQUEST }; wm_send(w, &ev); } else win_close(w); break;
     default: break;
     }
+}
+
+/* topmost normal window of an app (not its dialogs), or NULL */
+static window_t *app_top_window(const app_desc_t *a) {
+    for (window_t *w = wm_top; w; w = w->below)
+        if (w->app == a && !w->closing && w->layer == LAYER_NORMAL && !w->owner && w->visible) return w;
+    return NULL;
+}
+
+static void pin_click(const app_desc_t *a) {
+    window_t *w = app_top_window(a);
+    if (!w) { app_launch(a, NULL); return; }
+    if (w == wm_focused && !w->minimized) win_minimize(w);
+    else win_focus(w);
+}
+
+static const app_desc_t *pin_menu_app;
+static void pin_menu_cb(int item, void *ctx) {
+    (void)ctx;
+    const app_desc_t *a = pin_menu_app;
+    if (!a) return;
+    if (item == 0) app_launch(a, NULL);
+    else if (item == 2) shell_set_pinned(a->name, false);
 }
 
 static void show_desktop(void) {
@@ -317,8 +374,16 @@ static void taskbar_handler(window_t *win, const event_t *ev) {
         if (ev->button == MOUSE_RIGHT && h >= 0 && h < nbtns) {
             window_t *w = btns[h].win;
             rect_t r = btns[h].r;
-            ui_popup_menu(win, r.x, -4, w->maximized ? "Restore|Minimize|Restore size|-|Close" : "Restore|Minimize|Maximize|-|Close",
-                          task_menu_cb, (void *)(intptr_t)w->id);
+            char items[160];
+            snprintf(items, sizeof items, "%s%s", w->maximized ? "Restore|Minimize|Restore size|-|Close" : "Restore|Minimize|Maximize|-|Close",
+                     !w->app || (w->app->flags & APP_HIDDEN) ? "" : shell_is_pinned(w->app->name) ? "|-|Unpin from taskbar" : "|-|Pin to taskbar");
+            ui_popup_menu(win, r.x, -4, items, task_menu_cb, (void *)(intptr_t)w->id);
+            break;
+        }
+        if (ev->button == MOUSE_RIGHT && h <= HIT_PIN(0) && h > HIT_PIN(npinbtns)) {
+            int i = HIT_PIN(0) - h;
+            pin_menu_app = pinbtns[i].app;
+            ui_popup_menu(win, pinbtns[i].r.x, -4, "Open new window|-|Unpin from taskbar", pin_menu_cb, NULL);
             break;
         }
         if (ev->button != MOUSE_LEFT) break;
@@ -326,6 +391,7 @@ static void taskbar_handler(window_t *win, const event_t *ev) {
         else if (h == -3) show_calendar();
         else if (h == -4) { sys_set_sound_enabled(!sys_sound_enabled()); if (sys_sound_enabled()) sys_beep(880, 40); win_invalidate(win); }
         else if (h == -5) show_desktop();
+        else if (h <= HIT_PIN(0) && h > HIT_PIN(npinbtns)) pin_click(pinbtns[HIT_PIN(0) - h].app);
         else if (h >= 0 && h < nbtns) {
             window_t *w = btns[h].win;
             if (w == wm_focused && !w->minimized) win_minimize(w);
