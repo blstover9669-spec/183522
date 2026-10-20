@@ -956,6 +956,8 @@ void term_shell_complete(term_t *t) {
         } else if (!strcmp(cmd, "color") || !strcmp(cmd, "theme")) {
             for (int i = 0; i < term_palette_count(); i++)
                 if (prefix_match(term_palette(i)->name, base, icase)) cand_add(c, term_palette(i)->name, false);
+            if (prefix_match("check", base, icase)) cand_add(c, "check", false);
+            if (prefix_match("next", base, icase)) cand_add(c, "next", false);
         } else {
             if ((!strcmp(cmd, "open") || !strcmp(cmd, "run")) && argn <= 1 && !sl) add_app_cands(c, base, icase, false);
             bool dirs_only = !strcmp(cmd, "cd") || !strcmp(cmd, "rmdir") || !strcmp(cmd, "tree");
@@ -2158,6 +2160,32 @@ static int cmd_clear(tctx_t *c, int argc, char **argv) {
     return 0;
 }
 
+/* "color check": which colour depth the screen is really running at. */
+static int color_check(tctx_t *c) {
+    display_info_t d;
+    sys_display_info(&d);
+    const char *b = col(c, T_BOLD), *g = col(c, T_GRAY);
+    const char *depth = d.bpp == 32 ? "true colour, 16.7 million colours + 8 spare bits"
+                      : d.bpp == 24 ? "true colour, 16.7 million colours"
+                      : d.bpp == 16 ? "high colour, 65,536 colours"
+                      : "unknown";
+    const char *by = !strcmp(d.source, "bga") ? "NovaOS's own Bochs/BGA display driver"
+                   : sys_cmdline_get("boot") && !strcmp(sys_cmdline_get("boot"), "disk")
+                       ? "NovaOS disk loader (VESA VBE)" : "GRUB (VESA VBE)";
+    tc_printf(c, "%sDisplay colour check" T_RESET "\n", b);
+    tc_printf(c, "  %sColour bits:%s  %s%d-bit" T_RESET " (%s)\n", g, T_RESET, col(c, T_BGREEN), d.bpp, depth);
+    tc_printf(c, "  %sResolution:%s   %d x %d\n", g, T_RESET, d.width, d.height);
+    if (d.bpp >= 24)
+        tc_printf(c, "  %sPixel layout:%s %s 8:8:8 (red bits %d-%d, green %d-%d, blue %d-%d)\n", g, T_RESET,
+                  d.bpp == 32 ? "XRGB" : "RGB", d.r_pos, d.r_pos + 7, d.g_pos, d.g_pos + 7, d.b_pos, d.b_pos + 7);
+    else
+        tc_printf(c, "  %sPixel layout:%s RGB 5:6:5\n", g, T_RESET);
+    tc_printf(c, "  %sBytes/row:%s    %d\n", g, T_RESET, d.pitch);
+    tc_printf(c, "  %sMode set by:%s  %s\n", g, T_RESET, by);
+    tc_printf(c, "  %sNovaOS draws in 32-bit ARGB and converts when it copies to the screen." T_RESET "\n", g);
+    return 0;
+}
+
 static int cmd_color(tctx_t *c, int argc, char **argv) {
     term_t *t = c->t;
     int n = term_palette_count();
@@ -2177,6 +2205,7 @@ static int cmd_color(tctx_t *c, int argc, char **argv) {
         }
         return 0;
     }
+    if (!strcasecmp(argv[1], "check")) return color_check(c);
     int idx = -1;
     if (!strcmp(argv[1], "next")) idx = (t->theme + 1) % n;
     else for (int i = 0; i < n; i++) if (!strcasecmp(term_palette(i)->name, argv[1])) idx = i;
@@ -2432,7 +2461,7 @@ static const tcmd_t s_cmds[] = {
     { "help", cmd_help, GRP_SHELL, "help [COMMAND]", "Show this list, or details about one command." },
     { "history", cmd_history, GRP_SHELL, "history [N] | history -c", "Show the command history (!N runs entry N, !! the last one); -c clears it." },
     { "clear", cmd_clear, GRP_SHELL, "clear", "Clear the screen (also Ctrl+L)." },
-    { "color", cmd_color, GRP_SHELL, "color [THEME | next]", "List or switch terminal colour themes." },
+    { "color", cmd_color, GRP_SHELL, "color [THEME | next | check]", "List or switch terminal colour themes; color check shows the screen colour depth." },
     { "env", cmd_env, GRP_SHELL, "env", "List shell variables." },
     { "export", cmd_export, GRP_SHELL, "export NAME=VALUE...", "Set shell variables (NAME=VALUE alone works too)." },
     { "unset", cmd_unset, GRP_SHELL, "unset NAME...", "Remove shell variables." },

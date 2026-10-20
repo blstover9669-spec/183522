@@ -79,6 +79,16 @@ void sys_shutdown(void) NORETURN;   /* tries ACPI/emulator ports, else "safe to 
 typedef void (*shutdown_hook_fn)(void);
 void sys_add_shutdown_hook(shutdown_hook_fn fn);
 
+/* ---- display mode ----------------------------------------------------------------- */
+typedef struct display_info {
+    int width, height;
+    int bpp;              /* bits per pixel of the real framebuffer: 32, 24 or 16 */
+    int pitch;            /* bytes per row                                         */
+    int r_pos, g_pos, b_pos;  /* bit position of each channel                      */
+    const char *source;   /* "multiboot" (mode set by the boot loader) or "bga"    */
+} display_info_t;
+void sys_display_info(display_info_t *out);
+
 /* ---- input settings --------------------------------------------------------------- */
 void sys_set_mouse_speed(int speed);   /* 1 (slow) .. 10 (fast), 5 = 1:1 */
 int  sys_get_mouse_speed(void);

@@ -116,6 +116,17 @@ bool fb_init(int want_w, int want_h) {
     return true;
 }
 
+void sys_display_info(display_info_t *out) {
+    out->width = g_fb.width;
+    out->height = g_fb.height;
+    out->bpp = g_fb.bpp;
+    out->pitch = (int)g_fb.pitch;
+    out->r_pos = g_fb.r_pos;
+    out->g_pos = g_fb.g_pos;
+    out->b_pos = g_fb.b_pos;
+    out->source = g_fb.source ? g_fb.source : "none";
+}
+
 /* Copy rectangle r of the back buffer (same size as the screen) to the LFB. */
 void fb_present(const surface_t *src, rect_t r) {
     r = rect_intersect(r, rect_make(0, 0, g_fb.width, g_fb.height));
