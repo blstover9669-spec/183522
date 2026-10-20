@@ -613,17 +613,24 @@ static int word_right(term_t *t, int p) {
 
 static void paste_text(term_t *t, const char *text) {
     if (!t->input_on || !text) return;
+    /* multi-line text becomes one command line: lines joined with "; ",
+       blank lines and the indentation of continuation lines dropped */
     char buf[TERM_INPUT_MAX];
     int n = 0;
+    bool sep = false;
     for (const char *p = text; *p && n < TERM_INPUT_MAX - 3; p++) {
         unsigned char c = (unsigned char)*p;
         if (c == '\r') continue;
-        if (c == '\n') {
-            if (p[1] && n > 0) { buf[n++] = ';'; buf[n++] = ' '; }
-            continue;
-        }
+        if (c == '\n') { if (n > 0) sep = true; continue; }
         if (c == '\t') c = ' ';
         if (c < 0x20) continue;
+        if (sep) {
+            if (c == ' ') continue;
+            while (n > 0 && buf[n - 1] == ' ') n--;
+            buf[n++] = ';';
+            buf[n++] = ' ';
+            sep = false;
+        }
         buf[n++] = (char)c;
     }
     input_insert(t, buf, n);
@@ -817,6 +824,7 @@ static void scroll_by(term_t *t, int rows) {
 static void term_key(term_t *t, const event_t *ev) {
     int k = ev->key, m = ev->mods;
     bool ctrl = (m & MOD_CTRL) != 0, shift = (m & MOD_SHIFT) != 0;
+    t->eat_char = false;
 
     /* keys that work at any time */
     if (k == KEY_PAGEUP) { scroll_by(t, shift ? 1 : t->rows - 1); return; }
@@ -835,7 +843,10 @@ static void term_key(term_t *t, const event_t *ev) {
         /* Ctrl+C / Esc interrupt; any other key simply ends an animation */
         bool overlay = t->job.paint != NULL;
         if ((ctrl && k == 'c') || k == KEY_ESCAPE) term_job_stop(t, true);
-        else if (overlay && !ctrl && k != KEY_NONE && (k < KEY_LSHIFT || k > KEY_SCROLLLOCK)) term_job_stop(t, false);
+        else if (overlay && !ctrl && k != KEY_NONE && (k < KEY_LSHIFT || k > KEY_SCROLLLOCK)) {
+            term_job_stop(t, false);
+            t->eat_char = true;          /* the key's character must not reach the prompt */
+        }
         return;
     }
     if (!t->input_on) return;
@@ -853,6 +864,7 @@ static void term_key(term_t *t, const event_t *ev) {
             t->in[0] = 0;
             t->hist_pos = t->hist_n;
             t->status = 130;
+            t->mode = TERM_MODE_SHELL;          /* Ctrl+C also leaves interactive calc */
             term_shell_prompt(t);
             break;
         case 'v': paste_text(t, clipboard_get()); break;
@@ -866,8 +878,16 @@ static void term_key(term_t *t, const event_t *ev) {
         case 'k': input_delete(t, t->in_cur, t->in_len); break;
         case 'w': input_delete(t, word_left(t, t->in_cur), t->in_cur); break;
         case 'd':
-            if (t->in_len == 0) { term_puts(t, "exit\n"); term_request_close(t); }
-            else input_delete(t, t->in_cur, t->in_cur + 1);
+            if (t->in_len == 0 && t->mode == TERM_MODE_CALC) {
+                term_puts(t, "exit\n");
+                t->mode = TERM_MODE_SHELL;
+                term_shell_prompt(t);
+            } else if (t->in_len == 0) {
+                term_puts(t, "exit\n");
+                term_request_close(t);
+            } else {
+                input_delete(t, t->in_cur, t->in_cur + 1);
+            }
             break;
         case KEY_LEFT: t->in_cur = word_left(t, t->in_cur); break;
         case KEY_RIGHT: t->in_cur = word_right(t, t->in_cur); break;
@@ -903,6 +923,7 @@ static void term_key(term_t *t, const event_t *ev) {
 }
 
 static void term_char(term_t *t, int ch) {
+    if (t->eat_char) { t->eat_char = false; return; }
     if (!t->input_on || t->job.active) return;
     if (ch < 0x20 || ch > 0xFF || ch == 0x7F) return;
     char c = (char)ch;
@@ -926,7 +947,11 @@ static void sb_drag_to(term_t *t, int y) {
 }
 
 static void term_mouse(term_t *t, const event_t *ev) {
-    if (t->job.active && t->job.paint) return;
+    if (t->job.active && t->job.paint) {
+        /* a click ends an animation, like any key */
+        if (ev->type == EV_MOUSE_DOWN) term_job_stop(t, false);
+        return;
+    }
     int w = win_width(t->win);
     switch (ev->type) {
     case EV_MOUSE_DOWN:
@@ -949,8 +974,12 @@ static void term_mouse(term_t *t, const event_t *ev) {
         if (t->has_sel) { t->has_sel = false; term_invalidate(t); }
         break;
     case EV_MOUSE_MOVE: {
-        bool hover = ev->x >= w - SB_W && ev->x < w && ev->y >= 0;
-        if (hover != t->sb_hover) { t->sb_hover = hover; term_invalidate(t); }
+        bool hover = t->sb_drag || (ev->x >= w - SB_W && ev->x < w && ev->y >= 0 && !t->sel_drag);
+        if (hover != t->sb_hover) {
+            t->sb_hover = hover;
+            win_set_cursor(t->win, hover ? CURSOR_ARROW : CURSOR_IBEAM);
+            term_invalidate(t);
+        }
         if (t->sb_drag) { sb_drag_to(t, ev->y); return; }
         if (!t->sel_drag) return;
         if (ev->y < 0) scroll_by(t, 1);
@@ -981,7 +1010,11 @@ static void term_mouse(term_t *t, const event_t *ev) {
         scroll_by(t, -3 * ev->wheel);
         break;
     case EV_MOUSE_LEAVE:
-        if (t->sb_hover) { t->sb_hover = false; term_invalidate(t); }
+        if (t->sb_hover) {
+            t->sb_hover = false;
+            win_set_cursor(t->win, CURSOR_IBEAM);
+            term_invalidate(t);
+        }
         break;
     default:
         break;

@@ -19,6 +19,12 @@ Examples
   tools/shot.py --kernel build/kernel.elf --out shots ready click:28,744 wait:0.5 \\
       shot:start type:about key:ret wait:1 shot:launched
 
+  # installer: install to a blank disk, then boot the installed system from it alone
+  truncate -s 64M disk.img
+  tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \\
+      ready "serial:INSTALL: done" shot:installed
+  tools/shot.py --disk disk.img ready shot:from-disk
+
 Steps (positional arguments, executed in order)
   ready                 wait until the kernel prints "NOVA: desktop ready" on serial
   serial:TEXT           wait until TEXT appears in the serial log
@@ -154,7 +160,10 @@ class Session:
         cmdline = a.cmdline or ""
         if a.kernel and "testmouse" not in cmdline and not a.no_testmouse:
             cmdline = (cmdline + " testmouse=1").strip()
-        if a.iso:
+        if a.disk:
+            # boot an installed system from its hard disk only (no CD, no -kernel)
+            qemu += ["-drive", "file=%s,format=raw,if=ide,index=0,media=disk" % a.disk, "-boot", "c"]
+        elif a.iso:
             qemu += ["-cdrom", a.iso, "-boot", "d"]
         elif a.boot == "iso":
             qemu += ["-cdrom", self.build_iso(a.kernel, cmdline), "-boot", "d"]
@@ -324,6 +333,8 @@ def main():
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--iso", help="boot this ISO (as built, GRUB VBE path)")
     src.add_argument("--kernel", help="boot this kernel.elf (QEMU -kernel, or --boot iso)")
+    src.add_argument("--disk", help="boot from this raw hard disk image only (installed NovaOS); "
+                                    "the command line comes from the installation")
     ap.add_argument("--boot", choices=["kernel", "iso"], default="kernel",
                     help="with --kernel: boot directly (default) or via a temporary GRUB ISO")
     ap.add_argument("--cmdline", default="", help="kernel command line (--kernel mode)")

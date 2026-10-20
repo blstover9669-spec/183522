@@ -22,8 +22,9 @@ make clean
 ## shot.py
 
 ```
-tools/shot.py (--iso ISO | --kernel ELF [--boot iso]) [--cmdline "..."] [--out DIR]
-              [--hda disk.img] [--mem 256] [--timeout 60] [-v] STEP...
+tools/shot.py (--iso ISO | --kernel ELF [--boot iso] | --disk disk.img) [--cmdline "..."]
+              [--out DIR] [--hda disk.img] [--mem 256] [--vga std] [--timeout 60] [-v]
+              STEP... [--extra QEMU-ARGS...]
 ```
 
 * `--kernel build/kernel.elf` boots with QEMU `-kernel` (fastest; no GRUB, the
@@ -36,6 +37,12 @@ tools/shot.py (--iso ISO | --kernel ELF [--boot iso]) [--cmdline "..."] [--out D
   `CMDLINE` if you need accurate mouse clicks).
 * `--hda disk.img` attaches a raw disk as IDE primary master (installer /
   persistence tests). Create one with `truncate -s 64M disk.img`.
+* `--disk disk.img` boots an *installed* disk on its own (no CD, no
+  `-kernel`, BIOS boots the hard disk). The kernel command line is the one
+  the installer wrote (`boot=disk diskid=...`, plus `testmouse=1` if the
+  installing system had it, which `--kernel` mode always adds).
+* `--extra ...` (must come last) passes raw QEMU arguments, e.g. a second
+  disk: `--extra -drive file=d2.img,format=raw,if=ide,index=1`.
 * Output: `OUT/<name>.png` per `shot:` step and `OUT/serial.log`. The exit
   code is non-zero if a step failed (timeout, QEMU died) or the serial log
   contains a kernel panic.
@@ -79,6 +86,34 @@ tools/shot.py --kernel build/kernel.elf --boot iso --cmdline "dark=1" ready shot
 tools/shot.py --kernel build/kernel.elf --cmdline "selftest=1 nosplash" \
     "serial:SELFTEST: done" && grep SELFTEST shots/serial.log
 ```
+
+### Installer and persistence
+
+`autorun=Installer:auto` installs to the first suitable disk without
+clicking and logs `INSTALL: done in N ms` (or `INSTALL: failed: reason`).
+The installed system logs `persist: restored N bytes from slot A|B` at boot
+and `persist: saved N bytes to slot ... (save #N, background|sync)` on every
+save (background = a few seconds after a change or the 60 s timer, sync =
+before reboot / shut down).
+
+```sh
+truncate -s 64M disk.img
+# install (or drive the wizard with clicks: Next/Install are at about (753, 569))
+tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \
+    --out shots-inst ready "serial:INSTALL: done"
+# boot the disk alone, write a file, wait for the automatic save
+tools/shot.py --disk disk.img --out shots-disk ready key:meta_l wait:0.5 type:terminal key:ret \
+    wait:1.5 "type:echo hi > Desktop/proof.txt\n" "serial:persist: saved" shot:saved
+# next boot: the file is still there
+tools/shot.py --disk disk.img --out shots-disk2 ready key:meta_l wait:0.5 type:terminal key:ret \
+    wait:1.5 "type:cat Desktop/proof.txt\n" wait:0.5 shot:persisted
+```
+
+After a reboot inside one shot.py run the serial log keeps growing (the
+first `ready` already matched), so wait with `serial:` for a later message,
+and prefer the keyboard (`key:meta_l` opens the Start menu): the pointer
+starts again at the top-left corner but shot.py still remembers the old
+position.
 
 ### Finding coordinates
 

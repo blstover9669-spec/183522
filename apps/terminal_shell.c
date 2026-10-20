@@ -1085,9 +1085,11 @@ static int cmd_ls(tctx_t *c, int argc, char **argv) {
         if (lng) {
             uint32_t sum = 0;
             for (int k = 0; k < n; k++) sum += ents[k].size;
-            char hs[16];
-            human_size(sum, hs, sizeof hs);
-            tc_printf(c, "%stotal %s in %d item%s" T_RESET "\n", col(c, T_GRAY), hs, n, n == 1 ? "" : "s");
+            char hs[24];
+            if (sum < 1024) snprintf(hs, sizeof hs, "%u byte%s", sum, sum == 1 ? "" : "s");
+            else if (sum < 1024 * 1024) snprintf(hs, sizeof hs, "%.1f KiB", sum / 1024.0);
+            else snprintf(hs, sizeof hs, "%.1f MiB", sum / (1024.0 * 1024.0));
+            tc_printf(c, "%s%d item%s, %s" T_RESET "\n", col(c, T_GRAY), n, n == 1 ? "" : "s", hs);
             for (int k = 0; k < n; k++) ls_long_entry(c, ents[k].name, ents[k].is_dir, ents[k].size, ents[k].mtime, human);
         } else if (one) {
             for (int k = 0; k < n; k++)

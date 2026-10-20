@@ -34,6 +34,7 @@ section .text.entry
 global _start
 extern kmain
 extern __bss_start, __bss_end
+extern __data_start, __data_end, __data_snapshot
 
 _start:
     cli
@@ -52,6 +53,17 @@ _start:
     shr ecx, 2
     xor eax, eax
     rep stosd
+
+    ; Keep a pristine copy of .data: the hard-disk installer writes the kernel's
+    ; loaded image back to disk, and by then the live .data has been modified.
+    mov ebx, esi
+    mov esi, __data_start
+    mov edi, __data_snapshot
+    mov ecx, __data_end
+    sub ecx, esi
+    shr ecx, 2
+    rep movsd
+    mov esi, ebx
 
     mov esp, kernel_stack_top
     xor ebp, ebp                ; terminate stack traces
