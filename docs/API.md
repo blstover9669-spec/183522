@@ -26,6 +26,9 @@ available after
 * [16. libc / libm subset](#16-libc--libm-subset)
 * [17. Kernel command line](#17-kernel-command-line)
 * [18. Rules, conventions and gotchas](#18-rules-conventions-and-gotchas)
+* [19. Background services, system log, commands](#19-background-services-system-log-commands)
+* [20. Opening files, file types, pins, recent items](#20-opening-files-file-types-pins-recent-items)
+* [21. System icons](#21-system-icons)
 
 ---
 
@@ -532,7 +535,8 @@ window_t *ui_file_dialog(owner, UI_FILE_OPEN | UI_FILE_SAVE | UI_FILE_DIR, title
                          start_dir_or_file, "txt,md" or NULL, cb, ctx);
         /* cb(const char *path, ctx); path == NULL if cancelled. Save mode returns the typed
            path whether or not it exists - ask before overwriting if you care. */
-void ui_notify("Title", "Text");      /* toast in the bottom-right corner, auto-hides */
+void ui_notify("Title", "Text");      /* toast in the bottom-right corner, auto-hides
+                                         (= notify(title, text, ICON_INFO), see section 19) */
 void clipboard_set(const char *text); const char *clipboard_get(void);  /* system text clipboard */
 ```
 
@@ -738,6 +742,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `startmenu` | open the Start menu after boot |
 | `selftest=1` | run kernel self tests (libc, heap, VFS, time) and log `SELFTEST:` lines |
 | `crashtest=1` | trigger a divide error 1.5 s after boot (tests the panic screen) |
+| `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
 
 Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
 `SELFTEST: done, N passed, M failed`, `*** KERNEL PANIC ***`.
@@ -763,3 +768,207 @@ Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
 10. To debug a crash: the panic screen and the serial log show the exception,
     registers and a symbolised stack trace (`function+0xoffset`). For an
     address only, `addr2line -e build/kernel.elf 0xADDR`.
+
+---
+
+## 19. Background services, system log, commands
+
+`nova/service.h` (included by `nova.h`).
+
+**Services** are daemons without a window: a set of callbacks the service
+manager drives from the main loop. Like apps they register from their own
+file (`.services` linker section) and must never block - periodic work goes
+in `tick`, which the manager calls every `tick_ms` from a timer.
+
+```c
+static int  myd_start(void) { /* allocate, hook in */ return 0; }   /* nonzero = failed */
+static void myd_stop(void)  { /* release everything */ }
+static void myd_tick(void)  { /* a little work, then return */ }
+REGISTER_SERVICE(.name = "myd", .display_name = "My Daemon",
+                 .description = "Does things in the background",
+                 .autostart = true, .restart_on_failure = true,
+                 .start = myd_start, .stop = myd_stop, .tick = myd_tick, .tick_ms = 1000,
+                 .icon = ICON_SERVICE);
+```
+
+* States: `SVC_STOPPED`, `SVC_STARTING`, `SVC_RUNNING`, `SVC_FAILED`.
+  `service_fail("myd", "fmt", ...)` from inside a service marks it failed (its
+  `stop` runs); with `restart_on_failure` it is restarted after 1, 2, 4 ... 30 s.
+* Autostart services start at `INIT_LATE` (desktop up, before `autorun`),
+  `notifyd` first. All running services are stopped in reverse order before
+  reboot / power-off (a shutdown hook).
+* Control: `service_start / service_stop / service_restart(name)` (0, -1
+  unknown, -2 failed to start), `service_is_running`, `service_count`,
+  `service_find`, `service_status_at(i, &st)` / `service_status(name, &st)`
+  (`service_status_t`: names, description, state, autostart, uptime_ms,
+  tick_ms, restarts, icon, last_error), `service_state_name(state)`.
+  Names match case-insensitively and may also be the display name.
+* `service_set_autostart(name, on)` - the user's choice, persisted in
+  `/system/config/services` (`name=on|off` lines).
+* `service_log_text(name, buf, size)` - that service's recent log lines;
+  `service_generation()` bumps on every state change or log line (poll it to
+  refresh a UI, as the **Services** app does).
+
+**System log.** `log_info / log_warn / log_error(tag, "fmt", ...)` (and
+`log_msg(level, ...)`) add a timestamped, tagged entry to a 512-entry ring
+and mirror it to serial (`[tag] message`). A service logs with its own name
+as the tag, which also files the line in its per-service log. Read the ring
+with `syslog_first_seq() .. syslog_last_seq()` + `syslog_get(seq, &e)` and
+`syslog_format(&e, buf, size)` (`2026-10-20 03:22:34 INFO  [logd] ...`). The
+`logd` service appends it to `/system/log/syslog` every 5 s (kept below
+96 KB).
+
+**Built-in services**
+
+| Service | Display name | API |
+|---|---|---|
+| `notifyd` | Notifications | `int notify(title, body, ICON_*)` slides a toast in above the taskbar (stacks, newest at the bottom, auto-dismiss after 5 s - paused while hovered - click to dismiss); `notify_dismiss(id)`, `notify_history_count/get/clear` (last 50). Returns 0 when notifyd is stopped (still recorded). Toasts raised while the screensaver runs wait until it is dismissed. |
+| `logd` | System Log | writes the syslog to `/system/log/syslog` |
+| `screensaver` | Screensaver | starfield + aurora with a clock after N idle seconds (default 300). `screensaver_set_timeout(s)` (persisted in `/system/config/screensaver`, 0 = never), `screensaver_get_timeout`, `screensaver_activate`, `screensaver_dismiss`, `screensaver_active`. Any key, click or mouse movement dismisses it; that input is swallowed, so a click never reaches the window underneath. Command line `screensaver=SECONDS` overrides the timeout for one boot. |
+| `alarmd` | Alarms | `alarm_add_at(h, m, msg)` (next HH:MM), `alarm_add_in(minutes, msg)`, `alarm_cancel(id)`, `alarm_count/get`. Due alarms show a notification (alarm-clock icon) and play a PC-speaker chime. Persisted in `/system/config/alarms`. |
+| `autosave` | Autosave | `autosave_register(name, fn, ctx)` - `fn(ctx)` runs every 60 s and when the service stops (shutdown); `autosave_unregister(id)`, `autosave_now()`, `autosave_last_run()`. On an installed system it registers a `disk` callback that starts a background `persist_save_async()` when files changed (synchronous `persist_save()` at shutdown). |
+| `indexer` | File Indexer | indexes every file and folder name (rescans 3 s after the VFS changes, a few directories per tick). `indexer_search(query, hits, max)` (case-insensitive; exact, prefix and word-start matches rank first, files under /home before /system), `indexer_count`, `indexer_ready`, `indexer_rescan`. Used by the Start menu, the Run dialog and `locate`. |
+| `sysmon` | System Monitor | one `sysmon_sample_t` per second (heap used/total, busy %, events/s, frames/s) in a 120-sample ring: `sysmon_history(out, max)` (oldest first), `sysmon_latest(&s)` - for Task Manager style graphs. |
+
+**Commands.** Any file can add a command to the Terminal and the Run dialog
+(`.commands` linker section). Commands run in the main loop, so they must
+return quickly; they write through a `cmd_writer_t`:
+
+```c
+static int cmd_hello(int argc, char **argv, cmd_writer_t *out) {
+    cmd_printf(out, "Hello, %s!\n", argc > 1 ? argv[1] : "world");
+    return 0;                                   /* exit status */
+}
+REGISTER_COMMAND("hello", "hello [NAME] - greet someone", cmd_hello);
+```
+
+* `cmd_writer_t { write(w, s, n), ctx, flags, cwd, cols }`: `CMD_ANSI` in
+  `flags` means the output understands ANSI colours; `cwd` is the directory for
+  relative paths (`cmd_resolve_path(out, arg, buf)` handles `~` and relative
+  paths); `cols` is the output width for tables (0 = unknown).
+* `command_count / command_get(i)` (sorted), `command_find(name)`,
+  `command_exec(argc, argv, out)`, `command_run_line(line, out)` (splits with
+  quotes and `\` escapes; 127 = no such command), `cmd_write / cmd_puts /
+  cmd_printf`, and `cmd_buffer_t` + `cmd_buffer_init(&b)` to collect output in a
+  heap string (`free(b.buf)` after).
+* The Run dialog runs a command line and shows its output in a small window.
+  A shell dispatches names it does not know itself to the registry:
+
+```c
+static void reg_write(cmd_writer_t *w, const char *s, int n) { my_shell_write(w->ctx, s, n); }
+...
+if (command_find(argv[0])) {
+    cmd_writer_t w = { reg_write, my_ctx, is_tty ? CMD_ANSI : 0, my_cwd, is_tty ? my_cols : 0 };
+    return command_exec(argc, argv, &w);
+}
+```
+
+Built-in commands:
+
+| Command | |
+|---|---|
+| `service list\|status\|start\|stop\|restart\|enable\|disable [NAME...]` | manage services (`systemctl` is an alias); `enable`/`disable` set autostart |
+| `notify TITLE [BODY...]` | show a notification (quote a title with spaces) |
+| `alarm HH:MM\|+MINUTES [MESSAGE]`, `alarm list`, `alarm cancel ID` | alarms |
+| `logs [SERVICE] [-n LINES]` | the system log, or one service's entries |
+| `open PATH\|APP [-w APP]` | `shell_open`, or open with a given app |
+| `assoc [EXT [APP\|--reset]]` | list file types / show or change the default app |
+| `pin [APP]`, `unpin APP`, `recent [clear]` | taskbar pins, recent items |
+| `run [TEXT]` | Run dialog, or do what it would do with TEXT |
+| `locate NAME`, `sysmon`, `screensaver [now\|off\|SECONDS]`, `commands [NAME]` | file search, monitor sample, screensaver, list commands |
+
+---
+
+## 20. Opening files, file types, pins, recent items
+
+`nova/shell.h` (included by `nova.h`).
+
+**File types.** An app declares the extensions it opens with
+`.file_types = "txt,md"` in its descriptor, or any file registers one with
+
+```c
+REGISTER_FILETYPE("note", "Sticky Notes", "Sticky note", ICON_NOTE);    /* preferred default    */
+REGISTER_FILETYPE_ALT("bmp", "Paint", "Bitmap image", ICON_FILE_IMAGE); /* only if no other     */
+REGISTER_FILETYPE("*", "Hex Viewer", NULL, 0);                          /* offered for any file */
+```
+
+`ext` has no dot; `"folder"` means directories, `"*"` any file (offered in
+Open With, never the automatic default). Registrations for apps that are not
+installed are ignored. Built in: `.txt .md .log .cfg .c .h .asm` -> Notepad,
+`.bmp .ppm` -> Image Viewer (alternative Paint), `.note` -> Sticky Notes, any
+file -> Hex Viewer, folders -> Files.
+
+| Function | |
+|---|---|
+| `assoc_default_app(path)` | the app that opens it: the user's choice, then registrations, then descriptors; NULL if none |
+| `assoc_apps(path, out, max)` | every installed app able to open it (default first, then others, then "any file" apps) |
+| `assoc_set_default(ext, app)` | change the default (`NULL`/`""` resets); persisted in `/system/config/assoc` (`ext=App` lines) |
+| `assoc_user_default(ext)`, `assoc_extensions(out, max)` | the user's choice, all known extensions |
+| `filetype_description(path)` / `filetype_icon(ext)` | "Text document" / `ICON_*` |
+
+`app_for_file()` / `app_open_file()` (section 3) follow the same rules.
+
+**Opening.** `shell_open(path)` opens a file with its default app, a folder in
+Files, an app by name (`"Notepad"` or `"app:Notepad"`), and shows the
+**Open With** dialog when nothing is associated; it accepts `~/...` and paths
+relative to /home/user, and records the item in the recent list.
+`shell_open_with(path, app_name)`, `shell_open_with_dialog(path)` (every
+capable app, "Show all apps", "Always use this app to open .ext files"),
+`shell_properties(path)` (type, location, size, dates, "Opens with" +
+Change...), `shell_run_dialog()` (Win+R) and `shell_run(text, err, size)`
+(what the Run dialog does: path, app name, "App argument", registered
+command, or a file name found by the indexer).
+
+The desktop opens file icons with `shell_open` on double-click; right-click a
+file for Open / Open With... / Rename... / Delete / Properties, the background
+for New Folder / New Text File / Refresh / wallpaper / dark mode / Settings.
+
+**Taskbar pins** (persisted in `/system/config/pinned`, one app name per line;
+default Files, Terminal, Notepad - missing apps are skipped):
+`shell_pin_count()`, `shell_pin_get(i)`, `shell_is_pinned(app)`,
+`shell_set_pinned(app, on)`. Pinned buttons sit right of the Start button
+(click: start the app, or focus / minimise its window; a dot marks running
+apps). Right-click a pin, a taskbar button or a Start menu entry to pin or
+unpin.
+
+**Recent items** (persisted in `/system/config/recent`, newest first, 16):
+every `app_launch` records the file it opened or the app (`"app:Name"`);
+`shell_recent_add(item)`, `shell_recent_count()`, `shell_recent_get(i)`,
+`shell_recent_clear()`. The Start menu shows the newest four under *Recent*;
+typing searches apps, then files and folders (indexer), then offers to run
+the text as a command. `shell_generation()` bumps whenever pins, recent items
+or associations change.
+
+---
+
+## 21. System icons
+
+`nova/icons.h` (included by `nova.h`). Hand-designed vector icons (no image
+files, no emoji) drawn on a 64-unit grid with a simplified pixel-aligned
+variant for small sizes, rendered supersampled and cached per (kind, size):
+crisp at 16, 32 and 48 px, usable from 8 to 256.
+
+```c
+icon_draw(ICON_FOLDER_PICTURES, s, x, y, 32);                       /* top-left at (x, y) */
+icon_draw(icon_for_path("/home/user/notes.txt"), s, x, y, 16);
+icon_draw_alpha(ICON_BELL, s, x, y, 48, 128);                       /* faded */
+```
+
+Kinds: folders (`ICON_FOLDER`, `_DOCUMENTS`, `_PICTURES`, `_MUSIC`,
+`_DOWNLOADS`, `_DESKTOP`, `_SYSTEM`, `_HOME`), files (`ICON_FILE_TEXT`,
+`_CODE`, `_IMAGE`, `_AUDIO`, `_ARCHIVE`, `_BINARY`, `_UNKNOWN`, `_LOG`,
+`_CONFIG`, `ICON_NOTE`, `ICON_PAINT`), objects (`ICON_APP`, `ICON_DISK`,
+`ICON_COMPUTER`, `ICON_TRASH`, `ICON_GEAR`, `ICON_SERVICE`, `ICON_SETTINGS`,
+`ICON_BELL`, `ICON_ALARM`, `ICON_CLOCK`, `ICON_SEARCH`, `ICON_RUN`, `ICON_PIN`,
+`ICON_TERMINAL`) and status (`ICON_INFO`, `ICON_WARNING`, `ICON_ERROR`,
+`ICON_QUESTION`, `ICON_SUCCESS`).
+
+* `icon_for_path(path)`: special folders under /home/user (Documents,
+  Pictures, Music, Downloads, Desktop, the home folder itself), /system,
+  other folders, then the extension (registered file types first);
+  `icon_for_ext("txt")`, `icon_name(kind)`.
+* `icon_get(kind, size)` returns the cached `SURF_ALPHA` image;
+  `icon_render(kind, s, x, y, size)` draws without caching (e.g. inside an
+  app's own `draw_icon` to reuse a system icon as a badge).
+* The hidden **Icon Library** app (`autorun=Icon_Library`) shows every icon
+  at 48/32/16 px; a click toggles a dark background.
