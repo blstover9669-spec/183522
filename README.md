@@ -134,7 +134,9 @@ NovaOS's stage 1 boot code and a partition table, an install header, the
 stage 2 loader (`bootloader/`: INT 13h extensions, A20, E820 memory map,
 VBE linear framebuffer 1024x768x32 / 800x600x32 / 1024x768x24, protected
 mode, Multiboot-compatible hand-off with `boot=disk` on the command line),
-the kernel image at 1 MiB on the disk, and the file storage area.
+the kernel image at 1 MiB on the disk, and the file storage area. If you
+installed from the *safe graphics 800x600* GRUB entry, the installed system
+keeps `res=800x600` and its loader picks that mode first.
 
 In QEMU:
 
