@@ -119,6 +119,7 @@ struct cmd_writer {
     void *ctx;
     int flags;                 /* CMD_ANSI: the output understands ANSI colours */
     const char *cwd;           /* directory for relative paths (NULL = /home/user) */
+    int cols;                  /* output width in characters for tables (0 = unknown) */
 };
 #define CMD_ANSI 0x1
 

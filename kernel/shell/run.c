@@ -275,8 +275,24 @@ static void run_paint(window_t *win, run_t *r) {
     rect_t lr = list_rect(win);
     uint32_t dim = color_mix(t->window_text, t->window_bg, 110);
     if (!r->nsug) {
-        const char *msg = ui_get_text(r->tb)[0] ? "No suggestions - press Enter to run it anyway" : "Recently run items appear here";
-        gfx_text(s, lr.x + 8, lr.y + 6, msg, dim, FONT_UI);
+        /* "command args...": show the command's usage line instead */
+        const char *txt = ui_get_text(r->tb);
+        while (*txt == ' ') txt++;
+        char first[64];
+        size_t fl = strcspn(txt, " \t");
+        strlcpy(first, txt, MIN(fl + 1, sizeof first));
+        const command_desc_t *cd = fl ? command_find(first) : NULL;
+        if (cd) {
+            char help[160];
+            strlcpy(help, cd->help ? cd->help : cd->name, sizeof help);
+            help[strcspn(help, "\n")] = 0;
+            icon_draw(ICON_TERMINAL, s, lr.x + 6, lr.y + (SUG_H - 16) / 2, 16);
+            gfx_text_ellipsis(s, lr.x + 30, lr.y + (SUG_H - font_height(FONT_UI)) / 2, lr.w - 38, help, t->window_text, FONT_UI);
+            gfx_text_ellipsis(s, lr.x + 30, lr.y + SUG_H, lr.w - 38, "Enter runs it; the output opens in a window", dim, FONT_UI);
+        } else {
+            const char *msg = txt[0] ? "No suggestions - press Enter to run it anyway" : "Recently run items appear here";
+            gfx_text(s, lr.x + 8, lr.y + 6, msg, dim, FONT_UI);
+        }
     }
     for (int i = 0; i < r->nsug; i++) {
         const sug_t *g = &r->sug[i];

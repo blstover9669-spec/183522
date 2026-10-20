@@ -25,8 +25,14 @@ static void list_services(cmd_writer_t *out) {
         service_status_at(i, &st);
         char up[16] = "-";
         if (st.state == SVC_RUNNING) fmt_uptime(st.uptime_ms, up, sizeof up);
+        /* keep each row on one line when the output width is known */
+        char desc[128];
+        strlcpy(desc, st.description, sizeof desc);
+        int room = out && out->cols > 0 ? out->cols - 44 : (int)sizeof desc;
+        if (room < 8) room = 8;
+        if ((int)strlen(desc) > room && room < (int)sizeof desc) strlcpy(desc + room - 3, "...", 4);
         cmd_printf(out, "%-12s %s%-9s%s %-9s %-8s %s\n", st.name, state_color(out, st.state), service_state_name(st.state),
-                   C_RESET(out), st.autostart ? "yes" : "no", up, st.description);
+                   C_RESET(out), st.autostart ? "yes" : "no", up, desc);
     }
 }
 
