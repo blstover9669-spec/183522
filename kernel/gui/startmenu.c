@@ -35,10 +35,21 @@ static uint32_t closed_serial;
 bool startmenu_is_open(void) { return sm_win && win_is_valid(sm_win); }
 bool startmenu_just_closed(void) { return closed_serial == wm_click_serial && wm_click_serial != 0; }
 
-static bool matches(const app_desc_t *a) {
-    if (!filter[0]) return true;
-    return strcasestr(a->name, filter) || (a->description && strcasestr(a->description, filter)) ||
-           (a->category && strcasestr(a->category, filter));
+/* Search rank of an app for the current filter, lower is better (-1 = no match):
+   0 exact name, 1 name starts with it, 2 a later word of the name starts with it,
+   3 anywhere in the name, 4 in the description, 5 in the category. Typing "Files"
+   must find the Files app before Notepad ("Edit plain text files"). */
+static int app_rank(const app_desc_t *a) {
+    size_t fl = strlen(filter);
+    const char *n = a->name;
+    if (!strcasecmp(n, filter)) return 0;
+    if (!strncasecmp(n, filter, fl)) return 1;
+    for (const char *p = n; *p; p++)
+        if ((*p == ' ' || *p == '-') && !strncasecmp(p + 1, filter, fl)) return 2;
+    if (strcasestr(n, filter)) return 3;
+    if (a->description && strcasestr(a->description, filter)) return 4;
+    if (a->category && strcasestr(a->category, filter)) return 5;
+    return -1;
 }
 
 static void add_row(int type, const char *text, const app_desc_t *app, int pidx, int *y) {
@@ -69,21 +80,44 @@ static void build_rows(void) {
             shown++;
         }
     }
-    /* apps by category */
-    const char *cats[32];
-    int nc = app_categories(cats, 32);
-    if (nc > 32) nc = 32;
-    bool apps_header = false;
-    for (int c = 0; c < nc; c++) {
-        bool header_added = false;
-        for (int i = 0; i < app_count() && nrows < 250; i++) {
+    if (!filter[0]) {
+        /* apps by category */
+        const char *cats[32];
+        int nc = app_categories(cats, 32);
+        if (nc > 32) nc = 32;
+        for (int c = 0; c < nc; c++) {
+            bool header_added = false;
+            for (int i = 0; i < app_count() && nrows < 250; i++) {
+                const app_desc_t *a = app_get(i);
+                if (a->flags & APP_HIDDEN) continue;
+                const char *ac = a->category ? a->category : "Other";
+                if (strcasecmp(ac, cats[c])) continue;
+                if (!header_added) { add_row(ROW_HEADER, cats[c], NULL, -1, &y); header_added = true; }
+                add_row(ROW_APP, a->name, a, -1, &y);
+            }
+        }
+    } else {
+        /* matching apps, best match first (name before description), then by name */
+        static const app_desc_t *found[200];
+        static int rank[200];
+        int nf = 0;
+        for (int i = 0; i < app_count() && nf < 200; i++) {
             const app_desc_t *a = app_get(i);
             if (a->flags & APP_HIDDEN) continue;
-            const char *ac = a->category ? a->category : "Other";
-            if (strcasecmp(ac, cats[c]) || !matches(a)) continue;
-            if (!header_added && !filter[0]) { add_row(ROW_HEADER, cats[c], NULL, -1, &y); header_added = true; }
-            if (!apps_header && filter[0]) { add_row(ROW_HEADER, "Apps", NULL, -1, &y); apps_header = true; }
-            add_row(ROW_APP, a->name, a, -1, &y);
+            int rk = app_rank(a);
+            if (rk < 0) continue;
+            int j = nf++;
+            while (j > 0 && (rank[j - 1] > rk || (rank[j - 1] == rk && strcasecmp(found[j - 1]->name, a->name) > 0))) {
+                found[j] = found[j - 1];
+                rank[j] = rank[j - 1];
+                j--;
+            }
+            found[j] = a;
+            rank[j] = rk;
+        }
+        for (int i = 0; i < nf && nrows < 240; i++) {
+            if (!i) add_row(ROW_HEADER, "Apps", NULL, -1, &y);
+            add_row(ROW_APP, found[i]->name, found[i], -1, &y);
         }
     }
     /* files (indexer) and commands when searching */
