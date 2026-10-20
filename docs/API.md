@@ -852,7 +852,10 @@ REGISTER_COMMAND("hello", "hello [NAME] - greet someone", cmd_hello);
   cmd_printf`, and `cmd_buffer_t` + `cmd_buffer_init(&b)` to collect output in a
   heap string (`free(b.buf)` after).
 * The Run dialog runs a command line and shows its output in a small window.
-  A shell dispatches names it does not know itself to the registry:
+  The Terminal runs them like its own commands (shell built-ins win a name
+  clash, registry commands come before apps; pipes and `>` work, `help`
+  lists them under *Desktop*, Tab completes them). Another shell dispatches
+  names it does not know itself to the registry the same way:
 
 ```c
 static void reg_write(cmd_writer_t *w, const char *s, int n) { my_shell_write(w->ctx, s, n); }
@@ -935,8 +938,10 @@ unpin.
 every `app_launch` records the file it opened or the app (`"app:Name"`);
 `shell_recent_add(item)`, `shell_recent_count()`, `shell_recent_get(i)`,
 `shell_recent_clear()`. The Start menu shows the newest four under *Recent*;
-typing searches apps, then files and folders (indexer), then offers to run
-the text as a command. `shell_generation()` bumps whenever pins, recent items
+typing searches apps (best match first: exact name, name prefix, a word of
+the name, anywhere in the name, then description and category - so "Files"
+finds Files before Notepad's "Edit plain text files"), then files and
+folders (indexer), then offers to run the text as a command. `shell_generation()` bumps whenever pins, recent items
 or associations change.
 
 ---

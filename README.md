@@ -174,7 +174,7 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
   to the taskbar.
 * Background services (notifications, screensaver, alarms, ...) are listed in
   the **Services** app (System); `service list`, `notify`, `alarm +5 Tea`,
-  `logs` and `assoc` also work in the Run dialog.
+  `logs` and `assoc` work in the Terminal and the Run dialog.
 * PrintScreen saves a screenshot to `/home/user/Pictures`.
 
 ## Repository layout
