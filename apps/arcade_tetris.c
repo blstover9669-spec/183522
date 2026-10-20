@@ -194,6 +194,8 @@ static void game_over(tetris_t *g) {
     g->top_acc = 0;
     g->soft = false;
     g->das_dir = 0;
+    int stored = arcade_hiscore_get("tetris");   /* another Tetris window may have set a higher one */
+    if (stored > g->best) g->best = stored;
     if (g->score > g->best) {
         g->best = g->score;
         g->new_best = true;
