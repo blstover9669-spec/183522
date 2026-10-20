@@ -15,6 +15,9 @@ extern uint32_t wm_last_input_tick;           /* g_ticks of the last keyboard/mo
 /* Input filter: returns true to swallow a raw input event (screensaver). */
 extern bool (*wm_input_filter)(const input_event_t *ev);
 
+/* True while the services are being stopped for reboot / power-off. */
+bool svc_shutting_down(void);
+
 /* notifyd (dialogs.c ui_notify uses it) */
 bool notifyd_running(void);
 

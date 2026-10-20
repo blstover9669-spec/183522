@@ -69,6 +69,7 @@ static svc_t *find(const char *name) {
 }
 
 int service_count(void) { ensure_init(); return nsvc; }
+bool svc_shutting_down(void) { return shutting_down; }
 int service_find(const char *name) { svc_t *s = find(name); return s ? (int)(s - svcs) : -1; }
 uint32_t service_generation(void) { return gen; }
 
