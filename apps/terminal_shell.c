@@ -295,7 +295,7 @@ bool term_shell_is_command(const char *word, int len) {
     if (len <= 0 || len >= (int)sizeof w) return false;
     unquote(word, len, w, sizeof w);
     if (!*w) return false;
-    if (find_cmd(w)) return true;
+    if (find_cmd(w) || command_find(w)) return true;
     const char *eq = strchr(w, '=');
     if (eq && valid_var_name(w, (int)(eq - w))) return true;
     if (w[0] == '!') return true;
@@ -552,9 +552,22 @@ typedef struct {
 
 static int launch_app(tctx_t *c, const app_desc_t *app, int argc, char **argv, int first);
 
+/* System commands registered with REGISTER_COMMAND (service, notify, alarm, logs,
+   assoc, ...; see <nova/service.h>) run when no shell built-in has the name.
+   Their output goes through the normal tctx output, so pipes and > work. */
+static void reg_write(cmd_writer_t *w, const char *s, int n) { tc_write((tctx_t *)w->ctx, s, n); }
+
+static int run_registered(tctx_t *c, const command_desc_t *rc, int argc, char **argv) {
+    (void)rc;
+    cmd_writer_t w = { reg_write, c, tc_tty(c) ? CMD_ANSI : 0, c->t->cwd, tc_term_cols(c) };
+    return command_exec(argc, argv, &w);
+}
+
 static int run_command(tctx_t *c, int argc, char **argv) {
     const tcmd_t *cmd = find_cmd(argv[0]);
     if (cmd) return cmd->fn(c, argc, argv);
+    const command_desc_t *rc = command_find(argv[0]);
+    if (rc) return run_registered(c, rc, argc, argv);
     const app_desc_t *app = app_find(argv[0]);
     if (app) return launch_app(c, app, argc, argv, 1);
     /* a script given by path */
@@ -948,10 +961,12 @@ void term_shell_complete(term_t *t) {
         bool icase = pass == 1;
         if (cmdpos && !sl) {
             for (int i = 0; i < cmd_count(); i++) if (prefix_match(cmd_get(i)->name, base, icase)) cand_add(c, cmd_get(i)->name, false);
+            for (int i = 0; i < command_count(); i++) if (prefix_match(command_get(i)->name, base, icase)) cand_add(c, command_get(i)->name, false);
             add_app_cands(c, base, icase, true);
             if (c->n == 0) add_path_cands(t, c, dirpart, base, icase, false);
         } else if (!strcmp(cmd, "help") || !strcmp(cmd, "which")) {
             for (int i = 0; i < cmd_count(); i++) if (prefix_match(cmd_get(i)->name, base, icase)) cand_add(c, cmd_get(i)->name, false);
+            for (int i = 0; i < command_count(); i++) if (prefix_match(command_get(i)->name, base, icase)) cand_add(c, command_get(i)->name, false);
             if (!strcmp(cmd, "which")) add_app_cands(c, base, icase, true);
         } else if (!strcmp(cmd, "color") || !strcmp(cmd, "theme")) {
             for (int i = 0; i < term_palette_count(); i++)
@@ -2240,6 +2255,7 @@ static int cmd_which(tctx_t *c, int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         const app_desc_t *a;
         if (find_cmd(argv[i])) tc_printf(c, "%s: shell built-in\n", argv[i]);
+        else if (command_find(argv[i])) tc_printf(c, "%s: system command\n", argv[i]);
         else if ((a = app_find(argv[i]))) tc_printf(c, "%s: application \"%s\" (%s)\n", argv[i], a->name, a->category ? a->category : "-");
         else { tc_err(c, "which: %s: not found", argv[i]); status = 1; }
     }
@@ -2289,6 +2305,13 @@ static int cmd_false(tctx_t *c, int argc, char **argv) { return 1; }
 static int cmd_help(tctx_t *c, int argc, char **argv) {
     if (argc > 1) {
         const tcmd_t *cmd = find_cmd(argv[1]);
+        const command_desc_t *rc = cmd ? NULL : command_find(argv[1]);
+        if (rc) {
+            const char *h = rc->help ? rc->help : "", *dash = strstr(h, " - ");
+            if (dash) tc_printf(c, "%susage:%s %.*s\n       %s\n", col(c, T_GRAY), col(c, T_RESET), (int)(dash - h), h, dash + 3);
+            else tc_printf(c, "%s\n", h);
+            return 0;
+        }
         if (!cmd) {
             const app_desc_t *a = app_find(argv[1]);
             if (a) { tc_printf(c, "%s%s%s is an application: %s\n", col(c, T_BOLD), a->name, col(c, T_RESET), a->description ? a->description : ""); return 0; }
@@ -2314,6 +2337,18 @@ static int cmd_help(tctx_t *c, int argc, char **argv) {
         }
         tc_write(c, "\n", 1);
     }
+    /* system commands from the registry (REGISTER_COMMAND) not shadowed by a built-in */
+    tc_printf(c, "%s%-9s" T_RESET, col(c, "\x1b[1;96m"), "Desktop");
+    int x = 9;
+    for (int i = 0; i < command_count(); i++) {
+        const command_desc_t *rc = command_get(i);
+        if (find_cmd(rc->name)) continue;
+        int w = (int)strlen(rc->name) + 2;
+        if (x + w > cols && x > 9) { tc_puts(c, "\n         "); x = 9; }
+        tc_printf(c, "%s%s" T_RESET "  ", col(c, T_BOLD), rc->name);
+        x += w;
+    }
+    tc_write(c, "\n", 1);
     const char *g = col(c, T_GRAY), *b = col(c, T_RESET T_BOLD), *r = col(c, T_RESET T_GRAY);
     tc_printf(c, "\n%sType %shelp <command>%s for details. Apps start by name (%sapps%s lists them)." T_RESET "\n", g, b, r, b, r);
     tc_printf(c, "%sSyntax:  a | b   > file   >> file   < file   a ; b   a && b   a || b" T_RESET "\n", g);
