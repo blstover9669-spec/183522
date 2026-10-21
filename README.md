@@ -43,6 +43,17 @@ your files across restarts.
   installed disk
 * Apps register themselves: drop a `.c` file into `apps/` and rebuild
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Start menu](docs/screenshots/start-menu.png) | ![Files](docs/screenshots/files.png) |
+| Start menu with search, categories and the power / Run buttons | Files: file-type icons, default-app badges, places |
+| ![Terminal](docs/screenshots/terminal.png) | ![Installer](docs/screenshots/installer.png) |
+| Terminal on an installed system: `sync`, `df`, `disks` | The hard-disk installer |
+
+![About](docs/screenshots/about.png)
+
 ## Building
 
 Requirements (Debian/Ubuntu): `gcc` with 32-bit support (`gcc-multilib`),

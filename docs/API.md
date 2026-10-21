@@ -689,7 +689,7 @@ sectors inside an app callback), `disk_flush`, `disk_rescan`,
 `disk_format_size`, `disk_strerror`. On an installed system (`boot=disk` on
 the command line) the VFS is saved to the disk automatically;
 `persist_active()`, `persist_get_info(&info)` (dirty, saving, last save,
-capacity), `persist_save()` (synchronous - e.g. a terminal `sync` command)
+capacity), `persist_save()` (synchronous - the Terminal's `sync` command uses it)
 and `persist_save_async()`. The installer back end (`install_begin /
 install_step / install_progress ...`) is what `apps/installer.c` drives from
 a window timer. Disk layout: `kernel/disk/diskfmt.h`.
@@ -926,6 +926,13 @@ command, or a file name found by the indexer).
 The desktop opens file icons with `shell_open` on double-click; right-click a
 file for Open / Open With... / Rename... / Delete / Properties, the background
 for New Folder / New Text File / Refresh / wallpaper / dark mode / Settings.
+**Files** does the same: double-click (or Enter) calls `shell_open` (untyped
+files that are plain text go to Notepad instead of the Open With dialog), the
+item menu has *Open With...* (`shell_open_with_dialog`) and *Properties*
+(`shell_properties`), and its icons come from `icon_for_path`, so a type you
+register with `REGISTER_FILETYPE(..., ICON_*)` shows its icon and your app's
+badge there too. The Terminal's `open FILE` and the Run dialog also go
+through `shell_open`.
 
 **Taskbar pins** (persisted in `/system/config/pinned`, one app name per line;
 default Files, Terminal, Notepad - missing apps are skipped):
