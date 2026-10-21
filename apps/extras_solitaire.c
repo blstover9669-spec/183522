@@ -148,6 +148,7 @@ typedef struct {
     stats_t stats;           /* snapshot shown on the result card */
     bool rec_time, rec_score;
     bool test_almost;        /* launch argument "almost": next deal is one move from a win (tests) */
+    bool test_tall;          /* launch argument "tall": a 13-card run on 6 face-down cards (tests) */
 } sol_t;
 
 /* ---- small helpers ------------------------------------------------------------------ */
@@ -1405,6 +1406,28 @@ static void new_game(sol_t *g) {
         update_timer(g);
         return;
     }
+    if (g->test_tall) {
+        /* test layout: K..A alternating colours on six face-down cards in the last column */
+        g->test_tall = false;
+        bool used[52] = { false };
+        pile_t *t = &g->st.p[NPILES - 1];
+        for (int r = 13; r >= 1; r--) {
+            int su = (r & 1) ? S_SPADE : S_HEART;
+            used[su * 13 + r - 1] = true;
+        }
+        int k = 0;
+        for (int i = 0; i < 52 && t->n < 6; i++)
+            if (!used[deck[i]]) { used[deck[i]] = true; t->c[t->n++] = deck[i]; }
+        for (int r = 13; r >= 1; r--) t->c[t->n++] = (uint8_t)((((r & 1) ? S_SPADE : S_HEART) * 13 + r - 1) | FACEUP);
+        for (int c = 0; c < 6; c++)
+            for (; k < 52; k++)
+                if (!used[deck[k]]) { used[deck[k]] = true; g->st.p[P_TAB + c].c[g->st.p[P_TAB + c].n++] = deck[k] | FACEUP; break; }
+        for (int i = 0; i < 52; i++)
+            if (!used[deck[i]]) g->st.p[P_STOCK].c[g->st.p[P_STOCK].n++] = deck[i];
+        win_invalidate(g->win);
+        update_timer(g);
+        return;
+    }
     int k = 0;
     rect_t sr = slot_rect(g, P_STOCK);
     for (int row = 0; row < 7; row++)
@@ -1747,7 +1770,9 @@ static void game_mouse_down(sol_t *g, int x, int y) {
 
 static void hover_cursor(sol_t *g, int x, int y) {
     int c = CURSOR_ARROW, pile, idx;
-    if (!g->won && y >= TB_H) {
+    if (g->won) {
+        if (g->ov_p >= 1 && rect_contains(overlay_btn_rect(g), x, y)) c = CURSOR_HAND;
+    } else if (y >= TB_H) {
         if (rect_contains(slot_rect(g, P_STOCK), x, y) && (g->st.p[P_STOCK].n || g->st.p[P_WASTE].n)) c = CURSOR_HAND;
         else if (hit_card(g, x, y, &pile, &idx) && ISUP(g->st.p[pile].c[idx])) c = CURSOR_HAND;
     }
@@ -1925,13 +1950,16 @@ static void sol_event(window_t *win, const event_t *ev) {
     dirty_flush(g);
 }
 
-/* Launch argument (tests): "almost" deals a game one move from a win,
-   "seed:N" fixes the shuffle. */
+/* Launch argument (tests): "almost" deals a game one move from a win, "tall"
+   a 13-card run in the last column, "seed:N" fixes the shuffle. */
 static void sol_launch(const char *arg) {
     sol_t *g = calloc(1, sizeof *g);
     if (!g) return;
     g->undo = malloc(sizeof(gstate_t) * UNDO_MAX);
-    window_t *win = win_create("Solitaire", SOL_W, SOL_H, WIN_CENTER | WIN_RESIZABLE);
+    /* fit smaller screens (e.g. the 800x600 safe graphics mode) */
+    int cw = MIN(SOL_W, screen_width() - 2 * WIN_BORDER - 24);
+    int ch = MIN(SOL_H, screen_work_height() - WIN_TITLE_H - WIN_BORDER - 24);
+    window_t *win = win_create("Solitaire", MAX(cw, SOL_MIN_W), MAX(ch, SOL_MIN_H), WIN_CENTER | WIN_RESIZABLE);
     if (!win) {
         free(g->undo);
         free(g);
@@ -1942,6 +1970,7 @@ static void sol_launch(const char *arg) {
     g->rng = (sys_uptime_ms() + 77u) * 2654435761u ^ sys_time() * 2246822519u ^ ((uint32_t)win_id(win) + 1u) * 3266489917u;
     if (arg && !strncmp(arg, "seed:", 5)) g->rng = (uint32_t)strtoul(arg + 5, NULL, 10) * 2654435761u + 12345u;
     if (arg && !strcmp(arg, "almost")) g->test_almost = true;
+    if (arg && !strcmp(arg, "tall")) g->test_tall = true;
     if (!g->rng) g->rng = 0x9E3779B9u;
     g->cursor = -1;
     heart_init();
