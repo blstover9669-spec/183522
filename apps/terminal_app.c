@@ -826,9 +826,10 @@ static void term_key(term_t *t, const event_t *ev) {
     bool ctrl = (m & MOD_CTRL) != 0, shift = (m & MOD_SHIFT) != 0;
     t->eat_char = false;
 
-    /* keys that work at any time */
-    if (k == KEY_PAGEUP) { scroll_by(t, shift ? 1 : t->rows - 1); return; }
-    if (k == KEY_PAGEDOWN) { scroll_by(t, shift ? -1 : -(t->rows - 1)); return; }
+    /* keys that work at any time: (Shift+)PgUp/PgDn page through the
+       scrollback, Shift+Up/Down move it one line */
+    if (k == KEY_PAGEUP) { scroll_by(t, MAX(1, t->rows - 1)); return; }
+    if (k == KEY_PAGEDOWN) { scroll_by(t, -MAX(1, t->rows - 1)); return; }
     if (shift && !ctrl && k == KEY_UP) { scroll_by(t, 1); return; }
     if (shift && !ctrl && k == KEY_DOWN) { scroll_by(t, -1); return; }
     if (ctrl && k == KEY_HOME) { scroll_by(t, 1 << 20); return; }

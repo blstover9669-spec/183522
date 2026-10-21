@@ -664,7 +664,7 @@ static void run_segment(term_t *t, const char *text) {
                 uint32_t sz = 0;
                 if (term_resolve(t, pc->in_file, path) == 0 && !vfs_is_dir(path)) in_data = vfs_read_file(path, &sz);
                 if (!in_data) {
-                    term_printf(t, T_BRED "nsh: %s: No such file" T_RESET "\n", pc->in_file);
+                    term_printf(t, T_BRED "nsh: %s: No such file or directory" T_RESET "\n", pc->in_file);
                     status = 1;
                     break;
                 }
@@ -1951,7 +1951,12 @@ static int cmd_free(tctx_t *c, int argc, char **argv) {
     uint32_t ram_used = total > hfree ? total - hfree : 0;
     tc_printf(c, "%-8s %6u %s %6u %s %6u %s\n", "Mem:", total / div, unit, ram_used / div, unit, hfree / div, unit);
     tc_printf(c, "%-8s %6u %s %6u %s %6u %s\n", "Heap:", heap / div, unit, used / div, unit, hfree / div, unit);
-    tc_printf(c, "%-8s %6u %s\n", "Files:", vfs_total_bytes() / div, unit);
+    char fsz[16];
+    uint32_t fbytes = vfs_total_bytes();
+    if (kib) snprintf(fsz, sizeof fsz, "%6u KiB", fbytes / 1024);
+    else if (fbytes < 1024 * 1024) snprintf(fsz, sizeof fsz, "%6u KiB", fbytes / 1024);
+    else snprintf(fsz, sizeof fsz, "%6.1f MiB", fbytes / (1024.0 * 1024.0));
+    tc_printf(c, "%-8s %s  %s(in the RAM disk)" T_RESET "\n", "Files:", fsz, col(c, T_GRAY));
     tc_puts(c, "\nheap  ");
     bar(c, 30, used, heap ? heap : 1);
     tc_write(c, "\n", 1);
@@ -2060,6 +2065,8 @@ static int launch_app(tctx_t *c, const app_desc_t *app, int argc, char **argv, i
         if (!arg[0])
             for (int i = first; i < argc; i++) { if (i > first) strlcat(arg, " ", sizeof arg); strlcat(arg, argv[i], sizeof arg); }
     }
+    /* a new Terminal started from this one opens in the same directory */
+    if (!arg[0] && app->name && !strcmp(app->name, "Terminal")) strlcpy(arg, c->t->cwd, sizeof arg);
     if (!app_launch(app, arg[0] ? arg : NULL)) { tc_err(c, "open: could not start %s", app->name); return 1; }
     tc_printf(c, "%sstarted " T_RESET "%s%s%s%s%s" T_RESET "\n", col(c, T_GRAY), col(c, T_BOLD), app->name, col(c, T_RESET T_GRAY),
               arg[0] ? " " : "", arg);
@@ -2067,7 +2074,21 @@ static int launch_app(tctx_t *c, const app_desc_t *app, int argc, char **argv, i
 }
 
 static int cmd_open(tctx_t *c, int argc, char **argv) {
-    if (argc < 2) { tc_err(c, "usage: %s APP [ARG] | FILE   (see apps)", argv[0]); return 2; }
+    const char *usage = "usage: %s APP [ARG] | %s FILE|DIR [-w APP]   (see apps)";
+    if (argc < 2) { tc_err(c, usage, argv[0], argv[0]); return 2; }
+    /* open FILE -w APP / open -w APP FILE: a specific app for a file */
+    const char *with = NULL, *target = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-w") && i + 1 < argc) with = argv[++i];
+        else if (!target) target = argv[i];
+    }
+    if (with) {
+        const app_desc_t *wa = app_find(with);
+        if (!wa) { tc_err(c, "%s: no app named '%s' (try " T_BOLD "apps" T_RESET T_BRED ")", argv[0], with); return 1; }
+        if (!target) return launch_app(c, wa, 0, NULL, 0);
+        char *av[2] = { argv[0], (char *)target };
+        return launch_app(c, wa, 2, av, 1);
+    }
     const app_desc_t *app = app_find(argv[1]);
     if (app) return launch_app(c, app, argc, argv, 2);
     /* "open Widget Gallery" */
@@ -2077,21 +2098,16 @@ static int cmd_open(tctx_t *c, int argc, char **argv) {
     if (app) return launch_app(c, app, 0, NULL, 0);
     char path[VFS_PATH_MAX];
     if (term_resolve(c->t, argv[1], path) == 0 && vfs_exists(path)) {
-        if (vfs_is_dir(path)) {
-            static const char *const fm[] = { "Files", "File Manager", "Explorer" };
-            for (int i = 0; i < 3; i++) {
-                const app_desc_t *a = app_find(fm[i]);
-                if (a) { char *av[2] = { argv[0], path }; return launch_app(c, a, 2, av, 1); }
-            }
-            tc_err(c, "open: no file manager installed");
-            return 1;
-        }
-        const app_desc_t *a = app_for_file(path);
-        if (!a) { tc_err(c, "open: no app is registered for '%s' files", vfs_extension(path)); return 1; }
-        char *av[2] = { argv[0], path };
-        return launch_app(c, a, 2, av, 1);
+        const app_desc_t *a = assoc_default_app(path);
+        if (a) { char *av[2] = { argv[0], path }; return launch_app(c, a, 2, av, 1); }
+        if (vfs_is_dir(path)) { tc_err(c, "%s: no file manager is installed", argv[0]); return 1; }
+        /* no default app: the system Open With dialog lets the user pick one */
+        if (!shell_open(path)) { tc_err(c, "%s: no app can open '%s'", argv[0], argv[1]); return 1; }
+        tc_printf(c, "%schoose an app for %s%s%s in the Open With window" T_RESET "\n", col(c, T_GRAY),
+                  col(c, T_RESET T_BOLD), vfs_basename(path), col(c, T_RESET T_GRAY));
+        return 0;
     }
-    tc_err(c, "open: no app or file named '%s' (try " T_BOLD "apps" T_RESET T_BRED ")", name);
+    tc_err(c, "%s: no app or file named '%s' (try " T_BOLD "apps" T_RESET T_BRED ")", argv[0], name);
     return 1;
 }
 
@@ -2463,7 +2479,7 @@ static const tcmd_t s_cmds[] = {
     { "find", cmd_find, GRP_FILES, "find [DIR] [-name PATTERN] [-type f|d]", "Search for files by name (wildcards * and ?, case-insensitive)." },
     { "stat", cmd_stat, GRP_FILES, "stat PATH...", "Show file details: size, type, times, associated app." },
     { "hexdump", cmd_hexdump, GRP_FILES, "hexdump [-n BYTES] [-s OFFSET] FILE", "Show a file as hex and ASCII (first 4 KiB unless -n is given)." },
-    { "open", cmd_open, GRP_FILES, "open APP [ARG] | open FILE | open DIR", "Start an app, or open a file with its associated app." },
+    { "open", cmd_open, GRP_FILES, "open APP [ARG] | open FILE|DIR [-w APP]", "Start an app, or open a file with its default app (-w: with another app; Open With asks when none is set)." },
     /* text */
     { "echo", cmd_echo, GRP_TEXT, "echo [-n] [-e] TEXT...", "Print text (-n: no newline, -e: interpret \\n \\t \\e escapes). Use > or >> to write files." },
     { "grep", cmd_grep, GRP_TEXT, "grep [-i] [-n] [-v] [-c] [-r] PATTERN [FILE...]", "Print lines matching a pattern (supports . * ^ $). -i ignore case, -n line numbers, -v invert, -c count, -r recursive." },
