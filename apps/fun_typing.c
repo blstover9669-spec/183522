@@ -393,11 +393,17 @@ static int tt_sanitize(char *d, const char *s, int max) {
 }
 
 static void tt_pick_words(tt_t *g, const char *const *list, int count, int nwords) {
-    int prev = -1;
+    int picked[32], n = 0;
+    nwords = MIN(nwords, 32);
     for (int i = 0; i < nwords; i++) {
-        int k;
-        do k = fn_rand_n(&g->rng, count); while ((k == prev || !*list[k]) && count > 2);
-        prev = k;
+        int k, tries = 0;
+        bool dup;
+        do {   /* no word twice in one text (as far as the list allows) */
+            k = fn_rand_n(&g->rng, count);
+            dup = false;
+            for (int j = 0; j < n; j++) dup |= picked[j] == k;
+        } while (dup && ++tries < 40);
+        picked[n++] = k;
         if (i) tt_append(g, " ");
         tt_append(g, list[k]);
     }
