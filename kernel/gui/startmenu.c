@@ -269,7 +269,9 @@ static void sm_paint(window_t *win) {
     gfx_fill_circle_aa(s, 36, fy + 28, 16, t->accent);
     gfx_text_aligned(s, rect_make(20, fy + 12, 32, 32), "U", t->accent_text, FONT_UI_LARGE, ALIGN_CENTER | ALIGN_MIDDLE);
     gfx_text(s, 62, fy + 12, "User", t->menu_text, FONT_UI_BOLD);
-    gfx_text(s, 62, fy + 29, sys_version(), color_mix(t->menu_text, bg, 100), FONT_UI);
+    char ver[64];
+    snprintf(ver, sizeof ver, "%s %s", sys_version(), sys_edition());
+    gfx_text_ellipsis(s, 62, fy + 29, s->w - 186 - 62 - 8, ver, color_mix(t->menu_text, bg, 100), FONT_UI);
     rect_t rb = rect_make(s->w - 96, fy + 10, 38, 36), pb = rect_make(s->w - 52, fy + 10, 38, 36);
     rect_t runb = rect_make(s->w - 186, fy + 10, 82, 36);
     if (hover_power == 3) gfx_fill_rounded_rect(s, runb.x, runb.y, runb.w, runb.h, 6, t->menu_hover);

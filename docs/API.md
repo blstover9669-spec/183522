@@ -629,7 +629,8 @@ u32 ctime, u32 size, data}`. A self-test at boot round-trips the tree.
   prefix + an in-memory ring (`sys_log_text(buf, size)` for a log viewer).
   `printf` also goes to serial. `kpanic("fmt", ...)` = blue screen with
   registers and a symbolised stack trace.
-* Info: `sys_version()` ("NovaOS 1.0"), `sys_kernel_version()`,
+* Info: `sys_version()` ("NovaOS 1.5"), `sys_edition()` ("Developer
+  Preview"), `sys_kernel_version()` ("1.5.0 (build date)"),
   `sys_cpu_name()`, `sys_uptime_ms()`, `sys_fps()` (compositor frames last
   second), `sys_cmdline()`, `sys_cmdline_get("key")`, `sys_boot_drive()`.
 * Time: `sys_datetime(&dt)` (local time from the CMOS RTC: year, month 1-12,

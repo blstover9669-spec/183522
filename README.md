@@ -1,5 +1,7 @@
 # NovaOS
 
+**NovaOS 1.5 Developer Preview**
+
 NovaOS is a hobby operating system written from scratch in freestanding C and
 NASM assembly - no Linux, no borrowed OS code. It boots from a CD image
 straight into a modern-looking graphical desktop with windows, a taskbar, a
@@ -84,8 +86,9 @@ VBoxManage storageattach NovaOS --storagectl IDE --port 1 --device 0 \
 VBoxManage startvm NovaOS
 ```
 
-Troubleshooting: if the screen stays black, pick **NovaOS (safe graphics
-800x600)** in the GRUB menu. If the pointer does not move, make sure the
+The GRUB menu entry is **NovaOS 1.5 Developer Preview**.
+Troubleshooting: if the screen stays black, pick **NovaOS 1.5 Developer
+Preview (safe graphics 800x600)** in the GRUB menu. If the pointer does not move, make sure the
 pointing device is *PS/2 Mouse*. Shut down from the Start menu's power
 button; VirtualBox then powers the VM off.
 
@@ -126,8 +129,10 @@ unsaved changes, and before every restart or shut down from the Start menu.
 Pulling the plug (*Machine -> Power off*) loses at most the last few
 seconds of changes; the previous save is never damaged (two save slots,
 switched only after a complete write). Apps can force a save with
-`persist_save()` (`<nova/disk.h>`). Running the Installer again on an
-installed system can install to a second disk.
+`persist_save()` (`<nova/disk.h>`); in the Terminal, `sync` saves right
+away, `df` shows the space used on the disk and `disks` lists the hard
+disks. Running the Installer again on an installed system can install to a
+second disk.
 
 The same with `VBoxManage` (after the commands above):
 
@@ -172,9 +177,16 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
 * Win+R (or *Run...* in the Start menu) opens an app, file, folder or command
   by name. Right-click a Start menu entry or a taskbar button to pin the app
   to the taskbar.
+* **Files** opens files with their default app (double-click), offers
+  *Open With...* and *Properties* on right-click, and shows the system's
+  file-type icons. Change the app for a file type in *Properties ->
+  Change...* or with `assoc txt Notepad` in the Terminal.
 * Background services (notifications, screensaver, alarms, ...) are listed in
   the **Services** app (System); `service list`, `notify`, `alarm +5 Tea`,
   `logs` and `assoc` work in the Terminal and the Run dialog.
+* The **Terminal** (`help` lists every command) has files, text and system
+  commands, pipes and redirection, Tab completion, plus `sync`, `df`,
+  `disks`, `service`, `notify`, `alarm`, `logs`, `open` and more.
 * PrintScreen saves a screenshot to `/home/user/Pictures`.
 
 ## Repository layout

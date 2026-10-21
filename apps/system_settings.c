@@ -1226,7 +1226,9 @@ static void paint_about(st_t *st, surface_t *s) {
     ui_draw_logo(s, CX, 96, 64);
     gfx_text(s, CX + 80, 96, "NovaOS", t->window_text, FONT_UI_TITLE);
     char buf[128];
-    snprintf(buf, sizeof buf, "%s  \xB7  written from scratch in C and assembly", sys_version());
+    const char *ver = sys_version();
+    if (!strncmp(ver, "NovaOS ", 7)) ver += 7;      /* the title already says NovaOS */
+    snprintf(buf, sizeof buf, "Version %s %s  \xB7  written from scratch in C and assembly", ver, sys_edition());
     gfx_text(s, CX + 82, 134, buf, sys_text_dim(t), FONT_UI);
     char (*lines)[2][96] = malloc(12 * sizeof *lines);
     if (!lines) return;
@@ -1261,7 +1263,7 @@ static void on_copy_details(widget_t *w, void *ctx) {
     char *out = malloc(2048);
     if (lines && out) {
         int n = about_lines(st, lines, 12);
-        int p = snprintf(out, 2048, "%s\n", sys_version());
+        int p = snprintf(out, 2048, "%s %s\n", sys_version(), sys_edition());
         for (int i = 0; i < n && p < 2000; i++) p += snprintf(out + p, (size_t)(2048 - p), "%s: %s\n", lines[i][0], lines[i][1]);
         clipboard_set(out);
         ui_notify("Settings", "System details copied to the clipboard.");

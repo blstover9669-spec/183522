@@ -49,7 +49,7 @@ typedef struct __attribute__((packed)) disk_header {
     uint32_t disk_id;              /* 56: random id, also in cmdline "diskid="     */
     uint32_t install_time;         /* 60: sys_time() at installation               */
     char     cmdline[256];         /* 64: kernel command line ("boot=disk ...")    */
-    char     version_str[32];      /* 320: "NovaOS 1.0"                            */
+    char     version_str[32];      /* 320: "NovaOS 1.5"                            */
     uint32_t kernel_crc;           /* 352: CRC32 of the kernel image               */
     uint8_t  reserved[508 - 356];
     uint32_t checksum;             /* 508: CRC32 of bytes 0..507                   */

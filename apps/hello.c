@@ -67,8 +67,15 @@ static void about_event(window_t *win, const event_t *ev) {
             gfx_fill_circle_aa(s, 80, 80, 44 + i * glow / 4, color_alpha(t->accent, 12));
         ui_draw_logo(s, 40, 40, 80);
         gfx_text(s, 140, 44, "NovaOS", t->window_text, FONT_UI_TITLE);
-        gfx_text(s, 142, 84, sys_kernel_version(), color_mix(t->window_text, t->window_bg, 90), FONT_UI);
-        gfx_text(s, 142, 104, "A hobby OS written from scratch in C", color_mix(t->window_text, t->window_bg, 90), FONT_UI);
+        char ver[96];
+        const char *v = sys_version();
+        if (!strncmp(v, "NovaOS ", 7)) v += 7;
+        uint32_t dim = color_mix(t->window_text, t->window_bg, 90);
+        snprintf(ver, sizeof ver, "Version %s %s", v, sys_edition());
+        gfx_text_ellipsis(s, 142, 84, s->w - 142 - 12, ver, t->window_text, FONT_UI_BOLD);
+        snprintf(ver, sizeof ver, "Kernel %s", sys_kernel_version());
+        gfx_text_ellipsis(s, 142, 104, s->w - 142 - 12, ver, dim, FONT_UI);
+        gfx_text(s, 142, 124, "A hobby OS written from scratch in C", dim, FONT_UI);
         ui_draw_panel(s, rect_make(20, 160, s->w - 40, 150));
         break;
     }

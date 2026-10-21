@@ -657,7 +657,7 @@ void vfs_populate_defaults(void) {
     vfs_mkdirs("/tmp");
 
     char buf[512];
-    snprintf(buf, sizeof buf, "%s\nKernel %s\nBuilt %s %s\n", sys_version(), sys_kernel_version(), __DATE__, __TIME__);
+    snprintf(buf, sizeof buf, "%s %s\nKernel %s\nBuilt %s %s\n", sys_version(), sys_edition(), sys_kernel_version(), __DATE__, __TIME__);
     put_text("/system/version.txt", buf);
     put_text("/system/motd.txt", "Welcome to NovaOS! Have a great day.\n");
 

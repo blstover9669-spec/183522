@@ -2,6 +2,7 @@
 #include "kernel.h"
 
 const char *sys_version(void) { return "NovaOS " NOVA_VERSION; }
+const char *sys_edition(void) { return NOVA_EDITION; }
 const char *sys_kernel_version(void) { return NOVA_KERNEL_VERSION " (" __DATE__ ")"; }
 
 /* Last resort when there is no graphics mode: write to the VGA text buffer. */
@@ -45,7 +46,7 @@ void kmain(uint32_t magic, uint32_t mbi) {
     stack_guard_init();
     serial_init();
     serial_write("\n");
-    klog("NovaOS %s kernel %s booting", NOVA_VERSION, NOVA_KERNEL_VERSION);
+    klog("NovaOS %s %s kernel %s booting", NOVA_VERSION, NOVA_EDITION, NOVA_KERNEL_VERSION);
     multiboot_parse(magic, mbi);
     cmdline_parse(g_boot.cmdline);
     klog("boot: loader \"%s\" cmdline \"%s\" drive %x", g_boot.loader, g_boot.cmdline, (unsigned)sys_boot_drive());

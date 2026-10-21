@@ -269,8 +269,11 @@ static void desktop_menu(int item, void *ctx) {
             ui_message_box(NULL, "Settings", "The Settings app is not installed.", MB_OK, about_ok, NULL);
         break;
     case 9:
-        if (!app_launch_by_name("About", NULL))
-            ui_message_box(NULL, "About NovaOS", sys_version(), MB_OK, about_ok, NULL);
+        if (!app_launch_by_name("About", NULL)) {
+            char ver[96];
+            snprintf(ver, sizeof ver, "%s %s\nKernel %s", sys_version(), sys_edition(), sys_kernel_version());
+            ui_message_box(NULL, "About NovaOS", ver, MB_OK, about_ok, NULL);
+        }
         break;
     default: break;
     }

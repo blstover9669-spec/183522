@@ -147,7 +147,7 @@ static void refresh_system_files(void) {
     for (int i = 0; i < ARRAY_SIZE(dirs); i++)
         if (!vfs_is_dir(dirs[i])) vfs_mkdirs(dirs[i]);
     char buf[256];
-    snprintf(buf, sizeof buf, "%s\nKernel %s\nBuilt %s %s\n", sys_version(), sys_kernel_version(), __DATE__, __TIME__);
+    snprintf(buf, sizeof buf, "%s %s\nKernel %s\nBuilt %s %s\n", sys_version(), sys_edition(), sys_kernel_version(), __DATE__, __TIME__);
     void *old = vfs_read_file("/system/version.txt", NULL);
     if (!old || strcmp(old, buf)) vfs_write_file("/system/version.txt", buf, (uint32_t)strlen(buf));
     kfree(old);

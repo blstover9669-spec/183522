@@ -56,7 +56,7 @@ int term_cmd_neofetch(tctx_t *c, int argc, char **argv) {
 
     snprintf(info[ni++], sizeof info[0], "\x1b[1;96m%s\x1b[0m@\x1b[1;96m%s\x1b[0m", TERM_USER, TERM_HOST);
     snprintf(info[ni++], sizeof info[0], "%s", "---------");
-    KV("OS", "%s i686", sys_version());
+    KV("OS", "%s %s i686", sys_version(), sys_edition());
     KV("Kernel", "%s", sys_kernel_version());
     uint32_t s = sys_uptime_ms() / 1000;
     if (s >= 86400) KV("Uptime", "%u days, %u hours, %u mins", s / 86400, (s / 3600) % 24, (s / 60) % 60);

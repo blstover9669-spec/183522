@@ -27,8 +27,9 @@ int  sys_log_text(char *buf, int size);
 void kpanic(const char *fmt, ...) NORETURN PRINTF_LIKE(1, 2);
 
 /* ---- system information ------------------------------------------------------- */
-const char *sys_version(void);        /* "NovaOS 1.0"                    */
-const char *sys_kernel_version(void); /* "1.0.0 (build date)"            */
+const char *sys_version(void);        /* "NovaOS 1.5"                    */
+const char *sys_edition(void);        /* "Developer Preview"             */
+const char *sys_kernel_version(void); /* "1.5.0 (build date)"            */
 const char *sys_cpu_name(void);       /* CPUID brand string              */
 uint32_t    sys_uptime_ms(void);      /* milliseconds since boot         */
 uint32_t    sys_mem_total(void);      /* usable RAM in bytes             */
