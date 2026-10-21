@@ -6,16 +6,22 @@
  *                  Switch to / End task / Run new task.
  *   Apps         - every installed app with its category, open window count and
  *                  description; Launch.
- *   Performance  - live heap memory graph and an event-loop load graph.
+ *   Performance  - live heap memory graph and a CPU / activity graph.
  *
- * About the load graph (honest measurement): the core exposes no idle/CPU
- * counter and no global event counter. NovaOS runs one event loop that wakes
- * on every 1 ms PIT tick, so this window runs a 1 ms probe timer and counts
- * how many ticks the loop actually serviced. Ticks the loop missed because it
- * was busy (painting, app callbacks) are counted as load. Work shorter than
- * 1 ms between ticks is invisible to this method, so it under-reports light
- * load; it is labelled accordingly. Compositor frames per second (sys_fps())
- * are shown next to it.
+ * About the activity graph (honest measurement): the System Monitor service
+ * (sysmon) samples once a second how much of the time the main loop spent
+ * halted waiting for interrupts (idle) and how many input/window events it
+ * handled. While that service runs, the graph shows its CPU busy share
+ * (100 - idle %) with events per second overlaid, and the last 60 s of
+ * history appear at once when the window opens.
+ *
+ * If the service is stopped (Services app), the window falls back to its own
+ * estimate: a 1 ms probe timer counts how many 1 ms PIT ticks the loop actually
+ * serviced, and ticks it missed because it was busy count as load. Work
+ * shorter than 1 ms between ticks is invisible to that method, so it
+ * under-reports light load; it is labelled accordingly. The probe only runs
+ * in that fallback, because waking every millisecond would itself inflate the
+ * CPU figure sysmon measures.
  */
 #include <nova.h>
 
@@ -41,13 +47,17 @@ typedef struct {
     int hover_row;
     int pending_end_id;
     /* sampling */
-    int probe_timer, sample_timer;
+    int probe_timer, sample_timer;   /* probe_timer: 0 unless in fallback mode */
     uint32_t probes, last_sample_ms;
-    float mem_hist[HIST];      /* heap bytes in use, MiB */
-    float load_hist[HIST];     /* 0..100 */
+    bool use_sysmon;           /* history comes from the System Monitor service */
+    uint32_t probe_off_ms;     /* when the probe was last stopped (0 = never ran)  */
+    uint32_t svc_gen;          /* service_generation() when we last looked        */
+    float mem_hist[HIST];      /* heap bytes in use, MiB                        */
+    float load_hist[HIST];     /* 0..100: CPU busy (sysmon) or missed ticks     */
+    float ev_hist[HIST];       /* events per second (sysmon only)               */
     int nhist;
     float cur_load;
-    int self_id;
+    int cur_events;
 } tm_t;
 
 /* ---- helpers ----------------------------------------------------------------------- */
@@ -363,22 +373,27 @@ static bool table_event(widget_t *wd, const event_t *ev) {
 }
 
 /* ---- performance tab ---------------------------------------------------------------- */
-/* Area graph of values (0..maxv) in r, newest sample on the right. */
-static void draw_graph(surface_t *s, rect_t r, const float *vals, int n, float maxv, uint32_t col) {
+static double graph_x(rect_t r, int n, int i) { return r.x + 2 + (HIST - n + i) * ((double)(r.w - 4) / (HIST - 1)); }
+static double graph_y(rect_t r, float val, float maxv) {
+    double v = val / maxv;
+    if (v > 1) v = 1;
+    if (v < 0) v = 0;
+    return r.y + r.h - 3 - v * (r.h - 6);
+}
+
+/* Area graph of vals (0..maxv) in r, newest sample on the right. If ov is not
+   NULL it is drawn on top as a thin line on its own scale (0..ovmax). */
+static void draw_graph(surface_t *s, rect_t r, const float *vals, int n, float maxv, uint32_t col,
+                       const float *ov, float ovmax, uint32_t ovcol) {
     const theme_t *t = theme_get();
     gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 6, color_mix(t->panel_bg, t->window_border, 60));
     gfx_fill_rounded_rect(s, r.x + 1, r.y + 1, r.w - 2, r.h - 2, 5, t->field_bg);
     for (int i = 1; i < 4; i++) gfx_hline(s, r.x + 2, r.y + r.h * i / 4, r.w - 4, color_mix(t->field_bg, t->window_border, 50));
     for (int i = 1; i < 6; i++) gfx_vline(s, r.x + r.w * i / 6, r.y + 2, r.h - 4, color_mix(t->field_bg, t->window_border, 30));
     if (n < 1 || maxv <= 0) return;
-    double step = (double)(r.w - 4) / (HIST - 1);
     double px = 0, py = 0;
     for (int i = 0; i < n; i++) {
-        double v = vals[i] / maxv;
-        if (v > 1) v = 1;
-        if (v < 0) v = 0;
-        double x = r.x + 2 + (HIST - n + i) * step;
-        double y = r.y + r.h - 3 - v * (r.h - 6);
+        double x = graph_x(r, n, i), y = graph_y(r, vals[i], maxv);
         /* filled column under the line */
         int x0 = (int)(i ? px : x), x1 = (int)x;
         for (int xx = i ? x0 + 1 : x0; xx <= x1; xx++) {   /* +1: don't fill a column twice */
@@ -393,6 +408,28 @@ static void draw_graph(surface_t *s, rect_t r, const float *vals, int n, float m
         px = x; py = y;
     }
     gfx_fill_circle_aa(s, px, py, 3, col);
+    if (ov && ovmax > 0) {
+        for (int i = 1; i < n; i++)
+            gfx_line_aa(s, graph_x(r, n, i - 1), graph_y(r, ov[i - 1], ovmax), graph_x(r, n, i), graph_y(r, ov[i], ovmax), ovcol);
+        gfx_fill_circle_aa(s, graph_x(r, n, n - 1), graph_y(r, ov[n - 1], ovmax), 2, ovcol);
+    }
+}
+
+/* Smallest "nice" value (10, 20, 50, 100, 200, ...) >= v. */
+static float nice_ceil(float v) {
+    float m = 10;
+    for (;;) {
+        if (m >= v) return m;
+        if (m * 2 >= v) return m * 2;
+        if (m * 5 >= v) return m * 5;
+        m *= 10;
+    }
+}
+
+/* A small coloured square and a label; returns the x after it. */
+static int legend(surface_t *s, int x, int y, uint32_t col, const char *label, uint32_t tc) {
+    gfx_fill_rounded_rect(s, x, y + (font_height(FONT_UI) - 10) / 2, 10, 10, 2, col);
+    return x + 15 + gfx_text(s, x + 15, y, label, tc, FONT_UI) + 14;
 }
 
 static void paint_perf(tm_t *c, surface_t *s) {
@@ -433,7 +470,7 @@ static void paint_perf(tm_t *c, surface_t *s) {
     float scale = 4;
     while (scale < peak * 1.25f) scale *= 2;
     rect_t g = rect_make(m.x + 220, m.y + 30, m.w - 236, m.h - 46);
-    draw_graph(s, g, c->mem_hist, c->nhist, scale, mem_col);
+    draw_graph(s, g, c->mem_hist, c->nhist, scale, mem_col, NULL, 0, 0);
     snprintf(buf, sizeof buf, "%.0f MiB", scale);
     gfx_text_aligned(s, rect_make(g.x, m.y + 10, g.w, 18), buf, muted(t), FONT_UI, ALIGN_RIGHT);
     gfx_text(s, g.x, m.y + 10, "Heap in use, last 60 s", muted(t), FONT_UI);
@@ -441,22 +478,49 @@ static void paint_perf(tm_t *c, surface_t *s) {
     /* activity card */
     rect_t a = rect_make(x, top + card_h + 10, w, card_h);
     ui_draw_panel(s, a);
-    gfx_text(s, a.x + 16, a.y + 12, "Event loop", t->window_text, FONT_UI_LARGE);
-    snprintf(buf, sizeof buf, "%.0f%%", c->cur_load);
+    int ly = a.y + 78;
+    gfx_text(s, a.x + 16, a.y + 12, c->use_sysmon ? "CPU" : "Event loop", t->window_text, FONT_UI_LARGE);
+    bool waiting = c->use_sysmon && !c->nhist;   /* service just started: no sample yet */
+    if (waiting) strlcpy(buf, "--", sizeof buf);
+    else snprintf(buf, sizeof buf, "%.0f%%", c->cur_load);
     gfx_text(s, a.x + 16, a.y + 40, buf, load_col, FONT_UI_TITLE);
-    gfx_text(s, a.x + 16, a.y + 78, "load (missed 1 ms ticks)", muted(t), FONT_UI);
+    gfx_text(s, a.x + 16, ly, waiting ? "waiting for a sample" : c->use_sysmon ? "busy (not idle) time" : "load (missed 1 ms ticks)",
+             muted(t), FONT_UI);
+    ly += 18;
+    if (waiting) strlcpy(buf, "Events: --", sizeof buf);
+    else if (c->use_sysmon) snprintf(buf, sizeof buf, "Events: %d per second", c->cur_events);
+    else strlcpy(buf, "Events: n/a (sysmon off)", sizeof buf);
+    gfx_text_ellipsis(s, a.x + 16, ly, 196, buf, muted(t), FONT_UI);
+    ly += 18;
     snprintf(buf, sizeof buf, "Screen updates: %d fps", sys_fps());
-    gfx_text(s, a.x + 16, a.y + 96, buf, muted(t), FONT_UI);
+    gfx_text(s, a.x + 16, ly, buf, muted(t), FONT_UI);
+    ly += 18;
     fmt_uptime(b2, sizeof b2);
     snprintf(buf, sizeof buf, "Uptime: %s", b2);
-    gfx_text(s, a.x + 16, a.y + 114, buf, muted(t), FONT_UI);
+    gfx_text(s, a.x + 16, ly, buf, muted(t), FONT_UI);
+    ly += 18;
     window_t *list[1];
-    snprintf(buf, sizeof buf, "%d windows, %d apps", win_list(list, 0), app_count());
-    gfx_text(s, a.x + 16, a.y + 132, buf, muted(t), FONT_UI);
+    int nw = win_list(list, 0);
+    snprintf(buf, sizeof buf, "%d window%s, %d apps", nw, nw == 1 ? "" : "s", app_count());
+    if (ly + font_height(FONT_UI) <= a.y + a.h - 8) gfx_text(s, a.x + 16, ly, buf, muted(t), FONT_UI);
+
     rect_t g2 = rect_make(a.x + 220, a.y + 30, a.w - 236, a.h - 46);
-    draw_graph(s, g2, c->load_hist, c->nhist, 100, load_col);
-    gfx_text(s, g2.x, a.y + 10, "Share of ticks the loop was busy", muted(t), FONT_UI);
-    gfx_text_aligned(s, rect_make(g2.x, a.y + 10, g2.w, 18), "100%", muted(t), FONT_UI, ALIGN_RIGHT);
+    if (c->use_sysmon) {
+        /* events/s on its own round scale above the busiest second shown */
+        float evmax = 0;
+        for (int i = 0; i < c->nhist; i++) if (c->ev_hist[i] > evmax) evmax = c->ev_hist[i];
+        evmax = nice_ceil(evmax * 1.1f);
+        uint32_t ev_col = RGB(240, 140, 40);
+        draw_graph(s, g2, c->load_hist, c->nhist, 100, load_col, c->ev_hist, evmax, ev_col);
+        int lx = legend(s, g2.x, a.y + 10, load_col, "CPU busy", muted(t));
+        legend(s, lx, a.y + 10, ev_col, "Events/s", muted(t));
+        snprintf(buf, sizeof buf, "100%%  |  %.0f/s", evmax);
+        gfx_text_aligned(s, rect_make(g2.x, a.y + 10, g2.w, 18), buf, muted(t), FONT_UI, ALIGN_RIGHT);
+    } else {
+        draw_graph(s, g2, c->load_hist, c->nhist, 100, load_col, NULL, 0, 0);
+        gfx_text(s, g2.x, a.y + 10, "Share of ticks the loop was busy", muted(t), FONT_UI);
+        gfx_text_aligned(s, rect_make(g2.x, a.y + 10, g2.w, 18), "100%", muted(t), FONT_UI, ALIGN_RIGHT);
+    }
 }
 
 /* ---- window --------------------------------------------------------------------------- */
@@ -482,7 +546,42 @@ static void show_tab(tm_t *c, int tab) {
 
 static void on_tab(widget_t *w, void *ctx) { show_tab(ctx, ui_get_value(w)); }
 
-static void take_sample(tm_t *c) {
+/* Use the System Monitor service whenever it runs - even before its first
+   sample, so the probe never adds its own 1000 timer events/s to that sample. */
+static bool sysmon_ok(void) { return service_is_running("sysmon"); }
+
+/* Copy the last 60 s of sysmon samples. Samples older than that, or from an
+   earlier run of the service (stopped and started again since), are left out
+   so the graph never stretches stale data across the time axis. */
+static void pull_sysmon(tm_t *c) {
+    sysmon_sample_t h[HIST];
+    int n = sysmon_history(h, HIST);
+    uint32_t now = sys_uptime_ms();
+    service_status_t st;
+    uint32_t started = service_status("sysmon", &st) == 0 ? st.started_ms : 0;
+    int first = 0;
+    for (int i = 0; i < n; i++) {
+        int32_t since_probe = (int32_t)(h[i].uptime_ms - c->probe_off_ms);
+        if (now - h[i].uptime_ms > HIST * 1000u + 500u) first = i + 1;        /* too old       */
+        if ((int32_t)(h[i].uptime_ms - started) <= 0) first = i + 1;           /* previous run  */
+        /* this second overlapped our own fallback probe: it measured the probe */
+        if (c->probe_off_ms && since_probe >= 0 && since_probe < 900) first = i + 1;
+    }
+    c->nhist = 0;
+    for (int i = first; i < n; i++) {
+        c->mem_hist[c->nhist] = h[i].mem_used / (1024.0f * 1024.0f);
+        c->load_hist[c->nhist] = (float)CLAMP(h[i].cpu_percent, 0, 100);
+        c->ev_hist[c->nhist] = (float)MAX(h[i].events_per_sec, 0);
+        c->nhist++;
+    }
+    if (c->nhist) {
+        c->cur_load = c->load_hist[c->nhist - 1];
+        c->cur_events = (int)c->ev_hist[c->nhist - 1];
+    }
+}
+
+/* Fallback: one sample from our own 1 ms probe timer. */
+static void probe_sample(tm_t *c) {
     uint32_t now = sys_uptime_ms();
     uint32_t el = now - c->last_sample_ms;
     float load = 0;
@@ -501,7 +600,40 @@ static void take_sample(tm_t *c) {
     }
     c->mem_hist[c->nhist] = sys_mem_used() / (1024.0f * 1024.0f);
     c->load_hist[c->nhist] = load;
+    c->ev_hist[c->nhist] = 0;
     c->nhist++;
+}
+
+/* Pick the data source (again, if the service was started or stopped since). */
+static void set_source(tm_t *c, bool sysmon) {
+    c->use_sysmon = sysmon;
+    c->nhist = 0;
+    c->cur_load = 0;
+    c->cur_events = 0;
+    if (sysmon) {
+        if (c->probe_timer > 0) {
+            win_kill_timer(c->win, c->probe_timer);   /* only if > 0: 0 would kill all our timers */
+            c->probe_off_ms = sys_uptime_ms();
+        }
+        c->probe_timer = 0;
+        pull_sysmon(c);
+    } else {
+        if (c->probe_timer <= 0) c->probe_timer = win_set_timer(c->win, 1);
+        c->probes = 0;
+        c->last_sample_ms = sys_uptime_ms();
+        c->mem_hist[0] = sys_mem_used() / (1024.0f * 1024.0f);   /* memory graph starts at once */
+        c->load_hist[0] = 0;
+        c->ev_hist[0] = 0;
+        c->nhist = 1;
+    }
+}
+
+static void take_sample(tm_t *c) {
+    c->svc_gen = service_generation();
+    bool sm = sysmon_ok();
+    if (sm != c->use_sysmon) { set_source(c, sm); return; }
+    if (sm) pull_sysmon(c);
+    else probe_sample(c);
 }
 
 static void tm_event(window_t *win, const event_t *ev) {
@@ -520,13 +652,24 @@ static void tm_event(window_t *win, const event_t *ev) {
         fmt_uptime(up, sizeof up);
         fmt_bytes(sys_mem_used(), used, sizeof used);
         window_t *dummy[1];
-        snprintf(buf, sizeof buf, "Windows: %d    Apps: %d    Memory: %s    Load: %.0f%%    Uptime: %s",
-                 win_list(dummy, 0), app_count(), used, c->cur_load, up);
+        snprintf(buf, sizeof buf, "Windows: %d    Apps: %d    Memory: %s    %s: %.0f%%    Uptime: %s",
+                 win_list(dummy, 0), app_count(), used, c->use_sysmon ? "CPU" : "Load", c->cur_load, up);
         gfx_text_ellipsis(s, 12, H - STATUS_H + (STATUS_H - font_height(FONT_UI)) / 2, W - 24, buf, muted(t), FONT_UI);
         break;
     }
     case EV_TIMER:
-        if (ev->timer_id == c->probe_timer) { c->probes++; break; }
+        if (c->probe_timer > 0 && ev->timer_id == c->probe_timer) {
+            c->probes++;
+            /* services changed (cheap check): switch back within a tick if sysmon started */
+            if (service_generation() != c->svc_gen) {
+                c->svc_gen = service_generation();
+                if (sysmon_ok()) {
+                    set_source(c, true);
+                    if (c->tab == TAB_PERF) win_invalidate(win);
+                }
+            }
+            break;
+        }
         if (ev->timer_id == c->sample_timer) {
             take_sample(c);
             if (win_is_minimized(win)) break;
@@ -602,11 +745,9 @@ static void tm_launch(const char *arg) {
     ui_button_set_default(c->b_launch, true);
     layout(c);
 
-    c->last_sample_ms = sys_uptime_ms();
-    c->probe_timer = win_set_timer(win, 1);
     c->sample_timer = win_set_timer(win, 1000);
-    c->mem_hist[0] = sys_mem_used() / (1024.0f * 1024.0f);
-    c->nhist = 1;
+    c->svc_gen = service_generation();
+    set_source(c, sysmon_ok());
 
     int tab = TAB_WINDOWS;
     if (arg && !strcasecmp(arg, "apps")) tab = TAB_APPS;
