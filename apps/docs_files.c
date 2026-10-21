@@ -14,17 +14,18 @@
  *
  * Features: address bar (Enter to go, Ctrl+L to focus), back / forward / up
  * with history, places sidebar, icon and details views (sortable columns),
- * folder and file-type icons (badged with the app that opens the file),
- * sizes and dates, double-click to open (folders navigate, text files open
- * in Notepad, others with their associated app), new folder / new text file,
- * rename (F2), delete with confirmation (Del), cut / copy / paste of files and
- * folders (Ctrl+X / C / V, shared between Files windows and done in timer-
- * driven chunks), properties, type-to-jump, and automatic refresh when the
- * file system changes (vfs_generation).
+ * folder and file-type icons from the system icon library (badged with the
+ * app that opens the file), sizes and dates, double-click to open (folders
+ * navigate, files open with shell_open: the default app from the file
+ * association registry, or the Open With dialog), Open With..., new folder /
+ * new text file, rename (F2), delete with confirmation (Del), cut / copy /
+ * paste of files and folders (Ctrl+X / C / V, shared between Files windows
+ * and done in timer-driven chunks), the system Properties dialog,
+ * type-to-jump, and automatic refresh when the file system changes
+ * (vfs_generation).
  *
  * Per-window state lives in files_t (win_set_userdata) and is freed on
- * EV_CLOSE. Globals: the file clipboard (shared on purpose) and an icon
- * image cache (theme independent).
+ * EV_CLOSE. Global: the file clipboard (shared on purpose).
  */
 #include <nova.h>
 
@@ -46,9 +47,8 @@
 enum { VIEW_ICONS, VIEW_DETAILS };
 enum { SORT_NAME, SORT_SIZE, SORT_TYPE, SORT_DATE };
 
-/* icon kinds (ids are kind | emblem << 8) */
-enum { K_FOLDER, K_TEXT, K_CODE, K_IMAGE, K_AUDIO, K_ARCHIVE, K_BINARY, K_FILE, K_COMPUTER, K_COUNT };
-enum { EM_NONE, EM_HOME, EM_DESKTOP, EM_DOCUMENTS, EM_DOWNLOADS, EM_MUSIC, EM_PICTURES, EM_SYSTEM };
+/* file kinds (sorting, thumbnails); the icons come from the system icon library */
+enum { K_FOLDER, K_TEXT, K_CODE, K_IMAGE, K_AUDIO, K_ARCHIVE, K_BINARY, K_FILE, K_COUNT };
 
 /* toolbar buttons */
 enum { TB_NONE = -1, TB_BACK, TB_FWD, TB_UP, TB_NEWDIR, TB_VIEW_ICONS, TB_VIEW_LIST, TB_COUNT };
@@ -59,6 +59,7 @@ typedef struct {
     bool     sel;
     bool     thumb_tried;       /* image: thumbnail generation attempted */
     uint8_t  kind;
+    uint8_t  icon;              /* ICON_* from the icon library (icon_for_path) */
     uint32_t size, mtime;
     surface_t *thumb;           /* image preview for the icon view (owned) */
 } entry_t;
@@ -102,7 +103,6 @@ typedef struct files {
     uint32_t msg_until;
     /* data for pending dialogs */
     char pending_name[VFS_NAME_MAX];        /* rename source           */
-    char pending_open[VFS_PATH_MAX];        /* "open with Notepad?"    */
     char (*pending_del)[VFS_PATH_MAX];      /* delete confirmation     */
     int  npending_del;
     char select_after[VFS_NAME_MAX];        /* select after next load  */
@@ -176,8 +176,6 @@ static const char EXT_IMAGE[]   = "bmp,ppm,pgm,pbm,png,jpg,jpeg,gif,ico,tga,img_
 static const char EXT_AUDIO[]   = "wav,mid,midi,mp3,ogg,mod,snd,voc,song";
 static const char EXT_ARCHIVE[] = "zip,tar,gz,tgz,bz2,xz,7z,rar,iso,nvfs";
 static const char EXT_BINARY[]  = "elf,bin,exe,com,sys,dat,o,a,so,dll,img";
-/* opened with Notepad even if another app claims them */
-static const char EXT_PLAIN[]   = "txt,text,log,ini,cfg,conf,nfo";
 
 static int kind_for(const char *name, bool is_dir) {
     if (is_dir) return K_FOLDER;
@@ -211,199 +209,36 @@ static const char *type_name(const entry_t *e, char *buf, size_t sz) {
     for (int i = 0; i < ARRAY_SIZE(table); i++)
         if (!strcasecmp(ext, table[i][0])) return table[i][1];
     if (!*ext) return "File";
-    char up[16];
-    int n = 0;
-    for (; ext[n] && n < 15; n++) up[n] = (char)toupper((unsigned char)ext[n]);
-    up[n] = 0;
-    snprintf(buf, sz, "%s file", up);
+    /* types registered by apps (REGISTER_FILETYPE), else "EXT file"; the
+       directory part only has to be one that is not a folder */
+    char probe[VFS_NAME_MAX + 8];
+    snprintf(probe, sizeof probe, "/\x01/%s", e->name);
+    strlcpy(buf, filetype_description(probe), sz);
     return buf;
 }
 
-static int emblem_for_path(const char *path) {
-    static const struct { const char *path; int em; } known[] = {
-        { "/home/user", EM_HOME }, { "/home/user/Desktop", EM_DESKTOP },
-        { "/home/user/Documents", EM_DOCUMENTS }, { "/home/user/Downloads", EM_DOWNLOADS },
-        { "/home/user/Music", EM_MUSIC }, { "/home/user/Pictures", EM_PICTURES },
-        { "/system", EM_SYSTEM },
-    };
-    for (int i = 0; i < ARRAY_SIZE(known); i++)
-        if (!strcmp(path, known[i].path)) return known[i].em;
-    return EM_NONE;
+/* ---- icons -------------------------------------------------------------------------------- */
+/* Files and folders use the system icon library (nova/icons.h): the same
+   hand-drawn icons as the desktop, the Open With and Properties dialogs. */
+static void blit_icon(surface_t *s, int x, int y, int size, int icon, int opacity) {
+    icon_draw_alpha(icon, s, x, y, size, opacity);
 }
 
-/* ---- icons -------------------------------------------------------------------------------- */
-#define PT(px, py) { (int)(x + (px) * u + 0.5), (int)(y + (py) * u + 0.5) }
 #define UX(v) (x + (int)((v) * u + 0.5))
 #define UY(v) (y + (int)((v) * u + 0.5))
 #define UL(v) ((int)((v) * u + 0.5))
 
-static void draw_emblem(surface_t *s, int x, int y, double u, int em) {
-    uint32_t c = RGBA(150, 92, 10, 170);
-    switch (em) {
-    case EM_HOME: {
-        point_t roof[3] = { PT(22, 39), PT(32, 30), PT(42, 39) };
-        gfx_fill_polygon(s, roof, 3, c);
-        gfx_fill_rect(s, UX(25), UY(39), UL(14), UL(10), c);
-        break;
-    }
-    case EM_DESKTOP:
-        gfx_fill_rounded_rect(s, UX(22), UY(31), UL(20), UL(13), UL(2), c);
-        gfx_fill_rect(s, UX(30), UY(44), UL(4), UL(3), c);
-        gfx_fill_rect(s, UX(26), UY(47), UL(12), UL(2), c);
-        break;
-    case EM_DOCUMENTS:
-        for (int i = 0; i < 4; i++) gfx_fill_rounded_rect(s, UX(23), UY(32 + i * 4.5), UL(i == 3 ? 11 : 18), UL(2.4), UL(1), c);
-        break;
-    case EM_DOWNLOADS: {
-        gfx_fill_rect(s, UX(30), UY(30), UL(4), UL(10), c);
-        point_t a[3] = { PT(24, 39), PT(40, 39), PT(32, 47) };
-        gfx_fill_polygon(s, a, 3, c);
-        gfx_fill_rect(s, UX(23), UY(48), UL(18), UL(2), c);
-        break;
-    }
-    case EM_MUSIC:
-        gfx_fill_circle_aa(s, UX(28), UY(45), 3.4 * u, c);
-        gfx_fill_rect(s, UX(30.5), UY(31), UL(2.5), UL(14), c);
-        gfx_fill_rect(s, UX(30.5), UY(31), UL(9), UL(3), c);
-        gfx_fill_circle_aa(s, UX(37), UY(43), 3.4 * u, c);
-        gfx_fill_rect(s, UX(39.5), UY(31), UL(2.5), UL(12), c);
-        break;
-    case EM_PICTURES: {
-        gfx_rounded_rect(s, UX(21), UY(31), UL(22), UL(17), UL(2), c);
-        point_t m[3] = { PT(23, 46), PT(30, 37), PT(37, 46) };
-        gfx_fill_polygon(s, m, 3, c);
-        gfx_fill_circle_aa(s, UX(37), UY(36), 2.4 * u, c);
-        break;
-    }
-    case EM_SYSTEM:
-        gfx_circle_aa(s, UX(32), UY(40), 5.5 * u, 2.6 * u, c);
-        for (int i = 0; i < 8; i++) {
-            double a = i * M_PI / 4;
-            gfx_fill_circle_aa(s, UX(32 + 7.5 * cos(a)), UY(40 + 7.5 * sin(a)), 1.8 * u, c);
-        }
-        break;
-    default: break;
-    }
-}
-
-static void draw_folder(surface_t *s, int x, int y, int size, int em, bool app_style) {
+/* The app's own icon: a blue folder with papers (see fm_app_icon). */
+static void draw_app_folder(surface_t *s, int x, int y, int size) {
     double u = size / 64.0;
-    uint32_t back = app_style ? RGB(40, 110, 220) : RGB(226, 158, 38);
-    uint32_t top = app_style ? RGB(110, 180, 255) : RGB(255, 214, 102);
-    uint32_t bot = app_style ? RGB(55, 135, 240) : RGB(245, 177, 50);
+    uint32_t back = RGB(40, 110, 220), top = RGB(110, 180, 255), bot = RGB(55, 135, 240);
     gfx_fill_rounded_rect(s, UX(4), UY(8), UL(24), UL(12), UL(4), back);
     gfx_fill_rounded_rect(s, UX(4), UY(12), UL(56), UL(44), UL(5), back);
     gfx_fill_rect(s, UX(9), UY(16), UL(46), UL(22), RGB(205, 210, 220));
     gfx_fill_rect(s, UX(10), UY(17), UL(44), UL(21), RGB(252, 252, 252));
-    if (app_style) {
-        for (int i = 0; i < 3; i++) gfx_fill_rect(s, UX(15), UY(21 + i * 4), UL(i == 2 ? 20 : 32), UL(1.8), RGB(170, 185, 210));
-    }
+    for (int i = 0; i < 3; i++) gfx_fill_rect(s, UX(15), UY(21 + i * 4), UL(i == 2 ? 20 : 32), UL(1.8), RGB(170, 185, 210));
     gfx_fill_rounded_gradient_v(s, UX(4), UY(23), UL(56), UL(35), UL(5), top, bot);
     gfx_fill_rect(s, UX(6), UY(24), UL(52), UL(1.2) > 0 ? UL(1.2) : 1, RGBA(255, 255, 255, 120));
-    if (em) draw_emblem(s, x, y, u, em);
-}
-
-static void draw_computer(surface_t *s, int x, int y, int size) {
-    double u = size / 64.0;
-    gfx_fill_rounded_rect(s, UX(4), UY(8), UL(56), UL(38), UL(5), RGB(60, 66, 80));
-    gfx_fill_rounded_gradient_v(s, UX(8), UY(12), UL(48), UL(30), UL(2), RGB(90, 170, 255), RGB(40, 100, 220));
-    gfx_fill_rect(s, UX(26), UY(46), UL(12), UL(8), RGB(130, 136, 150));
-    gfx_fill_rounded_rect(s, UX(16), UY(53), UL(32), UL(5), UL(2), RGB(90, 96, 110));
-}
-
-static void draw_page(surface_t *s, int x, int y, int size, int kind) {
-    double u = size / 64.0;
-    point_t shadow[5] = { PT(15, 6), PT(42, 6), PT(54, 18), PT(54, 62), PT(15, 62) };
-    gfx_fill_polygon(s, shadow, 5, RGBA(0, 0, 0, 40));
-    point_t outer[5] = { PT(13, 4), PT(41, 4), PT(53, 16), PT(53, 60), PT(13, 60) };
-    gfx_fill_polygon(s, outer, 5, RGB(160, 168, 182));
-    point_t inner[5] = { PT(14.5, 5.5), PT(40.4, 5.5), PT(51.5, 16.6), PT(51.5, 58.5), PT(14.5, 58.5) };
-    gfx_fill_polygon(s, inner, 5, RGB(253, 253, 253));
-    point_t fold[3] = { PT(40, 5), PT(40, 17), PT(52, 17) };
-    gfx_fill_polygon(s, fold, 3, RGB(214, 220, 230));
-    switch (kind) {
-    case K_TEXT:
-        for (int i = 0; i < 6; i++)
-            gfx_fill_rounded_rect(s, UX(20), UY(24 + i * 5.5), UL(i == 5 ? 14 : (i % 2 ? 22 : 26)), UL(2.2), UL(1), RGB(150, 160, 180));
-        break;
-    case K_CODE: {
-        static const uint32_t cols[] = { 0xFF9B59D0u, 0xFF3D8BF0u, 0xFF3DB27Au, 0xFFE58A2Eu, 0xFF3D8BF0u, 0xFF9B59D0u };
-        static const int ind[] = { 0, 4, 8, 8, 4, 0 }, len[] = { 16, 18, 14, 10, 12, 8 };
-        for (int i = 0; i < 6; i++)
-            gfx_fill_rounded_rect(s, UX(19 + ind[i]), UY(23 + i * 5.5), UL(len[i]), UL(2.4), UL(1), cols[i]);
-        break;
-    }
-    case K_IMAGE: {
-        gfx_fill_rounded_gradient_v(s, UX(19), UY(24), UL(28), UL(24), UL(2), RGB(110, 190, 255), RGB(190, 230, 255));
-        point_t hill[3] = { PT(19, 48), PT(30, 33), PT(41, 48) };
-        gfx_fill_polygon(s, hill, 3, RGB(70, 170, 90));
-        point_t hill2[3] = { PT(31, 48), PT(39, 38), PT(47, 48) };
-        gfx_fill_polygon(s, hill2, 3, RGB(50, 140, 75));
-        gfx_fill_circle_aa(s, UX(40), UY(30), 3.2 * u, RGB(255, 200, 40));
-        break;
-    }
-    case K_AUDIO:
-        gfx_fill_circle_aa(s, UX(27), UY(45), 5 * u, RGB(240, 110, 60));
-        gfx_fill_rect(s, UX(30), UY(24), UL(3.5), UL(21), RGB(240, 110, 60));
-        gfx_fill_rect(s, UX(30), UY(24), UL(13), UL(4), RGB(240, 110, 60));
-        gfx_fill_circle_aa(s, UX(40), UY(42), 5 * u, RGB(225, 80, 120));
-        gfx_fill_rect(s, UX(43), UY(24), UL(3.5), UL(18), RGB(225, 80, 120));
-        break;
-    case K_ARCHIVE:
-        for (int i = 0; i < 7; i++)
-            gfx_fill_rect(s, UX(i % 2 ? 31 : 28), UY(7 + i * 4), UL(5), UL(3), RGB(120, 110, 100));
-        gfx_fill_rounded_rect(s, UX(26), UY(36), UL(12), UL(14), UL(2), RGB(150, 130, 100));
-        gfx_fill_rounded_rect(s, UX(29), UY(41), UL(6), UL(5), UL(1), RGB(250, 245, 235));
-        break;
-    case K_BINARY:
-        for (int r = 0; r < 4; r++)
-            for (int c = 0; c < 4; c++)
-                if ((r * 7 + c * 3) % 5 < 3)
-                    gfx_fill_rounded_rect(s, UX(20 + c * 7), UY(24 + r * 7), UL(5), UL(5), UL(1),
-                                          (r + c) % 2 ? RGB(90, 120, 170) : RGB(60, 80, 120));
-        break;
-    default:
-        break;
-    }
-}
-
-static void draw_icon_id(surface_t *s, int x, int y, int size, int id) {
-    int kind = id & 0xFF, em = id >> 8;
-    if (kind == K_FOLDER) draw_folder(s, x, y, size, em, false);
-    else if (kind == K_COMPUTER) draw_computer(s, x, y, size);
-    else draw_page(s, x, y, size, kind);
-}
-
-/* Rendered icons are cached: drawn at 2x on a transparent surface, then downsampled. */
-#define ICON_CACHE 96
-static struct { int id, size; surface_t *img; } g_icons[ICON_CACHE];
-static int g_nicons;
-
-static const surface_t *fm_icon(int id, int size) {
-    for (int i = 0; i < g_nicons; i++)
-        if (g_icons[i].id == id && g_icons[i].size == size) return g_icons[i].img;
-    surface_t *hi = surface_create_alpha(size * 2, size * 2);
-    if (!hi) return NULL;
-    draw_icon_id(hi, 0, 0, size * 2, id);
-    surface_reset_clip(hi);
-    surface_t *img = surface_scaled(hi, size, size);
-    surface_destroy(hi);
-    if (!img) return NULL;
-    if (g_nicons == ICON_CACHE) {            /* full: recycle the oldest slot */
-        surface_destroy(g_icons[0].img);
-        memmove(g_icons, g_icons + 1, sizeof g_icons[0] * (ICON_CACHE - 1));
-        g_nicons--;
-    }
-    g_icons[g_nicons].id = id;
-    g_icons[g_nicons].size = size;
-    g_icons[g_nicons].img = img;
-    g_nicons++;
-    return img;
-}
-
-static void blit_icon(surface_t *s, int x, int y, int size, int id, int opacity) {
-    const surface_t *img = fm_icon(id, size);
-    if (img) gfx_blit_alpha(s, x, y, img, opacity);
 }
 
 /* ---- paths and names ------------------------------------------------------------------------ */
@@ -411,10 +246,7 @@ static void entry_path(files_t *f, int i, char *out) { vfs_join(f->dir, f->ents[
 
 static int entry_icon_id(files_t *f, int i) {
     entry_t *e = &f->ents[i];
-    if (e->kind != K_FOLDER) return e->kind;
-    char p[VFS_PATH_MAX];
-    entry_path(f, i, p);
-    return K_FOLDER | (emblem_for_path(p) << 8);
+    return e->icon ? e->icon : (e->is_dir ? ICON_FOLDER : ICON_FILE_UNKNOWN);
 }
 
 static bool path_inside(const char *path, const char *dir) {   /* path == dir or below it */
@@ -592,15 +424,15 @@ static bool tb_enabled(files_t *f, int b) {
 /* sidebar places */
 typedef struct { const char *label, *path; int icon; } place_t;
 static const place_t g_places[] = {
-    { "Home",      "/home/user",           K_FOLDER | (EM_HOME << 8) },
-    { "Desktop",   "/home/user/Desktop",   K_FOLDER | (EM_DESKTOP << 8) },
-    { "Documents", "/home/user/Documents", K_FOLDER | (EM_DOCUMENTS << 8) },
-    { "Downloads", "/home/user/Downloads", K_FOLDER | (EM_DOWNLOADS << 8) },
-    { "Music",     "/home/user/Music",     K_FOLDER | (EM_MUSIC << 8) },
-    { "Pictures",  "/home/user/Pictures",  K_FOLDER | (EM_PICTURES << 8) },
-    { "Computer",  "/",                    K_COMPUTER },
-    { "System",    "/system",              K_FOLDER | (EM_SYSTEM << 8) },
-    { "Temporary", "/tmp",                 K_FOLDER },
+    { "Home",      "/home/user",           ICON_FOLDER_HOME },
+    { "Desktop",   "/home/user/Desktop",   ICON_FOLDER_DESKTOP },
+    { "Documents", "/home/user/Documents", ICON_FOLDER_DOCUMENTS },
+    { "Downloads", "/home/user/Downloads", ICON_FOLDER_DOWNLOADS },
+    { "Music",     "/home/user/Music",     ICON_FOLDER_MUSIC },
+    { "Pictures",  "/home/user/Pictures",  ICON_FOLDER_PICTURES },
+    { "Computer",  "/",                    ICON_COMPUTER },
+    { "System",    "/system",              ICON_FOLDER_SYSTEM },
+    { "Temporary", "/tmp",                 ICON_FOLDER },
 };
 #define NPLACES_HOME 6     /* the first six are under "Places", the rest under "This computer" */
 #define SIDE_ROW 30
@@ -801,6 +633,9 @@ static void fm_load(files_t *f) {
                 e->size = tmp[i].size;
                 e->mtime = tmp[i].mtime;
                 e->kind = (uint8_t)kind_for(e->name, e->is_dir);
+                char ep[VFS_PATH_MAX];
+                vfs_join(f->dir, e->name, ep);
+                e->icon = (uint8_t)icon_for_path(ep);
             }
             f->nents = got;
         }
@@ -925,21 +760,22 @@ static bool looks_textual(const char *path) {
     return bad * 20 <= n;
 }
 
-static void fm_open_anyway_cb(int r, void *ctx) {
-    files_t *f = ctx;
-    if (r == MB_RESULT_YES) app_launch_by_name("Notepad", f->pending_open);
+/* Open a file the way the rest of the desktop does (shell_open: the user's
+   default app for the type, else the registered / declared app, else the
+   Open With dialog). Untyped files that are plain text go straight to
+   Notepad instead of asking. */
+static void fm_open_file(files_t *f, const char *path) {
+    (void)f;
+    if (!assoc_default_app(path) && looks_textual(path) && shell_open_with(path, "Notepad")) return;
+    shell_open(path);
 }
 
-static void fm_open_file(files_t *f, const char *path) {
-    const char *ext = vfs_extension(path);
-    if (ext_in(ext, EXT_PLAIN) && app_launch_by_name("Notepad", path)) return;
-    if (app_open_file(path)) return;
-    if (looks_textual(path) && app_launch_by_name("Notepad", path)) return;
-    strlcpy(f->pending_open, path, sizeof f->pending_open);
-    char msg[VFS_NAME_MAX + 160];
-    snprintf(msg, sizeof msg, "No installed app opens \"%s\".\n\nDo you want to open it in Notepad anyway?",
-             vfs_basename(path));
-    ui_message_box(f->win, "Open", msg, MB_YESNO | MB_ICON_QUESTION, fm_open_anyway_cb, f);
+static void fm_open_with(files_t *f) {
+    int i = fm_first_sel(f);
+    if (i < 0 || f->ents[i].is_dir) return;
+    char p[VFS_PATH_MAX];
+    entry_path(f, i, p);
+    shell_open_with_dialog(p);
 }
 
 static void fm_open_entry(files_t *f, int i) {
@@ -1200,63 +1036,32 @@ static void dir_usage(const char *path, uint32_t *bytes, int *files, int *dirs, 
     free(ents);
 }
 
+/* One item (or the current folder): the system Properties dialog, which also
+   shows and changes the app that opens the file type. Several: a summary. */
 static void fm_properties(files_t *f) {
     int n = fm_sel_count(f);
-    char msg[700], sz[32], tb[32];
-    if (n == 0) {   /* the current folder */
-        uint32_t bytes = 0;
-        int files = 0, dirs = 0;
-        dir_usage(f->dir, &bytes, &files, &dirs, 0);
-        fmt_size(bytes, sz, sizeof sz);
-        snprintf(msg, sizeof msg, "Folder:  %s\nContains:  %d file%s, %d folder%s\nSize:  %s (%u bytes)\n\n"
-                 "All files together use %u KB.", f->dir, files, files == 1 ? "" : "s", dirs, dirs == 1 ? "" : "s",
-                 sz, bytes, vfs_total_bytes() / 1024);
-        ui_message_box(f->win, "Properties", msg, MB_OK | MB_ICON_INFO, NULL, NULL);
+    if (n <= 1) {
+        char p[VFS_PATH_MAX];
+        if (n == 0) strlcpy(p, f->dir, sizeof p);
+        else entry_path(f, fm_first_sel(f), p);
+        shell_properties(p);
         return;
     }
-    if (n > 1) {
-        uint32_t bytes = 0;
-        int files = 0, dirs = 0;
-        for (int i = 0; i < f->nents; i++) {
-            if (!f->ents[i].sel) continue;
-            if (f->ents[i].is_dir) {
-                char p[VFS_PATH_MAX];
-                entry_path(f, i, p);
-                dirs++;
-                dir_usage(p, &bytes, &files, &dirs, 0);
-            } else { files++; bytes += f->ents[i].size; }
-        }
-        fmt_size(bytes, sz, sizeof sz);
-        snprintf(msg, sizeof msg, "%d items selected\nIncluding:  %d file%s, %d folder%s\nTotal size:  %s (%u bytes)\nLocation:  %s",
-                 n, files, files == 1 ? "" : "s", dirs, dirs == 1 ? "" : "s", sz, bytes, f->dir);
-        ui_message_box(f->win, "Properties", msg, MB_OK | MB_ICON_INFO, NULL, NULL);
-        return;
+    char msg[700], sz[32];
+    uint32_t bytes = 0;
+    int files = 0, dirs = 0;
+    for (int i = 0; i < f->nents; i++) {
+        if (!f->ents[i].sel) continue;
+        if (f->ents[i].is_dir) {
+            char p[VFS_PATH_MAX];
+            entry_path(f, i, p);
+            dirs++;
+            dir_usage(p, &bytes, &files, &dirs, 0);
+        } else { files++; bytes += f->ents[i].size; }
     }
-    int i = fm_first_sel(f);
-    entry_t *e = &f->ents[i];
-    char p[VFS_PATH_MAX], created[32], modified[32];
-    entry_path(f, i, p);
-    vfs_stat_t st;
-    memset(&st, 0, sizeof st);
-    vfs_stat(p, &st);
-    fmt_date(st.ctime, created, sizeof created);
-    fmt_date(st.mtime, modified, sizeof modified);
-    if (e->is_dir) {
-        uint32_t bytes = 0;
-        int files = 0, dirs = 0;
-        dir_usage(p, &bytes, &files, &dirs, 0);
-        fmt_size(bytes, sz, sizeof sz);
-        snprintf(msg, sizeof msg, "Name:  %s\nType:  Folder\nLocation:  %s\nContains:  %d file%s, %d folder%s\n"
-                 "Size:  %s (%u bytes)\nCreated:  %s\nModified:  %s",
-                 e->name, f->dir, files, files == 1 ? "" : "s", dirs, dirs == 1 ? "" : "s", sz, bytes, created, modified);
-    } else {
-        const app_desc_t *app = app_for_file(p);
-        fmt_size(st.size, sz, sizeof sz);
-        snprintf(msg, sizeof msg, "Name:  %s\nType:  %s\nOpens with:  %s\nLocation:  %s\nSize:  %s (%u bytes)\n"
-                 "Created:  %s\nModified:  %s",
-                 e->name, type_name(e, tb, sizeof tb), app ? app->name : (looks_textual(p) ? "Notepad" : "(no app)"),
-                 f->dir, sz, st.size, created, modified);
-    }
+    fmt_size(bytes, sz, sizeof sz);
+    snprintf(msg, sizeof msg, "%d items selected\nIncluding:  %d file%s, %d folder%s\nTotal size:  %s (%u bytes)\nLocation:  %s",
+             n, files, files == 1 ? "" : "s", dirs, dirs == 1 ? "" : "s", sz, bytes, f->dir);
     ui_message_box(f->win, "Properties", msg, MB_OK | MB_ICON_INFO, NULL, NULL);
 }
 
@@ -1282,10 +1087,12 @@ static void fm_item_menu_cb(int item, void *ctx) {
     switch (item) {
     case 0: fm_open_selection(f); break;
     case 1:
-        if (i >= 0) {
+        if (i >= 0 && f->ents[i].is_dir) {
             char p[VFS_PATH_MAX];
             entry_path(f, i, p);
-            app_launch_by_name(f->ents[i].is_dir ? "Files" : "Notepad", p);
+            app_launch_by_name("Files", p);
+        } else {
+            fm_open_with(f);
         }
         break;
     case 3: fm_copy_selection(f, true); break;
@@ -1322,7 +1129,7 @@ static void fm_context_menu(files_t *f, int x, int y, int idx) {
         int n = fm_sel_count(f);
         bool dir = f->ents[idx].is_dir;
         snprintf(items, sizeof items, "Open\tEnter|%s|-|Cut\tCtrl+X|Copy\tCtrl+C|-|%sRename\tF2|Delete\tDel|-|Properties",
-                 n > 1 ? "!Open with Notepad" : dir ? "Open in new window" : "Open with Notepad",
+                 n > 1 ? "!Open With..." : dir ? "Open in new window" : "Open With...",
                  n > 1 ? "!" : "");
         ui_popup_menu(f->win, x, y, items, fm_item_menu_cb, f);
     } else {
@@ -1414,7 +1221,7 @@ static void view_draw(widget_t *w, surface_t *s, rect_t r) {
                 blit_icon(s, ix, iy, ICON_BIG, entry_icon_id(f, i), cut ? 110 : 255);
             }
             if (!e->is_dir && e->kind != K_TEXT) {     /* badge: the app that opens it */
-                const app_desc_t *app = app_for_file(e->name);
+                const app_desc_t *app = assoc_default_app(p);
                 if (app) {
                     const surface_t *bi = app_icon(app, 20);
                     if (bi) gfx_blit_alpha(s, ix + ICON_BIG - 16, iy + ICON_BIG - 18, bi, cut ? 110 : 255);
@@ -1758,7 +1565,7 @@ static void draw_tb_button(files_t *f, surface_t *s, int b) {
     else if (b == TB_UP) g = UI_GLYPH_ARROW_UP;
     if (g >= 0) { ui_draw_glyph(s, g, r.x + 9, r.y + 9, 14, c); return; }
     if (b == TB_NEWDIR) {
-        blit_icon(s, r.x + 5, r.y + 6, 20, K_FOLDER, 255);
+        blit_icon(s, r.x + 5, r.y + 6, 20, ICON_FOLDER, 255);
         int px = r.x + 22, py = r.y + 21;
         gfx_fill_circle_aa(s, px, py, 6.5, t->accent);
         gfx_fill_rect(s, px - 3, py - 1, 7, 2, t->accent_text);
@@ -2034,7 +1841,7 @@ static void fm_launch(const char *arg) {
 
 /* App icon: a blue folder with papers. */
 static void fm_app_icon(surface_t *s, int x, int y, int size) {
-    draw_folder(s, x, y + size / 32, size, EM_NONE, true);
+    draw_app_folder(s, x, y + size / 32, size);
     double u = size / 64.0;
     /* a small magnifying glass badge */
     gfx_fill_circle_aa(s, UX(44), UY(43), 9.5 * u, RGBA(255, 255, 255, 235));

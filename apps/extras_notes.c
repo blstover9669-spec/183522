@@ -17,6 +17,9 @@
  *   - launching the app restores every saved note that is not open yet (or
  *     creates a first note); launching it while notes are open creates a new
  *     note. Ctrl+N new note, Ctrl+D delete note.
+ *   - any other text file (".note" files are registered with this app, see
+ *     REGISTER_FILETYPE in kernel/shell/assoc.c) opens as a note that is
+ *     saved back to that file; deleting such a note deletes the file.
  *
  * All editing state lives in a per-window struct; the only global is the
  * list of open notes (to avoid opening a note twice and to place new ones).
@@ -59,7 +62,8 @@ typedef struct { char *text; int len, caret; } snap_t;
 
 typedef struct sticky_note {
     window_t *win;
-    int id;
+    int id;                     /* note-N in NOTES_DIR; 0 for a file note */
+    char *path;                 /* file note: the file it was opened from */
     char *text;
     int len, cap;
     int caret, anchor;
@@ -106,6 +110,7 @@ static bool note_blank(sn_t *n) {
 
 static void note_save_meta(sn_t *n) {
     char meta[VFS_PATH_MAX], buf[128];
+    if (n->path) { n->meta_dirty = false; return; }    /* file notes keep no geometry */
     note_paths(n->id, NULL, meta);
     rect_t f = win_frame_rect(n->win);
     int len = snprintf(buf, sizeof buf, "color=%d\nx=%d\ny=%d\nw=%d\nh=%d\n", n->color, f.x, f.y,
@@ -118,6 +123,15 @@ static void note_save_meta(sn_t *n) {
 static void note_save(sn_t *n) {
     if (n->deleted) return;
     char txt[VFS_PATH_MAX];
+    if (n->path) {              /* a file note: write the text back to its file */
+        if (n->dirty) {
+            int rc = vfs_write_file(n->path, n->text, (uint32_t)n->len);
+            if (rc < 0) klog("notes: cannot save %s: %s", n->path, vfs_strerror(rc));
+            else klog("notes: saved %s (%d bytes)", n->path, n->len);
+        }
+        n->dirty = n->meta_dirty = false;
+        return;
+    }
     note_paths(n->id, txt, NULL);
     if (note_blank(n) && !vfs_exists(txt)) { n->dirty = n->meta_dirty = false; return; }
     vfs_mkdirs(NOTES_DIR);
@@ -131,6 +145,7 @@ static void note_save(sn_t *n) {
 }
 
 static void note_remove_files(int id) {
+    if (id <= 0) return;
     char txt[VFS_PATH_MAX], meta[VFS_PATH_MAX];
     note_paths(id, txt, meta);
     if (vfs_exists(txt)) vfs_remove(txt);
@@ -150,6 +165,12 @@ static int note_id_from_name(const char *name) {
 static sn_t *note_find(int id) {
     for (sn_t *n = g_notes; n; n = n->next)
         if (n->id == id) return n;
+    return NULL;
+}
+
+static sn_t *note_find_path(const char *path) {
+    for (sn_t *n = g_notes; n; n = n->next)
+        if (n->path && !strcmp(n->path, path)) return n;
     return NULL;
 }
 
@@ -868,6 +889,7 @@ static void note_free(sn_t *n) {
     for (int i = 0; i < n->nredo; i++) snap_free(&n->redo[i]);
     free(n->text);
     free(n->ls);
+    free(n->path);
     free(n);
 }
 
@@ -921,7 +943,8 @@ static void note_event(window_t *win, const event_t *ev) {
         break;
     case EV_CLOSE:
         if (!n->deleted) {
-            if (note_blank(n)) note_remove_files(n->id);
+            if (n->path) note_save(n);
+            else if (note_blank(n)) note_remove_files(n->id);
             else { n->dirty = true; note_save(n); }
         }
         win_set_userdata(win, NULL);
@@ -1015,15 +1038,12 @@ static void parse_meta(const char *m, int *color, int *x, int *y, int *w, int *h
     }
 }
 
-static sn_t *note_restore(int id) {
-    sn_t *ex = note_find(id);
-    if (ex) return ex;
-    char txt[VFS_PATH_MAX], meta[VFS_PATH_MAX];
-    note_paths(id, txt, meta);
+/* Read a text file as note text: plain text only (CRs and control characters
+   dropped, tabs expanded). NULL if it cannot be read. */
+static char *read_note_text(const char *path) {
     uint32_t size = 0;
-    char *text = vfs_read_file(txt, &size);
+    char *text = vfs_read_file(path, &size);
     if (!text) return NULL;
-    /* plain text only: drop CRs and control characters, expand tabs */
     char *clean = malloc((size_t)size * 4 + 1);
     int o = 0;
     if (clean) {
@@ -1036,6 +1056,34 @@ static sn_t *note_restore(int id) {
         clean[o] = 0;
     }
     free(text);
+    return clean;
+}
+
+/* Open any text file (e.g. a .note from Files) as a note saved back to it. */
+static sn_t *note_open_file(const char *path) {
+    sn_t *ex = note_find_path(path);
+    if (ex) return ex;
+    char *clean = read_note_text(path);
+    if (!clean) return NULL;
+    char *dup = strdup(path);
+    if (!dup) { free(clean); return NULL; }
+    int x, y;
+    default_pos(SN_W, SN_H, &x, &y);
+    sn_t *n = note_open(0, clean, 0, x, y, SN_W, SN_H, true);
+    free(clean);
+    if (!n) { free(dup); return NULL; }
+    n->path = dup;
+    klog("notes: opened %s", path);
+    return n;
+}
+
+static sn_t *note_restore(int id) {
+    sn_t *ex = note_find(id);
+    if (ex) return ex;
+    char txt[VFS_PATH_MAX], meta[VFS_PATH_MAX];
+    note_paths(id, txt, meta);
+    uint32_t size = 0;
+    char *clean = read_note_text(txt);
     if (!clean) return NULL;
     int color = 0, x = 0, y = 0, w = SN_W, h = SN_H;
     bool place = false;
@@ -1079,19 +1127,20 @@ static void on_delete_answer(int result, void *ctx) {
     sn_t *n = ctx;
     if (result != MB_RESULT_YES) return;
     n->deleted = true;
-    note_remove_files(n->id);
-    klog("notes: deleted note-%d", n->id);
+    if (n->path) { vfs_remove(n->path); klog("notes: deleted %s", n->path); }
+    else { note_remove_files(n->id); klog("notes: deleted note-%d", n->id); }
     win_close(n->win);
 }
 
 static void note_request_delete(sn_t *n) {
-    if (note_blank(n)) {
+    if (note_blank(n) && !n->path) {
         n->deleted = true;
         note_remove_files(n->id);
         win_close(n->win);
         return;
     }
-    ui_message_box(n->win, "Delete note", "Delete this note?\nIts text will be gone for good.",
+    ui_message_box(n->win, "Delete note", n->path ? "Delete this note and its file?\nIts text will be gone for good."
+                                                  : "Delete this note?\nIts text will be gone for good.",
                    MB_YESNO | MB_ICON_QUESTION, on_delete_answer, n);
 }
 
@@ -1100,8 +1149,13 @@ static void notes_launch(const char *arg) {
     if (arg && *arg) {
         if (!strcmp(arg, "new")) { note_create_new(0, 0, 0, false); return; }
         int id = note_id_from_name(vfs_basename(arg));
-        if (id > 0) {
+        char dir[VFS_PATH_MAX];
+        vfs_dirname(arg, dir);
+        if (id > 0 && !strcmp(dir, NOTES_DIR)) {
             sn_t *n = note_restore(id);
+            if (n) { win_focus(n->win); return; }
+        } else if (vfs_exists(arg) && !vfs_is_dir(arg)) {
+            sn_t *n = note_open_file(arg);
             if (n) { win_focus(n->win); return; }
         }
     }
