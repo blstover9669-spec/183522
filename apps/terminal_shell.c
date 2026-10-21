@@ -15,6 +15,7 @@
  * rest of the command line is queued until the job ends.
  */
 #include "terminal_term.h"
+#include <nova/disk.h>
 
 #define MAX_TOKS  256
 #define MAX_ARGS  256
@@ -1963,6 +1964,107 @@ static int cmd_free(tctx_t *c, int argc, char **argv) {
     return 0;
 }
 
+/* ---- disks and persistence (<nova/disk.h>) -------------------------------------------- */
+static void ago(uint32_t then, char *out, int size) {
+    uint32_t now = sys_time(), d = now > then ? now - then : 0;
+    if (!then) snprintf(out, (size_t)size, "never");
+    else if (d < 2) snprintf(out, (size_t)size, "just now");
+    else if (d < 120) snprintf(out, (size_t)size, "%u seconds ago", d);
+    else if (d < 7200) snprintf(out, (size_t)size, "%u minutes ago", d / 60);
+    else snprintf(out, (size_t)size, "%u hours ago", d / 3600);
+}
+
+static int cmd_sync(tctx_t *c, int argc, char **argv) {
+    if (!persist_active()) {
+        tc_printf(c, "%sNothing to sync:%s NovaOS is running from the CD, so your files live in memory only.\n",
+                  col(c, T_BYELLOW), col(c, T_RESET));
+        tc_printf(c, "%sInstall NovaOS to a hard disk (Installer app, or 'open Installer') to keep them across restarts.%s\n",
+                  col(c, T_GRAY), col(c, T_RESET));
+        return 0;
+    }
+    persist_info_t before;
+    persist_get_info(&before);
+    uint32_t t0 = sys_uptime_ms();
+    int r = persist_save();
+    uint32_t ms = sys_uptime_ms() - t0;
+    if (r != DISK_OK) {
+        tc_err(c, "sync: could not save to disk %d: %s", before.disk, disk_strerror(r));
+        return 1;
+    }
+    persist_info_t pi;
+    persist_get_info(&pi);
+    char sz[16];
+    human_size(pi.used, sz, sizeof sz);
+    if (!before.dirty && !before.saving)
+        tc_printf(c, "%sAlready saved:%s all files are on disk %d (%sB).\n", col(c, T_BGREEN), col(c, T_RESET), pi.disk, sz);
+    else
+        tc_printf(c, "%sSaved:%s all files written to disk %d (%sB in %u ms).\n", col(c, T_BGREEN), col(c, T_RESET), pi.disk, sz, ms);
+    return 0;
+}
+
+static int cmd_df(tctx_t *c, int argc, char **argv) {
+    bool f[256] = { 0 };
+    if (get_flags(c, argc, argv, "hk", f) < 0) return 2;
+    bool human = f['h'] || !f['k'];
+    persist_info_t pi;
+    persist_get_info(&pi);
+    uint32_t files = vfs_total_bytes();
+    /* the RAM disk can grow until the heap is full */
+    uint32_t ram_size = files + sys_mem_free();
+    char a[16], b[16], d[16];
+    tc_printf(c, "%s%-14s %8s %8s %8s %5s  %s" T_RESET "\n", col(c, T_GRAY), "Filesystem", human ? "Size" : "1K-blocks",
+              "Used", "Avail", "Use%", "Mounted on");
+#define DF_ROW(name, size, used, mnt) do { \
+        uint32_t s_ = (size), u_ = MIN((used), s_), v_ = s_ - u_; \
+        if (human) { human_size(s_, a, sizeof a); human_size(u_, b, sizeof b); human_size(v_, d, sizeof d); } \
+        else { snprintf(a, sizeof a, "%u", s_ / 1024); snprintf(b, sizeof b, "%u", u_ / 1024); snprintf(d, sizeof d, "%u", v_ / 1024); } \
+        tc_printf(c, "%-14s %8s %8s %8s %4u%%  %s\n", (name), a, b, d, s_ ? (unsigned)((uint64_t)u_ * 100 / s_) : 0u, (mnt)); \
+    } while (0)
+    DF_ROW("ramfs", ram_size, files, "/");
+    if (pi.active) {
+        char dev[16];
+        snprintf(dev, sizeof dev, "disk%d", pi.disk);
+        DF_ROW(dev, pi.capacity, pi.used, "(saved copy of /)");
+    }
+#undef DF_ROW
+    tc_write(c, "\n", 1);
+    if (pi.active) {
+        char when[32];
+        ago(pi.last_save, when, sizeof when);
+        tc_printf(c, "Files are saved to disk %d automatically; last save %s%s.\n", pi.disk, when,
+                  pi.saving ? " (saving now)" : pi.dirty ? ", unsaved changes pending" : "");
+    } else {
+        tc_printf(c, "%sRunning from the CD: files are kept in RAM and lost at restart (see 'disks').%s\n", col(c, T_GRAY), col(c, T_RESET));
+    }
+    return 0;
+}
+
+static int cmd_disks(tctx_t *c, int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "-r")) disk_rescan();
+    int n = disk_count();
+    if (!n) {
+        tc_puts(c, "No hard disks found.\n");
+        tc_printf(c, "%sNovaOS sees IDE disks only: in VirtualBox add a disk to the IDE controller (64 MB or more).%s\n",
+                  col(c, T_GRAY), col(c, T_RESET));
+        return 0;
+    }
+    tc_printf(c, "%s%-5s %-16s %-24s %9s  %s" T_RESET "\n", col(c, T_GRAY), "DISK", "LOCATION", "MODEL", "SIZE", "STATUS");
+    for (int i = 0; i < n; i++) {
+        const disk_info_t *di = disk_get(i);
+        if (!di) continue;
+        char sz[16];
+        disk_format_size(di->sectors * DISK_SECTOR_SIZE, sz, sizeof sz);
+        const char *status, *sc;
+        if (install_is_boot_disk(i)) { status = "NovaOS (running, files saved here)"; sc = T_BGREEN; }
+        else if (install_disk_has_novaos(i)) { status = "NovaOS installed"; sc = T_BCYAN; }
+        else if (di->sectors * DISK_SECTOR_SIZE < INSTALL_MIN_BYTES) { status = "too small to install"; sc = T_GRAY; }
+        else { status = "available (Installer)"; sc = T_GRAY; }
+        tc_printf(c, "%-5d %-16s %-24.24s %9s  %s%s%s\n", i, di->location ? di->location : "?", di->model, sz,
+                  col(c, sc), status, col(c, T_RESET));
+    }
+    return 0;
+}
+
 static int cmd_ps(tctx_t *c, int argc, char **argv) {
     window_t *list[128];
     int n = MIN(win_list(list, 128), 128);
@@ -2495,6 +2597,9 @@ static const tcmd_t s_cmds[] = {
     { "uptime", cmd_uptime, GRP_SYSTEM, "uptime", "Show how long the system has been running." },
     { "free", cmd_free, GRP_SYSTEM, "free [-k]", "Show memory usage (-k: in KiB)." },
     { "mem", cmd_free, GRP_SYSTEM, "mem [-k]", "Show memory usage (same as free)." },
+    { "df", cmd_df, GRP_SYSTEM, "df [-h] [-k]", "Show file system space: the RAM disk and, on an installed system, the saved copy on the hard disk." },
+    { "disks", cmd_disks, GRP_SYSTEM, "disks [-r]", "List the IDE hard disks (model, size, NovaOS installed?); -r probes the controllers again." },
+    { "sync", cmd_sync, GRP_SYSTEM, "sync", "Save all files to the hard disk now (installed systems save automatically too)." },
     { "ps", cmd_ps, GRP_SYSTEM, "ps", "List open windows with their ids (the 'processes' of NovaOS)." },
     { "kill", cmd_kill, GRP_SYSTEM, "kill WINDOW_ID...", "Close windows by id (see ps)." },
     { "killall", cmd_killall, GRP_SYSTEM, "killall APP", "Close every window of an app." },
