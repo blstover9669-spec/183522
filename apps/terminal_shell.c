@@ -2031,8 +2031,8 @@ static int cmd_df(tctx_t *c, int argc, char **argv) {
     if (pi.active) {
         char when[32];
         ago(pi.last_save, when, sizeof when);
-        tc_printf(c, "Files are saved to disk %d automatically; last save %s%s.\n", pi.disk, when,
-                  pi.saving ? " (saving now)" : pi.dirty ? ", unsaved changes pending" : "");
+        tc_printf(c, "Auto-saved to disk %d; last save %s%s.\n", pi.disk, when,
+                  pi.saving ? " (saving now)" : pi.dirty ? " (changes pending)" : "");
     } else {
         tc_printf(c, "%sRunning from the CD: files are kept in RAM and lost at restart (see 'disks').%s\n", col(c, T_GRAY), col(c, T_RESET));
     }
@@ -2048,18 +2048,18 @@ static int cmd_disks(tctx_t *c, int argc, char **argv) {
                   col(c, T_GRAY), col(c, T_RESET));
         return 0;
     }
-    tc_printf(c, "%s%-5s %-16s %-24s %9s  %s" T_RESET "\n", col(c, T_GRAY), "DISK", "LOCATION", "MODEL", "SIZE", "STATUS");
+    tc_printf(c, "%s%-4s %-16s %-20s %8s  %s" T_RESET "\n", col(c, T_GRAY), "DISK", "LOCATION", "MODEL", "SIZE", "STATUS");
     for (int i = 0; i < n; i++) {
         const disk_info_t *di = disk_get(i);
         if (!di) continue;
         char sz[16];
         disk_format_size(di->sectors * DISK_SECTOR_SIZE, sz, sizeof sz);
         const char *status, *sc;
-        if (install_is_boot_disk(i)) { status = "NovaOS (running, files saved here)"; sc = T_BGREEN; }
+        if (install_is_boot_disk(i)) { status = "running NovaOS (boot disk)"; sc = T_BGREEN; }
         else if (install_disk_has_novaos(i)) { status = "NovaOS installed"; sc = T_BCYAN; }
         else if (di->sectors * DISK_SECTOR_SIZE < INSTALL_MIN_BYTES) { status = "too small to install"; sc = T_GRAY; }
-        else { status = "available (Installer)"; sc = T_GRAY; }
-        tc_printf(c, "%-5d %-16s %-24.24s %9s  %s%s%s\n", i, di->location ? di->location : "?", di->model, sz,
+        else { status = "free for the Installer"; sc = T_GRAY; }
+        tc_printf(c, "%-4d %-16s %-20.20s %8s  %s%s%s\n", i, di->location ? di->location : "?", di->model, sz,
                   col(c, sc), status, col(c, T_RESET));
     }
     return 0;
