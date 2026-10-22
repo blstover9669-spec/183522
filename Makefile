@@ -100,6 +100,10 @@ $(KERNEL): $(OBJS) $(BUILD)/obj/ksyms.o linker.ld
 	@echo "==> $@ ($$(stat -c %s $@) bytes)"
 
 # grub.cfg is regenerated whenever CMDLINE / GRUB_TIMEOUT change (stamp file trick).
+# gfxpayload is set AFTER the multiboot command on purpose: GRUB's multiboot loader
+# turns the video request in the kernel's Multiboot header (1024x768x32) into
+# gfxpayload when it loads the kernel, so a value set before it would be ignored.
+# The mode is only set at boot, from whatever gfxpayload says then.
 $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | md5sum | cut -c1-12):
 	@mkdir -p $(BUILD)
 	@rm -f $(BUILD)/cfgstamp-*
@@ -115,18 +119,18 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  'insmod all_video' \
 	  'insmod vbe' \
 	  'insmod vga' \
-	  'set gfxpayload=1024x768x32,1024x768x24,800x600x32,auto' \
 	  'set color_normal=light-gray/black' \
 	  'set menu_color_normal=light-gray/black' \
 	  'set menu_color_highlight=white/blue' \
 	  '' \
 	  'menuentry "NovaOS 1.5 Developer Preview" {' \
 	  '  multiboot /boot/kernel.elf $(CMDLINE)' \
+	  '  set gfxpayload=1024x768x32,1024x768x24,800x600x32,800x600x24,auto' \
 	  '  boot' \
 	  '}' \
 	  'menuentry "NovaOS 1.5 Developer Preview (safe graphics 800x600)" {' \
-	  '  set gfxpayload=800x600x32,800x600x24,auto' \
 	  '  multiboot /boot/kernel.elf res=800x600 $(CMDLINE)' \
+	  '  set gfxpayload=800x600x32,800x600x24,800x600,auto' \
 	  '  boot' \
 	  '}' \
 	  'menuentry "Boot from the first hard disk (installed NovaOS)" {' \

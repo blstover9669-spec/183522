@@ -17,7 +17,11 @@ align 4
     dd MB_CHECKSUM
     ; a.out kludge fields (unused for ELF but must be present before video fields)
     dd 0, 0, 0, 0, 0
-    ; video mode request: linear graphics, 1024x768x32
+    ; video mode request: linear graphics, 1024x768x32. GRUB's multiboot command
+    ; turns this into gfxpayload=1024x768x32,1024x768,auto when it loads the
+    ; kernel, replacing any gfxpayload set before it; our grub.cfg (Makefile)
+    ; therefore sets its mode lists AFTER the multiboot line (normal entry:
+    ; 1024x768x32 then x24; safe entry: 800x600). The disk loader ignores this.
     dd 0            ; mode_type 0 = linear framebuffer
     dd 1024         ; width
     dd 768          ; height
