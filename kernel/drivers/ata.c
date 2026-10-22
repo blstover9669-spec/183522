@@ -10,6 +10,14 @@
  * polling and timeouts; interrupts are disabled on the device (nIEN), so no
  * IRQ 14/15 handler is needed. Works with QEMU's PIIX IDE and VirtualBox's
  * PIIX3/PIIX4 IDE controllers (both run in legacy/compatibility mode).
+ *
+ * Empty positions: a channel without a controller floats to 0xFF; VirtualBox
+ * returns 0x7F (ATA_EMPTY_BUS_DATA: D7 pulled down) from every register of an
+ * empty channel and of a selected-but-absent device 0; a missing device 1
+ * behind an ATAPI device 0 reads 0. Status 0x7F/0xFF (impossible for a real
+ * drive: BSY clear with DRQ, DF and ERR all set) and LBA registers reading
+ * 0x7F/0xFF count as "no device", so a VM with only the CD (or nothing)
+ * reports no hard disks cleanly.
  */
 #include "kernel.h"
 #include <nova/disk.h>
@@ -69,8 +77,20 @@ static bool tmo_expired(tmo_t *t) {
     return ++t->spins > t->limit_ms * 2000u;
 }
 
-static inline uint8_t alt_status(int ch) { return inb(ctl_base[ch]); }
-static inline uint8_t status(int ch) { return inb((uint16_t)(io_base[ch] + REG_STATUS)); }
+/* Test option ataempty=MASK (bit 0 primary master, 1 primary slave, 2 secondary
+   master, 3 secondary slave): those positions read 0x7F from every register while
+   selected, like VirtualBox's empty bus, so the probe can be tested in QEMU. */
+static unsigned fake_empty;
+
+static inline uint8_t reg_in(int ch, uint16_t port) {
+    if (fake_empty && selected[ch] >= 0 && (fake_empty >> (ch * 2 + ((selected[ch] >> 4) & 1)) & 1)) return 0x7F;
+    return inb(port);
+}
+static inline uint8_t alt_status(int ch) { return reg_in(ch, ctl_base[ch]); }
+static inline uint8_t status(int ch) { return reg_in(ch, (uint16_t)(io_base[ch] + REG_STATUS)); }
+
+/* Floating / empty bus values (0xFF: nothing decodes the port; 0x7F: VirtualBox). */
+static inline bool bus_float(uint8_t v) { return v == 0xFF || v == 0x7F; }
 
 static void delay400(int ch) {
     for (int i = 0; i < 5; i++) (void)alt_status(ch);
@@ -82,7 +102,7 @@ static int wait_idle(int ch, uint32_t ms) {
     tmo_start(&t, ms);
     for (;;) {
         uint8_t s = alt_status(ch);
-        if (s == 0xFF) return -1;            /* floating bus: nothing there */
+        if (bus_float(s)) return -1;         /* floating / empty bus: nothing there */
         if (!(s & SR_BSY)) return s;
         if (tmo_expired(&t)) return -1;
     }
@@ -132,9 +152,14 @@ static void ata_string(const uint16_t *id, int first, int words, char *out) {
     if (s) memmove(out, out + s, (size_t)(n - s + 1));
 }
 
-static bool identify(int ch, int slave, disk_info_t *d) {
+/* IDENTIFY DEVICE: ID_DISK fills *d; ID_NONE = nothing there; ID_SKIP = a device
+   that is not a usable hard disk (logged here). */
+enum { ID_DISK, ID_NONE, ID_SKIP };
+
+static int identify(int ch, int slave, disk_info_t *d) {
     uint16_t base = io_base[ch];
     select_drive(ch, 0xA0 | (slave << 4));
+    if (wait_idle(ch, 2000) < 0) return ID_NONE;    /* empty bus (0x7F/0xFF) or stuck BSY */
     outb((uint16_t)(base + REG_COUNT), 0);
     outb((uint16_t)(base + REG_LBA0), 0);
     outb((uint16_t)(base + REG_LBA1), 0);
@@ -142,18 +167,24 @@ static bool identify(int ch, int slave, disk_info_t *d) {
     outb((uint16_t)(base + REG_COMMAND), CMD_IDENTIFY);
     delay400(ch);
     uint8_t s = status(ch);
-    if (s == 0 || s == 0xFF) return false;          /* no device */
-    if (wait_idle(ch, 1000) < 0) return false;
-    uint8_t l1 = inb((uint16_t)(base + REG_LBA1)), l2 = inb((uint16_t)(base + REG_LBA2));
+    if (s == 0 || bus_float(s)) return ID_NONE;     /* no device */
+    if (wait_idle(ch, 1000) < 0) return ID_NONE;
+    uint8_t l1 = reg_in(ch, (uint16_t)(base + REG_LBA1)), l2 = reg_in(ch, (uint16_t)(base + REG_LBA2));
+    if (bus_float(l1) && bus_float(l2)) return ID_NONE;  /* empty bus, not a signature */
     if ((l1 == 0x14 && l2 == 0xEB) || (l1 == 0x69 && l2 == 0x96)) {
         klog("ata: %s: ATAPI device (CD/DVD), skipped", locations[ch * 2 + slave]);
-        return false;
+        return ID_SKIP;
     }
     if (l1 || l2) {
         klog("ata: %s: unknown signature %02x/%02x, skipped", locations[ch * 2 + slave], l1, l2);
-        return false;
+        return ID_SKIP;
     }
-    if (wait_drq(ch, 1000) != DISK_OK) return false;
+    int r = wait_drq(ch, 1000);
+    if (r == DISK_ETIMEOUT) {
+        klog("ata: %s: no answer to IDENTIFY, skipped", locations[ch * 2 + slave]);
+        return ID_SKIP;
+    }
+    if (r != DISK_OK) return ID_NONE;               /* aborted: no ATA disk there */
     uint16_t id[256];
     insw((uint16_t)(base + REG_DATA), id, 256);
 
@@ -166,7 +197,7 @@ static bool identify(int ch, int slave, disk_info_t *d) {
     if (!d->model[0]) strlcpy(d->model, "ATA hard disk", sizeof d->model);
     if (!(id[49] & (1 << 9))) {
         klog("ata: %s: %s has no LBA support, skipped", d->location, d->model);
-        return false;
+        return ID_SKIP;
     }
     uint32_t lba28 = (uint32_t)id[60] | ((uint32_t)id[61] << 16);
     d->sectors = lba28;
@@ -175,20 +206,42 @@ static bool identify(int ch, int slave, disk_info_t *d) {
                          ((uint64_t)id[103] << 48);
         if (lba48) { d->lba48 = true; if (lba48 > d->sectors) d->sectors = lba48; }
     }
-    return d->sectors > 0;
+    if (!d->sectors) {
+        klog("ata: %s: %s reports 0 sectors, skipped", d->location, d->model);
+        return ID_SKIP;
+    }
+    return ID_DISK;
+}
+
+/* Status of the master and the slave position (0x7F/0xFF: nothing there). */
+static void probe_status(int ch, uint8_t st[2]) {
+    for (int sl = 0; sl < 2; sl++) {
+        selected[ch] = -1;
+        select_drive(ch, 0xA0 | (sl << 4));
+        st[sl] = status(ch);
+    }
 }
 
 int disk_rescan(void) {
     ndisks = 0;
     for (int ch = 0; ch < 2; ch++) {
-        selected[ch] = -1;
-        uint8_t s = status(ch);
-        if (s == 0xFF) { klog("ata: %s channel: no devices (floating bus)", ch ? "secondary" : "primary"); continue; }
+        const char *name = ch ? "secondary" : "primary";
+        uint8_t st[2];
+        probe_status(ch, st);
+        if (bus_float(st[0]) && bus_float(st[1])) {
+            klog("ata: %s channel: no devices (empty bus, status %02x/%02x)", name, st[0], st[1]);
+            continue;
+        }
         outb(ctl_base[ch], CTL_NIEN);         /* polled mode: no IRQs from this channel */
-        if (s & SR_BSY) soft_reset(ch);
+        if ((!bus_float(st[0]) && (st[0] & SR_BSY)) || (!bus_float(st[1]) && (st[1] & SR_BSY))) {
+            soft_reset(ch);
+            probe_status(ch, st);
+        }
         for (int sl = 0; sl < 2 && ndisks < DISK_MAX; sl++) {
             disk_info_t d;
-            if (!identify(ch, sl, &d)) continue;
+            int r = bus_float(st[sl]) ? ID_NONE : identify(ch, sl, &d);
+            if (r == ID_NONE) klog("ata: %s: no device", locations[ch * 2 + sl]);
+            if (r != ID_DISK) continue;
             d.index = ndisks;
             disks[ndisks++] = d;
             char sz[24];
@@ -197,11 +250,18 @@ int disk_rescan(void) {
                  (unsigned long long)d.sectors, d.lba48 ? "LBA48" : "LBA28");
         }
     }
-    if (!ndisks) klog("ata: no hard disks found");
+    if (!ndisks) klog("ata: no disk (no hard disks found)");
     return ndisks;
 }
 
-static void ata_init(void) { disk_rescan(); }
+static void ata_init(void) {
+    const char *fe = sys_cmdline_get("ataempty");
+    if (fe) {
+        fake_empty = (unsigned)strtol(fe, NULL, 0) & 15;
+        klog("ata: test mode: positions %x read as an empty VirtualBox bus (0x7F)", fake_empty);
+    }
+    disk_rescan();
+}
 REGISTER_INIT(INIT_DRIVER, ata_init);
 
 int disk_count(void) { return ndisks; }
