@@ -164,6 +164,7 @@ static void sb_stop(void) {
 
 static void sb_pump(void) {
     int ppos = play_pos();
+    if (ppos != last_ppos) audio_note_progress();
     clear_range(last_ppos, ppos);                         /* played: now silence */
     last_ppos = ppos;
     int ahead = (wpos - ppos + RING) % RING;

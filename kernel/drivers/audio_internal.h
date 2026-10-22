@@ -23,6 +23,10 @@ typedef struct sound_card {
 void audio_render(int16_t *out, int frames);
 /* Called by drivers when the card ran out of data (DMA halted / caught up). */
 void audio_note_underrun(void);
+/* Called by drivers when the hardware play position moved. Without that for
+   STALL_MS the mixer keeps time itself (notes still end, the stream can stop)
+   and restarts the card every couple of seconds. */
+void audio_note_progress(void);
 
 /* Card probes, tried in this order by audio_init(); NULL if the card is absent. */
 const sound_card_t *ac97_probe(void);

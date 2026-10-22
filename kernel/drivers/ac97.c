@@ -59,7 +59,8 @@
 #define BUF_FRAMES      256     /* 5.3 ms at 48 kHz */
 #define LEAD_INIT       8       /* buffers queued ahead: ~43 ms */
 #define LEAD_MAX        26
-#define MAX_FILLS       4       /* buffers mixed per tick at most */
+#define MAX_FILLS       4       /* buffers mixed per tick at most (also the prefill at start;
+                                   the next ticks top it up to `lead`) */
 
 typedef struct PACKED bdesc {
     uint32_t addr;
@@ -71,7 +72,8 @@ static bdesc_t bdl[NBUF] __attribute__((aligned(32)));
 static int16_t bufs[NBUF][BUF_FRAMES * 2] __attribute__((aligned(4096)));
 static int16_t mono[BUF_FRAMES];
 static uint16_t nam, nabm;
-static int next_fill, lead = LEAD_INIT;
+static int next_fill, last_civ, lead = LEAD_INIT;
+static bool halted;
 static sound_card_t ac97_card;
 
 static const uint16_t ac97_ids[][2] = {
@@ -104,8 +106,11 @@ static void po_reset(void) {
 static void ac97_start(void) {
     po_reset();
     outl(nabm + PO_BDBAR, (uint32_t)(uintptr_t)bdl);
-    for (int i = 0; i < lead; i++) fill(i);
-    next_fill = lead % NBUF;
+    int pre = MIN(lead, MAX_FILLS);
+    for (int i = 0; i < pre; i++) fill(i);
+    next_fill = pre;
+    last_civ = 0;
+    halted = false;
     outb(nabm + PO_LVI, (uint8_t)((next_fill - 1) & (NBUF - 1)));
     outb(nabm + PO_CR, CR_RPBM);
 }
@@ -117,10 +122,19 @@ static void ac97_pump(void) {
     if (sr & SR_CLEAR) outw(nabm + PO_SR, sr & SR_CLEAR);
     if (sr & SR_DCH) {
         /* ran dry and stopped at LVI: the LVI write below restarts it */
-        audio_note_underrun();
-        if (lead < LEAD_MAX) lead += 2;
+        if (!halted) {
+            audio_note_underrun();
+            if (lead < LEAD_MAX) lead += 2;
+        }
+        halted = true;
+    } else {
+        halted = false;
     }
     int civ = inb(nabm + PO_CIV) & (NBUF - 1);
+    if (civ != last_civ) {
+        last_civ = civ;
+        audio_note_progress();
+    }
     int queued = (next_fill - civ) & (NBUF - 1);
     int fills = 0;
     while (queued < lead && fills < MAX_FILLS) {

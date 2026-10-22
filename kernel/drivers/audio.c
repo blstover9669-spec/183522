@@ -24,6 +24,8 @@
 #define CHUNK         256                /* frames mixed per inner pass                   */
 #define LEGACY_VOLUME 50
 #define IDLE_STOP_MS  2000
+#define STALL_MS      300                /* no DMA progress for this long = stalled       */
+#define STALL_RETRY_MS 2000
 #define MAX_NOTE_MS   60000
 
 enum { V_OFF, V_ATTACK, V_HOLD, V_RELEASE };
@@ -66,12 +68,19 @@ static bool sound_on = true;
 static int master_pct = 80, master_mul = 205;
 static int legacy_id;                     /* voice of the sys_beep / speaker_tone channel */
 static uint32_t spk_mhz;                  /* what the PC speaker plays now              */
-static volatile uint32_t underruns, streams;
-/* mixer cost in TSC cycles, for the "sound" command: time spent in the card tick and
-   the time between consecutive ticks while streaming */
-static uint64_t cost_total, cost_max, cost_span, cost_prev;
-static uint32_t cost_ticks;
-static uint64_t cost_start;
+static volatile uint32_t underruns, streams, stalls;
+static uint32_t stall_ms;                 /* ms since the card's play position last moved */
+/* statistics for the "sound" command, in TSC cycles per streaming tick: the whole card
+   tick (with port I/O, which in an emulator may wait for the device model) and the
+   synthesizer alone */
+static uint64_t st_span, st_prev, st_tick_total, st_tick_max, st_syn_total, st_syn_max, st_syn_now;
+static uint32_t st_ticks;
+
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 static int16_t sine_tab[1025];
 
 /* melody (sys_play_notes), timed in the same units as the voices */
@@ -229,6 +238,7 @@ static void voice_mix(voice_t *v, int32_t *acc, int n) {
 }
 
 void audio_render(int16_t *out, int frames) {
+    uint64_t t0 = rdtsc();
     int32_t acc[CHUNK];
     while (frames > 0) {
         while (mel_on && mel_left <= 0) melody_advance();
@@ -245,9 +255,11 @@ void audio_render(int16_t *out, int frames) {
         out += n;
         frames -= n;
     }
+    st_syn_now += rdtsc() - t0;
 }
 
 void audio_note_underrun(void) { underruns++; }
+void audio_note_progress(void) { stall_ms = 0; }
 
 /* ---- the 1 kHz tick -------------------------------------------------------------------- */
 static void speaker_update(void) {
@@ -271,28 +283,24 @@ static bool any_active(void) {
     return false;
 }
 
-static inline uint64_t rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
 static void card_tick(void);
 
 void audio_tick(void) {
     if (card) {
         bool was = streaming;
+        st_syn_now = 0;
         uint64_t t0 = rdtsc();
         card_tick();
         uint64_t t1 = rdtsc();
-        if (!was && streaming && t1 - t0 > cost_start) cost_start = t1 - t0;
-        if (was && cost_prev) {
-            cost_span += t0 - cost_prev;
-            cost_total += t1 - t0;
-            if (t1 - t0 > cost_max) cost_max = t1 - t0;
-            cost_ticks++;
+        if (was && st_prev) {
+            st_span += t0 - st_prev;
+            st_tick_total += t1 - t0;
+            st_syn_total += st_syn_now;
+            if (t1 - t0 > st_tick_max) st_tick_max = t1 - t0;
+            if (st_syn_now > st_syn_max) st_syn_max = st_syn_now;
+            st_ticks++;
         }
-        cost_prev = streaming ? t0 : 0;
+        st_prev = streaming ? t0 : 0;
         return;
     }
     /* PC speaker: voices and melody are timed in milliseconds */
@@ -314,10 +322,22 @@ static void card_tick(void) {
         streaming = true;
         streams++;
         idle_ms = 0;
+        stall_ms = 0;
         card->start();
         return;
     }
     card->pump();
+    if (++stall_ms > STALL_MS) {
+        /* the card stopped taking samples: keep the synthesizer's clock running so
+           notes and melodies still end, and try restarting the card now and then */
+        int16_t scratch[64];
+        if (stall_ms == STALL_MS + 1) stalls++;
+        audio_render(scratch, MIN(rate / 1000, 64));
+        if ((stall_ms - STALL_MS) % STALL_RETRY_MS == 0) {
+            card->stop();
+            card->start();
+        }
+    }
     if (active) {
         idle_ms = 0;
     } else if (++idle_ms >= IDLE_STOP_MS) {
@@ -446,14 +466,19 @@ void sound_set_volume(int pct) {
 int sound_get_volume(void) { return master_pct; }
 
 /* ---- init --------------------------------------------------------------------------------- */
-static uint32_t logged_underruns;
+static uint32_t logged_underruns, logged_stalls;
 
 static void audio_report(void *ctx) {
     (void)ctx;
-    uint32_t u = underruns;
+    uint32_t u = underruns, st = stalls;
     if (u != logged_underruns) {
         klog("audio: %u buffer underrun%s so far (%u streams)", u, u == 1 ? "" : "s", streams);
         logged_underruns = u;
+    }
+    if (st != logged_stalls) {
+        klog("audio: %s stopped taking samples (%u time%s) - is audio output enabled in the VM?", card ? card->name : "card",
+             st, st == 1 ? "" : "s");
+        logged_stalls = st;
     }
 }
 
@@ -518,16 +543,20 @@ static int cmd_sound(int argc, char **argv, cmd_writer_t *out) {
         cmd_puts(out, "Format:  one note at a time (VirtualBox: Settings > Audio > ICH AC97)\n");
     cmd_printf(out, "Sound:   %s\n", sound_on ? "on" : "off (muted)");
     if (card) {
-        cmd_printf(out, "Stream:  %s, started %u times, %u underruns\n", streaming ? "playing" : "idle", streams, underruns);
+        cmd_printf(out, "Stream:  %s, started %u time%s, %u underrun%s", streaming ? "playing" : "idle", streams,
+                   streams == 1 ? "" : "s", underruns, underruns == 1 ? "" : "s");
+        if (stalls) cmd_printf(out, ", stalled %u time%s", stalls, stalls == 1 ? "" : "s");
+        cmd_puts(out, "\n");
         uint32_t f = irq_save();
-        uint64_t total = cost_total, peak = cost_max, span = cost_span;
-        uint32_t ticks = cost_ticks;
+        uint64_t span = st_span, tick = st_tick_total, tmax = st_tick_max, syn = st_syn_total, smax = st_syn_max;
+        uint32_t ticks = st_ticks;
         irq_restore(f);
         if (ticks > 10 && span) {
             uint64_t per_ms = span / ticks;             /* TSC cycles per millisecond (approx.) */
-            cmd_printf(out, "Mixer:   %u.%02u%% CPU while playing, longest %u us (stream start %u us)\n",
-                       (uint32_t)(total * 100 / span), (uint32_t)(total * 10000 / span % 100),
-                       per_ms ? (uint32_t)(peak * 1000 / per_ms) : 0, per_ms ? (uint32_t)(cost_start * 1000 / per_ms) : 0);
+            cmd_printf(out, "Mixer:   synthesis %u.%02u%% CPU while playing, longest %u us per tick\n",
+                       (uint32_t)(syn * 100 / span), (uint32_t)(syn * 10000 / span % 100), (uint32_t)(smax * 1000 / per_ms));
+            cmd_printf(out, "         with card I/O %u.%02u%%, longest %u us\n", (uint32_t)(tick * 100 / span),
+                       (uint32_t)(tick * 10000 / span % 100), (uint32_t)(tmax * 1000 / per_ms));
         }
     }
     return 0;
