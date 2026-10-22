@@ -1,81 +1,29 @@
-/* speaker.c - PC speaker via PIT channel 2. Beeps/melodies are timed from the PIT IRQ. */
-#include "kernel.h"
+/* speaker.c - PC speaker via PIT channel 2: the fallback sound output when there is no
+   sound card (see audio.c, which owns the public sound API and decides what plays). */
+#include "audio_internal.h"
 
-static volatile uint32_t off_at;          /* g_ticks when the current tone ends (0 = none) */
-static const note_t *volatile melody;     /* current melody (copied) */
-static note_t melody_buf[256];
-static volatile int melody_len, melody_pos;
-static bool sound_on = true;
+static uint32_t cur_div;     /* PIT divisor currently programmed (0 = speaker off) */
 
-static void tone_hw(uint32_t freq) {
-    if (freq < 20 || freq > 20000) {
-        outb(0x61, inb(0x61) & 0xFC);
+void pcspk_set(uint32_t mhz) {
+    if (mhz < 20000 || mhz > 20000000) {
+        if (cur_div) outb(0x61, inb(0x61) & 0xFC);
+        cur_div = 0;
         return;
     }
-    uint32_t div = 1193182 / freq;
+    uint32_t div = (uint32_t)((1193182ull * 1000 + mhz / 2) / mhz);
+    if (div > 0xFFFF) div = 0xFFFF;
+    if (div == cur_div) return;
     outb(0x43, 0xB6);
     outb(0x42, div & 0xFF);
     outb(0x42, (div >> 8) & 0xFF);
-    outb(0x61, inb(0x61) | 3);
+    if (!cur_div) outb(0x61, inb(0x61) | 3);
+    cur_div = div;
 }
 
-void speaker_init(void) { outb(0x61, inb(0x61) & 0xFC); }
-
-void speaker_tone(uint32_t freq) {
-    if (!sound_on) return;
-    uint32_t f = irq_save();
-    melody = NULL;
-    off_at = 0;
-    tone_hw(freq);
-    irq_restore(f);
+void speaker_init(void) {
+    outb(0x61, inb(0x61) & 0xFC);
+    cur_div = 0;
 }
 
-void speaker_off(void) {
-    uint32_t f = irq_save();
-    melody = NULL;
-    off_at = 0;
-    tone_hw(0);
-    irq_restore(f);
-}
-
-void sys_beep(uint32_t freq, uint32_t ms) {
-    if (!sound_on) return;
-    uint32_t f = irq_save();
-    melody = NULL;
-    tone_hw(freq);
-    off_at = g_ticks + (ms ? ms : 1);
-    irq_restore(f);
-}
-
-void sys_play_notes(const note_t *notes, int count) {
-    if (!sound_on || count <= 0) return;
-    if (count > 256) count = 256;
-    uint32_t f = irq_save();
-    memcpy(melody_buf, notes, sizeof(note_t) * (size_t)count);
-    melody_len = count;
-    melody_pos = 0;
-    melody = melody_buf;
-    tone_hw(melody_buf[0].freq);
-    off_at = g_ticks + (melody_buf[0].ms ? melody_buf[0].ms : 1);
-    irq_restore(f);
-}
-
-/* Called from the PIT IRQ every tick. */
-void speaker_tick(void) {
-    if (!off_at || (int32_t)(g_ticks - off_at) < 0) return;
-    if (melody && melody_pos + 1 < melody_len) {
-        melody_pos++;
-        tone_hw(melody[melody_pos].freq);
-        off_at = g_ticks + (melody[melody_pos].ms ? melody[melody_pos].ms : 1);
-        return;
-    }
-    melody = NULL;
-    off_at = 0;
-    tone_hw(0);
-}
-
-bool sys_sound_enabled(void) { return sound_on; }
-void sys_set_sound_enabled(bool on) {
-    sound_on = on;
-    if (!on) speaker_off();
-}
+/* Called from the PIT IRQ every millisecond. */
+void speaker_tick(void) { audio_tick(); }

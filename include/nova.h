@@ -30,6 +30,7 @@
 #include <nova/app.h>
 #include <nova/vfs.h>
 #include <nova/sys.h>
+#include <nova/audio.h>
 #include <nova/icons.h>
 #include <nova/shell.h>
 #include <nova/service.h>
