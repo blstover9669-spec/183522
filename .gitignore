@@ -5,6 +5,7 @@
 *.d
 *.elf
 *.iso
+!/NovaOS.iso
 
 # disk images and emulator state
 *.img
