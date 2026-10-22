@@ -1049,10 +1049,12 @@ sound_release(v);                                 /* fades out (release time) */
   `sound_sample_rate()` (0 on the PC speaker). Show the device somewhere if
   sound matters to your app - Piano shows "Output: AC'97 - 8 notes at once".
 * `sound_set_volume(0..100)` / `sound_get_volume()`: master volume (default
-  80, or `volume=N` on the command line; the PC speaker has no volume).
+  80, or `volume=N` on the command line; the PC speaker has no volume). A
+  single note at volume 100 peaks around -10 dBFS; louder mixes (chords) go
+  through a soft limiter above -6 dBFS instead of clipping.
 * The simple calls (`sys_beep`, `speaker_tone` / `speaker_off`,
   `sys_play_notes`) are one channel on the same synthesizer: one note at a
-  time with the soft square wave at volume 50; a new beep or melody
+  time with the soft square wave at volume 55; a new beep or melody
   replaces the previous one (which fades out instead of clicking). Use them
   for UI feedback; use `sound_note` for music.
 * Terminal: `sound` (output, format, stream statistics, mixer CPU use),

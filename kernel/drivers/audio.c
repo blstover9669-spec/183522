@@ -22,7 +22,8 @@
 #define ONE           (1 << 30)          /* envelope full scale (Q30)                    */
 #define ENV_FLOOR     (ONE >> 10)        /* a fading note below -60 dB has ended          */
 #define CHUNK         256                /* frames mixed per inner pass                   */
-#define LEGACY_VOLUME 50
+#define LEGACY_VOLUME 55
+#define KNEE          16384              /* the soft limiter starts here (-6 dBFS)        */
 #define IDLE_STOP_MS  2000
 #define STALL_MS      300                /* no DMA progress for this long = stalled       */
 #define STALL_RETRY_MS 2000
@@ -41,7 +42,7 @@ typedef struct voice {
     int32_t  astep;          /* attack: env increment per sample                       */
     int32_t  rstep, rlen;    /* release: decrement per sample, length in samples       */
     int32_t  dmul;           /* decay multiplier per sample (Q30), 0 = no decay        */
-    int32_t  peak;           /* amplitude at full envelope, 0..9000                    */
+    int32_t  peak;           /* amplitude at full envelope, 0..11000                   */
 } voice_t;
 
 /* attack (microseconds) and release (milliseconds) per waveform */
@@ -145,7 +146,7 @@ static int voice_start(uint32_t mhz, uint32_t ms, int volume, int wave) {
     v->inc = rate ? (uint32_t)(((uint64_t)mhz << 32) / ((uint64_t)rate * 1000u)) : 0;
     v->left = ms ? ms_units(ms) : -1;
     if (v->left == 0) v->left = 1;
-    v->peak = CLAMP(volume, 0, 100) * 90;
+    v->peak = CLAMP(volume, 0, 100) * 110;
     v->env = 0;
     v->astep = ONE / us_samples(env_params[wave].attack_us);
     v->rlen = us_samples(env_params[wave].release_ms * 1000u);
@@ -237,6 +238,16 @@ static void voice_mix(voice_t *v, int32_t *acc, int n) {
     }
 }
 
+/* soft limiter: unchanged below KNEE, then smoothly towards full scale (loud chords) */
+static inline int16_t soft_clip(int32_t s) {
+    int32_t a = s < 0 ? -s : s;
+    if (a > KNEE) {
+        int32_t d = MIN(a - KNEE, 131072), r = 32767 - KNEE;
+        a = KNEE + d * r / (r + d);
+    }
+    return (int16_t)(s < 0 ? -a : a);
+}
+
 void audio_render(int16_t *out, int frames) {
     uint64_t t0 = rdtsc();
     int32_t acc[CHUNK];
@@ -248,8 +259,7 @@ void audio_render(int16_t *out, int frames) {
         for (int k = 0; k < NV; k++)
             if (voices[k].state != V_OFF) voice_mix(&voices[k], acc, n);
         for (int i = 0; i < n; i++) {
-            int32_t s = (acc[i] * master_mul) >> 8;
-            out[i] = (int16_t)CLAMP(s, -32767, 32767);
+            out[i] = soft_clip((acc[i] * master_mul) >> 8);
         }
         if (mel_on) mel_left -= n;
         out += n;
