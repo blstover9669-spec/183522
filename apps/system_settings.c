@@ -1223,13 +1223,25 @@ static int about_lines(st_t *st, char lines[][2][96], int max) {
 
 static void paint_about(st_t *st, surface_t *s) {
     const theme_t *t = theme_get();
-    ui_draw_logo(s, CX, 96, 64);
-    gfx_text(s, CX + 80, 96, "NovaOS", t->window_text, FONT_UI_TITLE);
     char buf[128];
     const char *ver = sys_version();
     if (!strncmp(ver, "NovaOS ", 7)) ver += 7;      /* the title already says NovaOS */
-    snprintf(buf, sizeof buf, "Version %s %s  \xB7  written from scratch in C and assembly", ver, sys_edition());
-    gfx_text(s, CX + 82, 134, buf, sys_text_dim(t), FONT_UI);
+    static const char tagline[] = "written from scratch in C and assembly";
+    snprintf(buf, sizeof buf, "Version %s %s  \xB7  %s", ver, sys_edition(), tagline);
+    int tx = CX + 82, tw = CX + CW - tx;            /* keep inside the info panel's right edge */
+    if (font_text_width(FONT_UI, buf) <= tw) {
+        ui_draw_logo(s, CX, 96, 64);
+        gfx_text(s, CX + 80, 96, "NovaOS", t->window_text, FONT_UI_TITLE);
+        gfx_text(s, tx, 134, buf, sys_text_dim(t), FONT_UI);
+    } else {
+        /* too long for one line (e.g. "Developer Preview"): version, then the tagline */
+        ui_draw_logo(s, CX, 92, 64);
+        gfx_text(s, CX + 80, 86, "NovaOS", t->window_text, FONT_UI_TITLE);
+        snprintf(buf, sizeof buf, "Version %s %s", ver, sys_edition());
+        gfx_text_ellipsis(s, tx, 122, tw, buf, sys_text_dim(t), FONT_UI);
+        gfx_text_ellipsis(s, tx, 122 + font_height(FONT_UI) + 2, tw, "Written from scratch in C and assembly",
+                          sys_text_dim(t), FONT_UI);
+    }
     char (*lines)[2][96] = malloc(12 * sizeof *lines);
     if (!lines) return;
     int n = about_lines(st, lines, 12);
