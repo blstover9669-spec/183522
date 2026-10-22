@@ -148,6 +148,39 @@ tools/shot.py --kernel build/kernel.elf --cmdline "screensaver=4" --out shots-sv
 tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Services" ready wait:1 shot:services
 ```
 
+### Sound (recorded to a WAV file)
+
+shot.py's QEMU has no sound card unless you add one, so by default NovaOS
+uses the (silent) PC speaker. Add a card and QEMU's `wav` audio backend
+with `--extra` and QEMU writes everything the guest plays to a WAV file
+(only while the guest's stream runs, so leading silence is not recorded);
+`tools/wavcheck.py` (numpy) lists the notes in it and `--expect` turns
+that into a pass/fail check. The boot log names the output
+(`audio: output Intel ICH AC'97, 48000 Hz, ...`); the Terminal's `sound`
+command shows stream starts, underruns and the mixer's CPU share.
+
+```sh
+# AC'97: a beep from the Terminal, then check it is a 440 Hz tone
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots-snd ready wait:1 \
+    "type:beep 440 1000\n" wait:2 --extra -audiodev wav,id=snd0,path=shots-snd/beep.wav \
+    -device AC97,audiodev=snd0
+tools/wavcheck.py shots-snd/beep.wav --expect 440
+# Piano playing a song (Piano:2play-organ = second song, organ voice)
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Piano:play" --out shots-snd ready wait:8 \
+    --extra -audiodev wav,id=snd0,path=shots-snd/song.wav -device AC97,audiodev=snd0
+tools/wavcheck.py shots-snd/song.wav --expect 261.63,293.66,329.63,349.23,392
+# chords: strongest frequencies of a time range ("sound test" plays C-E-G-C at ~0.7 s)
+tools/wavcheck.py shots-snd/test.wav --peaks 0.7 1.5 --count 4
+```
+
+Sound Blaster 16: `-device sb16,audiodev=snd0` instead of the AC'97. The
+PC speaker fallback can be recorded too: `-machine pcspk-audiodev=snd0`
+without a card (QEMU then records only while the speaker is on). Force an
+output with `sound=ac97|sb16|speaker` on the command line. A held chord on
+the Piano: hold the mouse on one key with `monitor:mouse_button 1`, play
+another with `monitor:sendkey g 1200`, release with `monitor:mouse_button 0`
+(HMP `sendkey` runs one key combination at a time).
+
 ### Finding coordinates
 
 * Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about

@@ -34,7 +34,10 @@ your files across restarts.
   sliders, progress bars, list boxes, scroll bars, dropdowns, tabs, menu bars,
   context menus, message/input/file dialogs
 * Light and dark themes, accent colours, procedural wallpapers
-* PS/2 keyboard and mouse (with scroll wheel), PIT, CMOS clock, PC speaker,
+* Sound: Intel ICH AC'97 and Sound Blaster 16 drivers with an 8-voice
+  software synthesizer (soft square, triangle, sine, saw, piano and organ
+  voices with click-free envelopes); PC speaker fallback without a card
+* PS/2 keyboard and mouse (with scroll wheel), PIT, CMOS clock,
   PCI enumeration, ACPI power-off and power button, keyboard lock LEDs,
   COM1 serial logging
 * Heap allocator, in-memory hierarchical filesystem with (de)serialisation,
@@ -83,7 +86,12 @@ make run        # boot the ISO in QEMU
    works), video memory 32 MB or more.
 5. **Settings -> Storage**: attach `NovaOS.iso` to the optical drive of the
    IDE controller.
-6. Start the VM. The GRUB menu boots NovaOS after 2 seconds. Click inside the
+6. **Settings -> Audio**: tick *Enable Audio*, Host Audio Driver *Default*,
+   Audio Controller **ICH AC97** (*SoundBlaster 16* also works; *Intel HD
+   Audio* is not supported), and make sure *Enable Audio Output* (under
+   *Extended Features* in VirtualBox 7) is ticked. VirtualBox does not
+   emulate the PC speaker, so without one of these cards NovaOS is silent.
+7. Start the VM. The GRUB menu boots NovaOS after 2 seconds. Click inside the
    VM window to capture the mouse; the host key (Right Ctrl) releases it.
 
 Or from the command line:
@@ -92,6 +100,8 @@ Or from the command line:
 VBoxManage createvm --name NovaOS --ostype Other --register
 VBoxManage modifyvm NovaOS --memory 256 --vram 32 --graphicscontroller vboxvga \
     --mouse ps2 --firmware bios --boot1 dvd --boot2 none
+VBoxManage modifyvm NovaOS --audio-driver default --audio-controller ac97 \
+    --audio-enabled on --audio-out on      # VirtualBox 6.1: --audio default --audiocontroller ac97 --audioout on
 VBoxManage storagectl NovaOS --name IDE --add ide --controller PIIX4
 VBoxManage storageattach NovaOS --storagectl IDE --port 1 --device 0 \
     --type dvddrive --medium "$PWD/NovaOS.iso"
@@ -188,7 +198,7 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
 * Right-click the desktop for new folders / text files, wallpapers and dark
   mode; right-click a file icon to open it with another app, rename, delete
   it or see its properties. The clock opens a calendar; the speaker icon
-  mutes the PC speaker.
+  mutes all sound.
 * Win+R (or *Run...* in the Start menu) opens an app, file, folder or command
   by name. Right-click a Start menu entry or a taskbar button to pin the app
   to the taskbar.
@@ -203,6 +213,13 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
   commands, pipes and redirection, Tab completion, plus `sync`, `df`,
   `disks`, `service`, `notify`, `alarm`, `logs`, `open` and more.
 * PrintScreen saves a screenshot to `/home/user/Pictures`.
+* **Sound** goes to the AC'97 or Sound Blaster 16 card (the boot log says
+  which: `audio: output ...`), else to the PC speaker. `sound` in the
+  Terminal shows the output, `sound test` plays an arpeggio and a chord,
+  `sound volume 0..100` sets the master volume. **Piano** plays chords and
+  has an instrument choice on a sound card; its bottom row shows the
+  output. Kernel command line: `sound=ac97|sb16|speaker` picks the output,
+  `volume=N` the start volume.
 
 ## Repository layout
 
@@ -210,7 +227,8 @@ qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                     # ins
 boot/        Multiboot header and entry point (NASM)
 bootloader/  hard-disk boot loader: MBR stage 1 and stage 2 (NASM, embedded in the kernel)
 kernel/      arch (GDT/IDT/PIC/PIT/FPU), core (boot info, heap, log, panic, power),
-             drivers (framebuffer/BGA, PCI, keyboard, mouse, RTC, speaker, ATA),
+             drivers (framebuffer/BGA, PCI, keyboard, mouse, RTC, ATA, sound:
+             AC'97, Sound Blaster 16, PC speaker, software mixer),
              disk (installer back end, file persistence),
              gfx (surfaces, primitives, text, images, generated fonts),
              gui (window manager, compositor, desktop, taskbar, Start menu,
@@ -220,7 +238,8 @@ kernel/      arch (GDT/IDT/PIC/PIT/FPU), core (boot info, heap, log, panic, powe
              Properties / Run dialogs, pins, recent items)
 apps/        applications (each file registers itself with REGISTER_APP)
 include/     public API (nova.h and nova/*.h) and the libc headers
-tools/       shot.py (headless QEMU test driver), genfont.py, gensyms.py
+tools/       shot.py (headless QEMU test driver), wavcheck.py (notes in a WAV
+             recording), genfont.py, gensyms.py
 docs/        API.md (app developer guide), TESTING.md (test harness)
 ```
 

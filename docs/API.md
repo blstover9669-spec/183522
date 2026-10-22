@@ -29,6 +29,7 @@ available after
 * [19. Background services, system log, commands](#19-background-services-system-log-commands)
 * [20. Opening files, file types, pins, recent items](#20-opening-files-file-types-pins-recent-items)
 * [21. System icons](#21-system-icons)
+* [22. Sound](#22-sound)
 
 ---
 
@@ -637,10 +638,13 @@ u32 ctime, u32 size, data}`. A self-test at boot round-trips the tree.
   day, hour, minute, second, weekday 0=Sunday), `sys_time()` (seconds since
   1970), `sys_time_to_datetime`, `sys_datetime_to_time`, `sys_month_name(m)`,
   `sys_weekday_name(wd)`. `sys_udelay(us)` busy-waits - drivers only.
-* Sound (PC speaker): `sys_beep(freq, ms)` (non-blocking),
-  `speaker_tone(freq)` / `speaker_off()`, `sys_play_notes(const note_t *notes,
-  int count)` (non-blocking melody; `note_t {uint16_t freq, ms;}`, freq 0 =
-  rest), `sys_sound_enabled()` / `sys_set_sound_enabled()` (taskbar toggle).
+* Sound (sound card, else PC speaker - see [22. Sound](#22-sound)):
+  `sys_beep(freq, ms)` (non-blocking), `speaker_tone(freq)` / `speaker_off()`,
+  `sys_play_notes(const note_t *notes, int count)` (non-blocking melody;
+  `note_t {uint16_t freq, ms;}`, freq 0 = rest), `sys_sound_enabled()` /
+  `sys_set_sound_enabled()` (taskbar toggle). Polyphonic notes with
+  instruments: `sound_note(freq, ms, volume, waveform)`; the output device:
+  `sys_sound_device_name()`.
 * Power: `sys_reboot()`, `sys_shutdown()` (ACPI S5 from the DSDT, then the
   QEMU/Bochs/VirtualBox ports, then a "safe to turn off" screen).
 * Input settings: `sys_set_mouse_speed(1..10)` (5 = 1:1), `sys_get_mouse_speed`,
@@ -695,8 +699,10 @@ install_step / install_progress ...`) is what `apps/installer.c` drives from
 a window timer. Disk layout: `kernel/disk/diskfmt.h`.
 
 In use by the kernel: IRQ0 (PIT), IRQ1 + IRQ12 (i8042 keyboard/mouse), COM1
-polled (no IRQ), IDE polled with device interrupts off (no IRQ). Free:
-IRQ 3, 4, 5, 7, 9, 10, 11, 14, 15.
+polled (no IRQ), IDE polled with device interrupts off (no IRQ), AC'97
+polled from the PIT tick (no IRQ), Sound Blaster 16 (only when it is the
+sound output: its IRQ, usually 5, and 16-bit ISA DMA channel, usually 5).
+Free: IRQ 3, 4, 5 (without SB16), 7, 9, 10, 11, 14, 15.
 Paging is off: physical addresses (MMIO BARs, ACPI tables) are directly
 accessible. The heap occupies the largest RAM region above the kernel; there
 is no physical page allocator - `kmalloc` large aligned buffers if a device
@@ -744,6 +750,8 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `selftest=1` | run kernel self tests (libc, heap, VFS, time) and log `SELFTEST:` lines |
 | `crashtest=1` | trigger a divide error 1.5 s after boot (tests the panic screen) |
 | `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
+| `sound=ac97\|sb16\|speaker` | sound output: only probe that card, or use the PC speaker (default: AC'97, else SB16, else speaker) |
+| `volume=N` | master volume 0..100 at boot (default 80) |
 
 Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
 `SELFTEST: done, N passed, M failed`, `*** KERNEL PANIC ***`.
@@ -826,7 +834,7 @@ with `syslog_first_seq() .. syslog_last_seq()` + `syslog_get(seq, &e)` and
 | `notifyd` | Notifications | `int notify(title, body, ICON_*)` slides a toast in above the taskbar (stacks, newest at the bottom, auto-dismiss after 5 s - paused while hovered - click to dismiss); `notify_dismiss(id)`, `notify_history_count/get/clear` (last 50). Returns 0 when notifyd is stopped (still recorded). Toasts raised while the screensaver runs wait until it is dismissed. |
 | `logd` | System Log | writes the syslog to `/system/log/syslog` |
 | `screensaver` | Screensaver | starfield + aurora with a clock after N idle seconds (default 300). `screensaver_set_timeout(s)` (persisted in `/system/config/screensaver`, 0 = never), `screensaver_get_timeout`, `screensaver_activate`, `screensaver_dismiss`, `screensaver_active`. Any key, click or mouse movement dismisses it; that input is swallowed, so a click never reaches the window underneath. Command line `screensaver=SECONDS` overrides the timeout for one boot. |
-| `alarmd` | Alarms | `alarm_add_at(h, m, msg)` (next HH:MM), `alarm_add_in(minutes, msg)`, `alarm_cancel(id)`, `alarm_count/get`. Due alarms show a notification (alarm-clock icon) and play a PC-speaker chime. Persisted in `/system/config/alarms`. |
+| `alarmd` | Alarms | `alarm_add_at(h, m, msg)` (next HH:MM), `alarm_add_in(minutes, msg)`, `alarm_cancel(id)`, `alarm_count/get`. Due alarms show a notification (alarm-clock icon) and play a chime (`sys_play_notes`). Persisted in `/system/config/alarms`. |
 | `autosave` | Autosave | `autosave_register(name, fn, ctx)` - `fn(ctx)` runs every 60 s and when the service stops (shutdown); `autosave_unregister(id)`, `autosave_now()`, `autosave_last_run()`. On an installed system it registers a `disk` callback that starts a background `persist_save_async()` when files changed (synchronous `persist_save()` at shutdown). |
 | `indexer` | File Indexer | indexes every file and folder name (rescans 3 s after the VFS changes, a few directories per tick). `indexer_search(query, hits, max)` (case-insensitive; exact, prefix and word-start matches rank first, files under /home before /system), `indexer_count`, `indexer_ready`, `indexer_rescan`. Used by the Start menu, the Run dialog and `locate`. |
 | `sysmon` | System Monitor | one `sysmon_sample_t` per second (heap used/total, busy %, events/s, frames/s) in a 120-sample ring: `sysmon_history(out, max)` (oldest first), `sysmon_latest(&s)` - for Task Manager style graphs. |
@@ -985,3 +993,82 @@ Kinds: folders (`ICON_FOLDER`, `_DOCUMENTS`, `_PICTURES`, `_MUSIC`,
   app's own `draw_icon` to reuse a system icon as a badge).
 * The hidden **Icon Library** app (`autorun=Icon_Library`) shows every icon
   at 48/32/16 px; a click toggles a dark background.
+
+---
+
+## 22. Sound
+
+`nova/audio.h` (included by `nova.h`). NovaOS mixes sound in software: up to
+8 notes (voices) at once, each with a waveform, a volume and a short attack /
+release envelope, so notes start and stop without clicks. The mix (16-bit, 48
+kHz on AC'97, 44.1 kHz on SB16) is streamed to the first card found:
+
+| Output | Hardware | Notes |
+|---|---|---|
+| `Intel ICH AC'97` | PCI 8086:2415 and later ICH AC'97 (VirtualBox *ICH AC97*, QEMU `-device AC97`) | 8 voices, 48 kHz stereo |
+| `Sound Blaster 16` | DSP 4.xx at 0x220/0x240 (VirtualBox *SoundBlaster 16*, QEMU `-device sb16`) | 8 voices, 44.1 kHz mono, 16-bit ISA DMA |
+| `PC speaker` | PIT channel 2 (no card; VirtualBox does not emulate it) | one note at a time: the newest note that is still held sounds; no volume or envelopes |
+
+The boot log says which one is used (`audio: output Intel ICH AC'97, 48000
+Hz, 8 voices, volume 80%`). Everything is non-blocking: the drivers refill
+their DMA rings from the 1 kHz timer interrupt (about 40 ms ahead), and the
+stream stops after 2 s of silence. The global on/off switch (taskbar speaker
+icon, `sys_set_sound_enabled`) applies to everything below.
+
+```c
+/* a C major chord on the piano voice, 1.5 s */
+sound_note_midi(60, 1500, 70, SOUND_PIANO);
+sound_note_midi(64, 1500, 70, SOUND_PIANO);
+sound_note_midi(67, 1500, 70, SOUND_PIANO);
+
+/* a held note: start on key down, release on key up */
+int v = sound_note(440, 0, 60, SOUND_TRIANGLE);   /* ms 0 = until released */
+...
+sound_release(v);                                 /* fades out (release time) */
+```
+
+* `int sound_note(freq_hz, ms, volume, waveform)` starts a note: frequency
+  20..20000 Hz, `ms` its length (0 = until `sound_release`), `volume`
+  0..100, waveform `SOUND_SQUARE` (soft-edged square, the classic beep),
+  `SOUND_TRIANGLE` (flute-like), `SOUND_SINE`, `SOUND_SAW` (bright),
+  `SOUND_PIANO` (struck: bright attack, overtones and level fade over about
+  a second), `SOUND_ORGAN` (sine + octave + twelfth). Returns a voice id
+  (> 0), or 0 if nothing started (sound off, frequency out of range). When
+  all 8 voices are busy the quietest fading note, else the oldest, is
+  replaced.
+* `sound_note_midi(midi, ms, volume, waveform)`: the same with an exactly
+  tuned MIDI note number (60 = middle C, 69 = A 440 Hz);
+  `sound_midi_mhz(midi)` gives its frequency in millihertz.
+* `sound_release(id)` lets a note go (ignores stale ids, so it is safe to call
+  after the note ended or was replaced); `sound_active(id)`;
+  `sound_stop_all()` releases everything including the `sys_beep` /
+  `sys_play_notes` channel.
+* `sys_sound_device_name()` ("Intel ICH AC'97", "Sound Blaster 16", "PC
+  speaker"), `sound_device_short()` ("AC'97", "SB16", "PC speaker"),
+  `sound_has_card()`, `sound_polyphony()` (8, or 1 on the PC speaker),
+  `sound_sample_rate()` (0 on the PC speaker). Show the device somewhere if
+  sound matters to your app - Piano shows "Output: AC'97 - 8 notes at once".
+* `sound_set_volume(0..100)` / `sound_get_volume()`: master volume (default
+  80, or `volume=N` on the command line; the PC speaker has no volume).
+* The simple calls (`sys_beep`, `speaker_tone` / `speaker_off`,
+  `sys_play_notes`) are one channel on the same synthesizer: one note at a
+  time with the soft square wave at volume 50; a new beep or melody
+  replaces the previous one (which fades out instead of clicking). Use them
+  for UI feedback; use `sound_note` for music.
+* Terminal: `sound` (output, format, stream statistics, mixer CPU use),
+  `sound test` (arpeggio + chord), `sound on|off`, `sound volume N`.
+
+**Writing another sound driver.** `kernel/drivers/audio_internal.h`: fill in a
+`sound_card_t` (`name`, `short_name`, `rate`, `start`, `stop`, `pump`) and
+return it from a probe called by `audio_init()` (`kernel/drivers/audio.c`).
+`pump()` runs every millisecond from the PIT interrupt while the stream
+plays: it calls `audio_render(int16_t *mono, frames)` to mix more samples
+into the card's DMA ring and `audio_note_underrun()` if the card ran dry.
+That code runs with interrupts off and must not use floating point (the
+interrupt entry does not save the FPU state) - the mixer is integer-only.
+
+**Testing with real audio.** QEMU can record what the guest plays into a WAV
+file: `tools/shot.py ... --extra -audiodev wav,id=snd0,path=out.wav -device
+AC97,audiodev=snd0` (or `-device sb16,audiodev=snd0`; the PC speaker:
+`-machine pcspk-audiodev=snd0`). `tools/wavcheck.py out.wav` lists the
+notes it hears (start, length, frequency); see docs/TESTING.md.
