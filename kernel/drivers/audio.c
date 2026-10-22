@@ -67,6 +67,11 @@ static int master_pct = 80, master_mul = 205;
 static int legacy_id;                     /* voice of the sys_beep / speaker_tone channel */
 static uint32_t spk_mhz;                  /* what the PC speaker plays now              */
 static volatile uint32_t underruns, streams;
+/* mixer cost in TSC cycles, for the "sound" command: time spent in the card tick and
+   the time between consecutive ticks while streaming */
+static uint64_t cost_total, cost_max, cost_span, cost_prev;
+static uint32_t cost_ticks;
+static uint64_t cost_start;
 static int16_t sine_tab[1025];
 
 /* melody (sys_play_notes), timed in the same units as the voices */
@@ -266,19 +271,43 @@ static bool any_active(void) {
     return false;
 }
 
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static void card_tick(void);
+
 void audio_tick(void) {
-    if (!card) {
-        for (int k = 0; k < NV; k++) {
-            voice_t *v = &voices[k];
-            if (v->state != V_OFF && v->left > 0 && --v->left == 0) v->state = V_OFF;
+    if (card) {
+        bool was = streaming;
+        uint64_t t0 = rdtsc();
+        card_tick();
+        uint64_t t1 = rdtsc();
+        if (!was && streaming && t1 - t0 > cost_start) cost_start = t1 - t0;
+        if (was && cost_prev) {
+            cost_span += t0 - cost_prev;
+            cost_total += t1 - t0;
+            if (t1 - t0 > cost_max) cost_max = t1 - t0;
+            cost_ticks++;
         }
-        if (mel_on) {
-            mel_left--;
-            while (mel_on && mel_left <= 0) melody_advance();
-        }
-        speaker_update();
+        cost_prev = streaming ? t0 : 0;
         return;
     }
+    /* PC speaker: voices and melody are timed in milliseconds */
+    for (int k = 0; k < NV; k++) {
+        voice_t *v = &voices[k];
+        if (v->state != V_OFF && v->left > 0 && --v->left == 0) v->state = V_OFF;
+    }
+    if (mel_on) {
+        mel_left--;
+        while (mel_on && mel_left <= 0) melody_advance();
+    }
+    speaker_update();
+}
+
+static void card_tick(void) {
     bool active = any_active();
     if (!streaming) {
         if (!active) return;
@@ -417,9 +446,6 @@ void sound_set_volume(int pct) {
 int sound_get_volume(void) { return master_pct; }
 
 /* ---- init --------------------------------------------------------------------------------- */
-/* Sound Blaster 16 support lives in sb16.c; without it there is no SB16 probe. */
-__attribute__((weak)) const sound_card_t *sb16_probe(void) { return NULL; }
-
 static uint32_t logged_underruns;
 
 static void audio_report(void *ctx) {
@@ -491,7 +517,19 @@ static int cmd_sound(int argc, char **argv, cmd_writer_t *out) {
     else
         cmd_puts(out, "Format:  one note at a time (VirtualBox: Settings > Audio > ICH AC97)\n");
     cmd_printf(out, "Sound:   %s\n", sound_on ? "on" : "off (muted)");
-    if (card) cmd_printf(out, "Stream:  %s, started %u times, %u underruns\n", streaming ? "playing" : "idle", streams, underruns);
+    if (card) {
+        cmd_printf(out, "Stream:  %s, started %u times, %u underruns\n", streaming ? "playing" : "idle", streams, underruns);
+        uint32_t f = irq_save();
+        uint64_t total = cost_total, peak = cost_max, span = cost_span;
+        uint32_t ticks = cost_ticks;
+        irq_restore(f);
+        if (ticks > 10 && span) {
+            uint64_t per_ms = span / ticks;             /* TSC cycles per millisecond (approx.) */
+            cmd_printf(out, "Mixer:   %u.%02u%% CPU while playing, longest %u us (stream start %u us)\n",
+                       (uint32_t)(total * 100 / span), (uint32_t)(total * 10000 / span % 100),
+                       per_ms ? (uint32_t)(peak * 1000 / per_ms) : 0, per_ms ? (uint32_t)(cost_start * 1000 / per_ms) : 0);
+        }
+    }
     return 0;
 }
 REGISTER_COMMAND("sound", "sound [test | on | off | volume 0..100] - show the sound output, play a test chord", cmd_sound);
