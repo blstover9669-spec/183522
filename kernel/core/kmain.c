@@ -59,6 +59,7 @@ void kmain(uint32_t magic, uint32_t mbi) {
     klog("cpu: %s (%s)", g_cpu_name, g_cpu_vendor);
     memory_init();
     acpi_init();          /* reads the BIOS data area in page 0: before paging */
+    keyboard_save_bios_flags();   /* lock key flags at 0x417, page 0 too */
     paging_init();
     pit_init(1000);
     speaker_init();

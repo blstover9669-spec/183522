@@ -111,6 +111,7 @@ void rtc_read(datetime_t *dt);
 void speaker_init(void);
 void speaker_tick(void);     /* from PIT IRQ */
 void keyboard_init(void);
+void keyboard_save_bios_flags(void);   /* before paging_init() */
 void mouse_init(void);
 void acpi_init(void);
 bool acpi_shutdown(void);
