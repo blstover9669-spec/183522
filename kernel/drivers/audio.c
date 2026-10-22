@@ -98,7 +98,7 @@ static int32_t ms_units(uint32_t ms) {
 }
 
 static int32_t us_samples(uint32_t us) {
-    int32_t n = rate ? (int32_t)(us * (uint32_t)rate / 1000000u) : 1;
+    int32_t n = rate ? (int32_t)((uint64_t)us * (uint32_t)rate / 1000000u) : 1;
     return n > 0 ? n : 1;
 }
 
