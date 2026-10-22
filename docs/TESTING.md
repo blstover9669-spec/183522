@@ -115,6 +115,23 @@ and prefer the keyboard (`key:meta_l` opens the Start menu): the pointer
 starts again at the top-left corner but shot.py still remembers the old
 position.
 
+### Power button, keyboard LEDs, empty IDE channels
+
+`monitor:system_powerdown` presses the ACPI power button (what VirtualBox's
+*ACPI Shutdown* does): NovaOS logs `power: ACPI power button pressed`, runs
+the normal shut down (`persist: saved ... sync` on an installed system) and
+QEMU exits when it powers off, so make it the last step. Keyboard LED updates
+show up with QEMU's trace: `--extra -trace ps2_set_ledstate -D leds.log`.
+VirtualBox reads 0x7F from an empty IDE channel; `ataempty=MASK` makes
+positions read like that in QEMU (bit 0 primary master, 1 primary slave,
+2 secondary master, 3 secondary slave):
+
+```sh
+tools/shot.py --iso build/NovaOS.iso ready monitor:system_powerdown "serial:power: shutting down"
+tools/shot.py --kernel build/kernel.elf --cmdline "ataempty=15 autorun=Installer" ready \
+    click:753,569 wait:0.8 shot:no-disks
+```
+
 ### Services, notifications, Run dialog
 
 Every syslog line is mirrored to serial as `[tag] message`, so services can

@@ -35,7 +35,8 @@ your files across restarts.
   context menus, message/input/file dialogs
 * Light and dark themes, accent colours, procedural wallpapers
 * PS/2 keyboard and mouse (with scroll wheel), PIT, CMOS clock, PC speaker,
-  PCI enumeration, ACPI power-off, COM1 serial logging
+  PCI enumeration, ACPI power-off and power button, keyboard lock LEDs,
+  COM1 serial logging
 * Heap allocator, in-memory hierarchical filesystem with (de)serialisation,
   libc/libm subset, kernel panic screen with symbolised stack traces
 * ATA PIO hard disk driver (IDE primary/secondary, master/slave, LBA28/48),
@@ -101,7 +102,9 @@ The GRUB menu entry is **NovaOS 1.5 Developer Preview**.
 Troubleshooting: if the screen stays black, pick **NovaOS 1.5 Developer
 Preview (safe graphics 800x600)** in the GRUB menu. If the pointer does not move, make sure the
 pointing device is *PS/2 Mouse*. Shut down from the Start menu's power
-button; VirtualBox then powers the VM off.
+button; VirtualBox then powers the VM off. *Machine -> ACPI Shutdown* (or
+closing the VM window with *Send the shutdown signal*) presses the virtual
+power button, which shuts NovaOS down the same way.
 
 ## Installing to the hard disk
 
@@ -136,7 +139,8 @@ first hard disk (installed NovaOS)** in the GRUB menu, or remove the ISO.
 
 **Your files on the installed system** are saved to the disk automatically
 a few seconds after a change, at least every 60 seconds while there are
-unsaved changes, and before every restart or shut down from the Start menu.
+unsaved changes, and before every restart or shut down (Start menu, or
+VirtualBox's *ACPI Shutdown*).
 Pulling the plug (*Machine -> Power off*) loses at most the last few
 seconds of changes; the previous save is never damaged (two save slots,
 switched only after a complete write). Apps can force a save with
