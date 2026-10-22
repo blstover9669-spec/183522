@@ -117,6 +117,9 @@ The exact `NovaOS.iso` in the repository was booted through GRUB in QEMU
   a power-button shut down and the next boot;
 * the ACPI power button (`system_powerdown`) saves the files and powers the
   machine off, both from the CD and from the installed disk;
+* the GRUB entries *safe graphics 800x600* (desktop in 800x600x32) and
+  *Boot from the first hard disk* (starts the installed system via its own
+  loader, with the CD still attached) work;
 * all 30 apps were launched and screenshotted
   ([docs/screenshots/all-apps.png](docs/screenshots/all-apps.png)) without a
   kernel panic.
