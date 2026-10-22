@@ -114,6 +114,7 @@ void keyboard_init(void);
 void mouse_init(void);
 void acpi_init(void);
 bool acpi_shutdown(void);
+void acpi_poll_events(void);    /* IRQ-safe: acknowledge ACPI power button presses */
 
 /* ---- raw input queue (filled by IRQ handlers, drained by the WM) -------------------- */
 typedef struct input_event {
