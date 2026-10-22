@@ -176,10 +176,12 @@ tools/wavcheck.py shots-snd/test.wav --peaks 0.7 1.5 --count 4
 Sound Blaster 16: `-device sb16,audiodev=snd0` instead of the AC'97. The
 PC speaker fallback can be recorded too: `-machine pcspk-audiodev=snd0`
 without a card (QEMU then records only while the speaker is on). Force an
-output with `sound=ac97|sb16|speaker` on the command line. A held chord on
-the Piano: hold the mouse on one key with `monitor:mouse_button 1`, play
-another with `monitor:sendkey g 1200`, release with `monitor:mouse_button 0`
-(HMP `sendkey` runs one key combination at a time).
+output with `sound=ac97|sb16|speaker` on the command line. A chord on the
+Piano: `monitor:sendkey a-d-g 500` (QEMU 8.2 presses the keys one hold time
+apart and releases them together, so C-E-G sound together from 1 s to 1.5 s
+after the step: `--peaks 1.05 1.45` shows 261.6, 329.6 and 392 Hz at equal
+level), or hold the mouse on a key with `monitor:mouse_button 1` while
+`monitor:sendkey g 1200` plays another, then `monitor:mouse_button 0`.
 
 ### Finding coordinates
 
