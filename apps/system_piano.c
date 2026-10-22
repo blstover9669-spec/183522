@@ -1,13 +1,15 @@
 /*
- * system_piano.c - "Piano": an on-screen piano for the PC speaker.
+ * system_piano.c - "Piano": an on-screen piano for the sound card (or the PC speaker).
  *
  *   - 42 keys (C3 .. F6) played with the mouse (click, or drag across the keys
  *     for a glissando) or with the computer keyboard: A S D F G H J K L ; '
  *     are the white keys, W E T Y U O P the black keys (the usual "virtual
  *     piano" layout). Z / X move that keyboard zone an octave down / up.
- *   - The PC speaker is monophonic, so the most recently pressed key that is
- *     still held sounds ("last note priority"); releasing it falls back to the
- *     previous one.
+ *   - Every key is its own synthesizer voice (<nova/audio.h>): with a sound card
+ *     (AC'97 / Sound Blaster 16) chords sound, up to 8 notes at once, in the
+ *     instrument chosen at the bottom (piano, organ, flute, chiptune, ...). On the
+ *     PC speaker only one note sounds: the most recently pressed key that is still
+ *     held ("last note priority"); releasing it falls back to the previous one.
  *   - Built-in songs (Ode to Joy, Twinkle Twinkle, Happy Birthday, Jingle
  *     Bells, Fur Elise) are played back from window timer events, never
  *     blocking: each EV_TIMER compares sys_uptime_ms() with the end of the
@@ -23,7 +25,7 @@
 #include "system_common.h"
 
 #define W        852
-#define H        410
+#define H        446
 
 #define LO_MIDI  48                      /* C3 */
 #define HI_MIDI  89                      /* F6 */
@@ -38,6 +40,12 @@
 #define CASE_Y   170
 #define CASE_W   (W - 32)
 #define CASE_H   (KY0 + WH + 12 - CASE_Y)
+#define FOOT_Y   (CASE_Y + CASE_H + 10)  /* bottom row: instrument and output device */
+#define FOOT_H   28
+#define INS_LX   CASE_X
+#define INS_LW   78
+#define INS_X    (INS_LX + INS_LW + 8)
+#define INS_W    170
 
 #define TB_Y     12
 #define TB_H     30
@@ -124,7 +132,17 @@ static const struct { const char *name; int bpm; const char *notes; } song_src[]
 static song_t g_songs[NSONGS];
 static snote_t g_song_notes[NSONGS][SONG_MAX];
 static bool g_songs_ready;
-static int g_speaker_owner;              /* id of the Piano window using the speaker (shared hardware) */
+
+/* instruments: synthesizer waveform and a volume that evens out their loudness */
+static const struct { const char *name, *word; int wave, volume; } instruments[] = {
+    { "Grand piano",        "piano",    SOUND_PIANO,    72 },
+    { "Organ",              "organ",    SOUND_ORGAN,    50 },
+    { "Flute (triangle)",   "flute",    SOUND_TRIANGLE, 70 },
+    { "Chiptune (square)",  "chip",     SOUND_SQUARE,   34 },
+    { "Pure tone (sine)",   "sine",     SOUND_SINE,     66 },
+    { "Synth lead (saw)",   "saw",      SOUND_SAW,      38 },
+};
+#define NINSTR ARRAY_SIZE(instruments)
 
 static int parse_song(const char *p, snote_t *out, int max) {
     static const int8_t semi[7] = { 9, 11, 0, 2, 4, 5, 7 };   /* A B C D E F G */
@@ -178,13 +196,15 @@ static void songs_init(void) {
 /* ======================================================================================
  * State
  * ==================================================================================== */
-typedef struct { int key; uint8_t midi; } held_t;                 /* key -1 = mouse */
+typedef struct { int key; uint8_t midi; int voice; } held_t;      /* key -1 = mouse; voice 0 = silent */
 typedef struct { uint8_t midi, src; uint32_t t0, t1; } hist_t;    /* t1 0 = still sounding */
 
 typedef struct {
     window_t *win;
     int id;
-    widget_t *songs, *play, *rec_btn, *practice, *tempo, *oct_dn, *oct_up, *sound;
+    widget_t *songs, *play, *rec_btn, *practice, *tempo, *oct_dn, *oct_up, *sound, *instr;
+    int instrument;                 /* index into instruments[]            */
+    int song_voice;                 /* synthesizer voice of the song note  */
     int base;                       /* MIDI note of the 'A' key            */
     held_t held[MAXHELD];
     int nheld;
@@ -280,17 +300,37 @@ static void inval_disp(piano_t *st) { win_invalidate_rect(st->win, DISP_X, DISP_
 /* ======================================================================================
  * Sound and note bookkeeping
  * ==================================================================================== */
+/* Each held key and the current song note has its own voice. On the PC speaker (one
+   note at a time, newest wins) a song note does not start while the user holds a key,
+   so what the user plays keeps priority as before. */
+static bool mono_output(void) { return sound_polyphony() <= 1; }
+
+static int note_on(piano_t *st, int midi) {
+    return sound_note_midi(midi, 0, instruments[st->instrument].volume, instruments[st->instrument].wave);
+}
+
+static void note_off(int *voice) {
+    if (*voice) sound_release(*voice);
+    *voice = 0;
+}
+
 static void update_sound(piano_t *st) {
-    int want = st->user_midi ? st->user_midi : st->song_midi;
-    if (want == st->sound_midi) return;
-    st->sound_midi = want;
-    if (want) {
-        speaker_tone((uint32_t)lround(midi_freq(want)));
-        g_speaker_owner = st->id;
-    } else if (g_speaker_owner == st->id) {
-        speaker_off();
-        g_speaker_owner = 0;
-    }
+    st->sound_midi = st->user_midi ? st->user_midi : st->song_midi;
+}
+
+/* start voices for notes that should sound but have none (after unmuting, or a song
+   note held back on the PC speaker while keys were down) */
+static void resound(piano_t *st) {
+    if (!sys_sound_enabled()) return;
+    for (int i = 0; i < st->nheld; i++)
+        if (!st->held[i].voice) st->held[i].voice = note_on(st, st->held[i].midi);
+    if (st->song_midi && !st->song_voice && !(mono_output() && st->nheld)) st->song_voice = note_on(st, st->song_midi);
+}
+
+/* sound was switched off: the synthesizer has let go of every voice */
+static void forget_voices(piano_t *st) {
+    for (int i = 0; i < st->nheld; i++) st->held[i].voice = 0;
+    st->song_voice = 0;
 }
 
 static void hist_change(piano_t *st, int src, int midi, uint32_t now) {
@@ -326,6 +366,8 @@ static void set_song_note(piano_t *st, int midi) {
     if (midi == st->song_midi) return;
     hist_change(st, SRC_SONG, midi, sys_uptime_ms());
     st->song_midi = midi;
+    note_off(&st->song_voice);
+    if (midi && !(mono_output() && st->nheld)) st->song_voice = note_on(st, midi);
     if (midi && !st->user_midi) st->last_midi = midi;
     update_sound(st);
     inval_keys(st);
@@ -339,16 +381,20 @@ static void refresh_user_note(piano_t *st) {
 static void release_key(piano_t *st, int key) {
     for (int i = 0; i < st->nheld; i++) {
         if (st->held[i].key != key) continue;
+        note_off(&st->held[i].voice);
         memmove(&st->held[i], &st->held[i + 1], sizeof(held_t) * (size_t)(st->nheld - i - 1));
         st->nheld--;
         break;
     }
+    if (!st->nheld) resound(st);          /* PC speaker: the song note comes back */
     refresh_user_note(st);
 }
 
 static void release_all(piano_t *st) {
+    for (int i = 0; i < st->nheld; i++) note_off(&st->held[i].voice);
     st->nheld = 0;
     st->mouse_midi = 0;
+    resound(st);
     refresh_user_note(st);
 }
 
@@ -359,16 +405,22 @@ static void press_key(piano_t *st, int key, int midi) {
     if (midi < 1 || midi > 127) return;
     for (int i = 0; i < st->nheld; i++)
         if (st->held[i].key == key) {
+            note_off(&st->held[i].voice);
             memmove(&st->held[i], &st->held[i + 1], sizeof(held_t) * (size_t)(st->nheld - i - 1));
             st->nheld--;
             break;
         }
     if (st->nheld >= MAXHELD) {
+        note_off(&st->held[0].voice);
         memmove(&st->held[0], &st->held[1], sizeof(held_t) * (MAXHELD - 1));
         st->nheld--;
     }
+    /* the same note held by another key (mouse and keyboard) is struck again, not doubled */
+    for (int i = 0; i < st->nheld; i++)
+        if (st->held[i].midi == midi) note_off(&st->held[i].voice);
     st->held[st->nheld].key = key;
     st->held[st->nheld].midi = (uint8_t)midi;
+    st->held[st->nheld].voice = note_on(st, midi);
     st->nheld++;
     /* a key pressed again while it is already sounding re-strikes it */
     if (st->user_midi == midi) set_user_note(st, 0);
@@ -602,6 +654,12 @@ static void on_practice(widget_t *w, void *ctx) {
     inval_disp(st);
 }
 
+static void on_instr(widget_t *w, void *ctx) {
+    piano_t *st = ctx;
+    st->instrument = CLAMP(ui_get_value(w), 0, (int)NINSTR - 1);
+    refocus(st);
+}
+
 static void on_oct_dn(widget_t *w, void *ctx) { (void)w; set_base(ctx, ((piano_t *)ctx)->base - 12); refocus(ctx); }
 static void on_oct_up(widget_t *w, void *ctx) { (void)w; set_base(ctx, ((piano_t *)ctx)->base + 12); refocus(ctx); }
 
@@ -636,9 +694,9 @@ static void sound_draw(widget_t *w, surface_t *s, rect_t r) {
 static void toggle_sound(piano_t *st) {
     bool on = !sys_sound_enabled();
     sys_set_sound_enabled(on);
-    st->sound_midi = 0;                  /* the speaker was silenced or starts fresh */
-    update_sound(st);
-    if (on && !st->sound_midi) sys_beep(880, 40);
+    if (on) resound(st);                 /* held notes sound again after unmuting */
+    else forget_voices(st);
+    if (on && !st->nheld && !st->song_midi) sys_beep(880, 40);
     st->sound_on = on;
     ui_invalidate(st->sound);
     inval_disp(st);
@@ -975,11 +1033,32 @@ static void paint_toolbar(piano_t *st, surface_t *s) {
                      ALIGN_CENTER | ALIGN_MIDDLE);
 }
 
+/* bottom row: "Instrument [dropdown]" ... "Output: AC'97 - 8 notes at once" */
+static void paint_footer(piano_t *st, surface_t *s) {
+    (void)st;
+    const theme_t *t = theme_get();
+    uint32_t dim = sys_text_dim(t);
+    gfx_text_aligned(s, rect_make(INS_LX, FOOT_Y, INS_LW, FOOT_H), "Instrument", dim, FONT_UI, ALIGN_LEFT | ALIGN_MIDDLE);
+    char out[96];
+    int poly = sound_polyphony();
+    if (poly > 1) snprintf(out, sizeof out, "%s - %d notes at once", sound_device_short(), poly);
+    else snprintf(out, sizeof out, "%s - one note at a time", sound_device_short());
+    int ox = INS_X + INS_W + 16, ow = CASE_X + CASE_W - ox;
+    int tw = font_text_width(FONT_UI, "Output:");
+    int vw = font_text_width(FONT_UI_BOLD, out);
+    int x0 = ox + ow - (tw + 6 + vw);
+    if (x0 < ox) x0 = ox;
+    gfx_text_aligned(s, rect_make(x0, FOOT_Y, tw, FOOT_H), "Output:", dim, FONT_UI, ALIGN_LEFT | ALIGN_MIDDLE);
+    gfx_text_aligned(s, rect_make(x0 + tw + 6, FOOT_Y, ox + ow - (x0 + tw + 6), FOOT_H), out,
+                     sound_has_card() ? t->window_text : RGB(214, 140, 40), FONT_UI_BOLD, ALIGN_LEFT | ALIGN_MIDDLE);
+}
+
 static void paint(piano_t *st, surface_t *s) {
     uint32_t now = sys_uptime_ms();
     paint_toolbar(st, s);
     paint_display(st, s, now);
     paint_keyboard(st, s, now);
+    paint_footer(st, s);
 }
 
 /* ======================================================================================
@@ -993,13 +1072,13 @@ static void tick(piano_t *st) {
         if (!st->user_midi && !st->song_midi) {
             static const note_t tada[] = { { 523, 90 }, { 659, 90 }, { 784, 90 }, { 1047, 260 } };
             sys_play_notes(tada, ARRAY_SIZE(tada));
-            g_speaker_owner = 0;
         }
     }
     bool snd = sys_sound_enabled();
     if (snd != st->sound_on) {            /* muted / unmuted elsewhere (taskbar, Settings) */
         st->sound_on = snd;
-        if (snd) { st->sound_midi = 0; update_sound(st); }   /* a held note sounds again */
+        if (snd) resound(st);             /* a held note sounds again */
+        else forget_voices(st);
         if (st->sound) ui_invalidate(st->sound);
         inval_disp(st);
     }
@@ -1098,8 +1177,10 @@ static void piano_event(window_t *win, const event_t *ev) {
         break;
     case EV_CLOSE:
         if (st->recording) st->recording = false;
+        for (int i = 0; i < st->nheld; i++) note_off(&st->held[i].voice);
+        note_off(&st->song_voice);
+        st->nheld = 0;
         st->user_midi = st->song_midi = 0;
-        if (g_speaker_owner == st->id) { speaker_off(); g_speaker_owner = 0; }
         free(st->rec);
         win_set_userdata(win, NULL);
         free(st);
@@ -1133,6 +1214,8 @@ static void piano_launch(const char *arg) {
     st->oct_dn = ui_button(win, TB_OCT_X, TB_Y, TB_OCTB_W, TB_H, "-", on_oct_dn, st);
     st->oct_up = ui_button(win, TB_OCT_X + TB_OCTB_W + TB_OCTL_W, TB_Y, TB_OCTB_W, TB_H, "+", on_oct_up, st);
     st->sound = ui_custom(win, TB_SND_X, TB_Y, TB_SND_W, TB_H, sound_draw, sound_event, st);
+    st->instr = ui_dropdown(win, INS_X, FOOT_Y, INS_W, FOOT_H, on_instr, st);
+    for (int i = 0; i < (int)NINSTR; i++) ui_list_add(st->instr, instruments[i].name);
 
     /* optional argument (autorun=Piano:ARG): a song number or the first word of its name,
        plus "play" or "practice" to start right away - e.g. "2play", "jingle", "practice" */
@@ -1147,6 +1230,10 @@ static void piano_launch(const char *arg) {
             if (strcasestr(arg, word)) { song = i; break; }
         }
     }
+    /* ... and an instrument: "organ", "flute", "chip", "sine", "saw" */
+    for (int i = 0; arg && i < (int)NINSTR; i++)
+        if (strcasestr(arg, instruments[i].word)) st->instrument = i;
+    ui_set_value(st->instr, st->instrument);
     st->base = 0;
     set_base(st, 60);
     select_song(st, CLAMP(song, 0, NSONGS - 1));
