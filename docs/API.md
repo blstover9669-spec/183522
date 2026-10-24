@@ -602,6 +602,15 @@ Default tree at boot: `/home/user/{Desktop,Documents,Pictures,Music,Downloads}`,
 `/system/motd.txt`, `/tmp`. Files in `/home/user/Desktop` appear as desktop
 icons (double-click opens them via `app_open_file`).
 
+**Boot splash setting:** `/system/config/splash.cfg`, a text file with one
+`key=value` per line. `noanimation=1`: the splash shows the Nova icon in the
+middle in its normal colours straight away (no rise, no rainbow shimmer);
+`noanimation=0`, no such line or no file: the icon rises from the bottom and
+shimmers. The kernel reads it once per start, after the files are loaded (on
+an installed drive after the saved files are restored), so a change takes
+effect at the next start. Settings writes it (*No animation on splash
+screen*).
+
 **Persistence (for disk drivers / installer):**
 
 ```c
