@@ -1,5 +1,7 @@
 /* kmain.c - kernel entry: bring up the hardware, then hand over to the window manager. */
 #include "kernel.h"
+#include <nova/disk.h>
+#include "gui/bootscreen.h"
 
 const char *sys_version(void) { return "NovaOS " NOVA_VERSION; }
 const char *sys_edition(void) { return NOVA_EDITION; }
@@ -80,30 +82,33 @@ void kmain(uint32_t magic, uint32_t mbi) {
 
     theme_init();
     wm_init();
-    splash_show();
-    splash_progress(10, "Starting devices...");
+    splash_show();                    /* splash background while the devices and files come up */
 
     __asm__ volatile("cli");
     keyboard_init();
     mouse_init();
     i8042_enable_irqs();
     __asm__ volatile("sti");
-    splash_progress(25, "Reading the clock...");
     rtc_init();
     srand(sys_time() ^ g_ticks);
     timers_init();
     run_initcalls(INIT_DRIVER);
 
-    splash_progress(40, "Preparing files...");
+    /* Files before the animation: on an installed drive the saved files (and with
+       them /system/config/splash.cfg) are restored by the INIT_FS stage. */
     vfs_init();
     vfs_populate_defaults();
     run_initcalls(INIT_FS);
 
-    splash_progress(60, "Loading apps...");
-    apps_init();
-    theme_render_current_wallpaper();
+    splash_animate();
+    /* Installed drive: the loading bar loads the OS. ISO boot: no loading bar. */
+    bool bar = persist_active();
 
-    splash_progress(80, "Building desktop...");
+    if (bar) splash_progress(15, NULL);
+    apps_init();
+    if (bar) splash_progress(45, NULL);
+    theme_render_current_wallpaper();
+    if (bar) splash_progress(75, NULL);
     desktop_init();
     taskbar_init();
     splash_finish();
