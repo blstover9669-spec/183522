@@ -14,6 +14,10 @@
  *                 calendar, clock details, shortcuts to Clock and Calendar.
  *   Sound       - system sounds on/off (the same switch as the taskbar speaker
  *                 icon), test sounds, PC speaker notes.
+ *   SafetyShield - the threat scanner (kernel/services/safetyshield.c): the
+ *                 risk levels and what they mean, a Scan button, the
+ *                 "Recent scanned files" list and a bar with the files
+ *                 scanned / all files in the OS (empty until a scan runs).
  *   About       - version, processor (CPUID vendor, family/model/stepping,
  *                 feature flags, hypervisor), memory, display, storage,
  *                 uptime; "Copy details" puts it all on the clipboard.
@@ -25,10 +29,11 @@
  * (dark=, wallpaper=, mousespeed=) win over saved settings.
  *
  * autorun=Settings:mouse opens a page directly (appearance, mouse, time,
- * sound, about).
+ * sound, safetyshield, about).
  */
 #include "system_common.h"
 #include <nova/disk.h>
+#include <nova/safetyshield.h>
 
 #define SW       780
 #define SH       520
@@ -77,17 +82,31 @@
 #define INFO_Y   174
 #define INFO_ROW 23
 
-enum { PG_APPEARANCE, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_ABOUT, PG_COUNT };
+/* safetyshield layout */
+#define RISK_Y   124
+#define RISK_H   28
+#define RISK_W   168
+#define SCAN_Y   338
+#define LINK_Y   380
+#define COUNT_Y  452
+#define BAR_Y    476
+#define BAR_H    12
+#define REC_TOP  64
+#define REC_ROW  46
 
-static const char *const page_names[PG_COUNT] = { "Appearance", "Mouse", "Date & Time", "Sound", "About" };
+enum { PG_APPEARANCE, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_SAFETY, PG_ABOUT, PG_COUNT };
+
+static const char *const page_names[PG_COUNT] = { "Appearance", "Mouse", "Date & Time", "Sound", "SafetyShield",
+                                                  "About" };
 static const char *const page_subtitles[PG_COUNT] = {
     "Choose light or dark mode, an accent colour and a wallpaper.",
     "Adjust how the pointer and the mouse buttons respond.",
     "The system clock, read from the computer's real-time clock.",
     "System sounds, played on the PC speaker.",
+    "Scans every file in NovaOS for threats automatically every 1 minute.",
     "Information about NovaOS and this computer.",
 };
-static const char *const page_keys[PG_COUNT] = { "appearance", "mouse", "time", "sound", "about" };
+static const char *const page_keys[PG_COUNT] = { "appearance", "mouse", "time", "sound", "safetyshield", "about" };
 
 static const uint32_t solid_colors[NSOLID] = {
     RGB(40, 90, 150), RGB(24, 118, 128), RGB(44, 112, 72), RGB(106, 64, 140),
@@ -127,6 +146,15 @@ typedef struct {
     /* sound */
     widget_t *w_sound, *w_snd[NSOUNDS];
     uint32_t snd_until;
+    /* safetyshield */
+    widget_t *w_scan, *w_link, *w_risks, *w_recent;
+    uint32_t ss_base_id;            /* scan id when the window opened: the bar stays empty until a scan runs */
+    uint32_t ss_gen;
+    int risk_sel, hov_risk;
+    bool recent_open;
+    int rec_scroll, rec_hov, rec_drag_y, rec_drag_scroll;
+    bool rec_hov_x, rec_dragging;
+    int fast;                       /* fast timer while a scan runs on screen */
     /* about */
     sys_cpu_info_t cpu;
 } st_t;
@@ -318,9 +346,10 @@ static void settings_icon(surface_t *s, int x, int y, int size) {
 /* Small coloured tile + white glyph for each page (sidebar, drawn directly at sz px). */
 static void page_icon(surface_t *s, int page, int x, int y, int sz) {
     static const uint32_t top[PG_COUNT] = { RGB(176, 116, 250), RGB(70, 156, 252), RGB(252, 168, 64),
-                                            RGB(250, 98, 126), RGB(146, 154, 170) };
+                                            RGB(250, 98, 126), RGB(70, 170, 252), RGB(146, 154, 170) };
     static const uint32_t bot[PG_COUNT] = { RGB(120, 72, 222), RGB(36, 104, 228), RGB(236, 112, 30),
-                                            RGB(222, 52, 88), RGB(96, 104, 122) };
+                                            RGB(222, 52, 88), RGB(36, 128, 232), RGB(96, 104, 122) };
+    if (page == PG_SAFETY) { icon_draw(ICON_SHIELD, s, x, y, sz); return; }
     sys_tile(s, x, y, sz, top[page], bot[page]);
     double cx = x + sz / 2.0, cy = y + sz / 2.0, u = sz / 22.0;
     uint32_t W = COLOR_WHITE;
@@ -389,12 +418,17 @@ static void add_pw(st_t *st, int page, widget_t *w) {
     if (w && st->pn[page] < MAX_PW) st->pw[page][st->pn[page]++] = w;
 }
 
+static void show_recent(st_t *st, bool on);
+static void update_fast_timer(st_t *st);
+
 static void set_page(st_t *st, int p) {
     if (p < 0 || p >= PG_COUNT) return;
     st->page = p;
     for (int i = 0; i < PG_COUNT; i++)
-        for (int k = 0; k < st->pn[i]; k++) ui_set_visible(st->pw[i][k], i == p);
+        for (int k = 0; k < st->pn[i]; k++) ui_set_visible(st->pw[i][k], i == p && !(i == PG_SAFETY && st->recent_open));
+    if (st->recent_open && p != PG_SAFETY) show_recent(st, false);
     st->last_sec = 0;
+    update_fast_timer(st);
     win_invalidate(st->win);
 }
 
@@ -1285,11 +1319,349 @@ static void on_copy_details(widget_t *w, void *ctx) {
 }
 
 /* ======================================================================================
+ * SafetyShield page
+ * ==================================================================================== */
+/* Progress shown under the Scan button: empty until a scan runs while the window is open. */
+static bool ss_progress(st_t *st, safetyshield_status_t *ss, int *done, int *all) {
+    safetyshield_status(ss);
+    bool show = ss->scanning || ss->scan_id != st->ss_base_id;
+    *done = show ? ss->scanned : 0;
+    *all = show ? MAX(ss->total, ss->scanned) : safetyshield_total_files();
+    return show;
+}
+
+static void paint_safety(st_t *st, surface_t *s) {
+    const theme_t *t = theme_get();
+    section(s, CX, RISK_Y - 24, "Risk levels");
+    safetyshield_status_t ss;
+    int done, all;
+    bool show = ss_progress(st, &ss, &done, &all);
+    char buf[64];
+    snprintf(buf, sizeof buf, "%d/%d", done, all);
+    gfx_text(s, CX, COUNT_Y, buf, t->window_text, FONT_UI_BOLD);
+    const char *state = "";
+    char tbuf[48];
+    if (!ss.running) state = "The SafetyShield service is stopped";
+    else if (ss.scanning) state = "Scanning...";
+    else if (show && ss.threats) {
+        snprintf(tbuf, sizeof tbuf, "%d threat%s found", ss.threats, ss.threats == 1 ? "" : "s");
+        state = tbuf;
+    } else if (show) state = "No threats found";
+    gfx_text_aligned(s, rect_make(CX, COUNT_Y, CW, 17), state, ss.threats && show ? safetyshield_risk_color(SS_RISK_HIGH)
+                     : sys_text_dim(t), FONT_UI, ALIGN_RIGHT);
+    gfx_fill_rounded_rect(s, CX, BAR_Y, CW, BAR_H, BAR_H / 2, color_alpha(t->window_text, t->dark ? 40 : 28));
+    if (show && all > 0 && done > 0) {
+        int fw = (int)((int64_t)CW * MIN(done, all) / all);
+        uint32_t c = ss.threats ? safetyshield_risk_color(SS_RISK_HIGH) : t->accent;
+        gfx_fill_rounded_rect(s, CX, BAR_Y, MAX(fw, BAR_H), BAR_H, BAR_H / 2, c);
+    }
+}
+
+static void invalidate_progress(st_t *st) {
+    win_invalidate_rect(st->win, CX - 2, COUNT_Y - 2, CW + 4, BAR_Y + BAR_H + 4 - (COUNT_Y - 2));
+}
+
+/* ---- risk levels: list on the left, description card on the right ---- */
+static rect_t risk_rect(int i) { return rect_make(CX, RISK_Y + i * RISK_H, RISK_W, RISK_H - 2); }
+
+static int risk_at(int x, int y) {
+    for (int i = 0; i < SS_RISK_COUNT; i++)
+        if (rect_contains(risk_rect(i), x, y)) return i;
+    return -1;
+}
+
+static void risks_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    int mx, my, hov = -1;
+    if (sys_mouse_in(st->win, r, &mx, &my)) hov = risk_at(mx, my);
+    bool focus = ui_has_focus(w) && win_is_focused(st->win);
+    for (int i = 0; i < SS_RISK_COUNT; i++) {
+        rect_t a = risk_rect(i);
+        bool sel = i == st->risk_sel;
+        if (sel) gfx_fill_rounded_rect(s, a.x, a.y, a.w, a.h, 7, color_alpha(t->accent, t->dark ? 70 : 42));
+        else if (i == hov) gfx_fill_rounded_rect(s, a.x, a.y, a.w, a.h, 7, color_alpha(t->window_text, t->dark ? 22 : 14));
+        if (sel && focus) gfx_rounded_rect(s, a.x - 1, a.y - 1, a.w + 2, a.h + 2, 8, t->accent);
+        gfx_fill_circle_aa(s, a.x + 16, a.y + a.h / 2.0, 5.5, safetyshield_risk_color(i));
+        gfx_text(s, a.x + 32, a.y + (a.h - font_height(FONT_UI)) / 2, safetyshield_risk_name(i), t->window_text,
+                 sel ? FONT_UI_BOLD : FONT_UI);
+    }
+    rect_t c = rect_make(CX + RISK_W + 16, RISK_Y, CW - RISK_W - 16, SS_RISK_COUNT * RISK_H - 2);
+    card(s, c);
+    int risk = st->risk_sel;
+    uint32_t rc = safetyshield_risk_color(risk);
+    gfx_fill_circle_aa(s, c.x + 22, c.y + 24, 6.5, rc);
+    gfx_text(s, c.x + 38, c.y + 13, safetyshield_risk_name(risk), t->window_text, FONT_UI_LARGE);
+    gfx_text_wrapped(s, rect_make(c.x + 16, c.y + 46, c.w - 32, c.h - 54), safetyshield_risk_description(risk),
+                     sys_text_dim(t), FONT_UI);
+}
+
+static void set_risk_sel(st_t *st, int i) {
+    i = CLAMP(i, 0, SS_RISK_COUNT - 1);
+    if (i == st->risk_sel) return;
+    st->risk_sel = i;
+    ui_invalidate(st->w_risks);
+}
+
+static bool risks_event(widget_t *w, const event_t *ev) {
+    st_t *st = ui_get_ctx(w);
+    switch (ev->type) {
+    case EV_MOUSE_MOVE: {
+        int h = risk_at(ev->x, ev->y);
+        if (h != st->hov_risk) { st->hov_risk = h; ui_invalidate(w); }
+        return true;
+    }
+    case EV_MOUSE_DOWN: {
+        int h = risk_at(ev->x, ev->y);
+        if (ev->button == MOUSE_LEFT && h >= 0) set_risk_sel(st, h);
+        return true;
+    }
+    case EV_MOUSE_UP:
+        return true;
+    case EV_KEY_DOWN:
+        if (ev->mods & (MOD_CTRL | MOD_ALT)) return false;
+        if (ev->key == KEY_UP) { set_risk_sel(st, st->risk_sel - 1); return true; }
+        if (ev->key == KEY_DOWN) { set_risk_sel(st, st->risk_sel + 1); return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+/* ---- Scan button and the "Recent scanned files" link ---- */
+static void sync_scan_button(st_t *st) {
+    if (!st->w_scan) return;
+    safetyshield_status_t ss;
+    safetyshield_status(&ss);
+    bool en = ss.running && !ss.scanning;
+    if (ui_is_enabled(st->w_scan) != en) ui_set_enabled(st->w_scan, en);
+}
+
+static void update_fast_timer(st_t *st);
+
+static void on_scan(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    (void)w;
+    int r = safetyshield_scan();
+    if (r < 0) {
+        ui_notify("SafetyShield", "The SafetyShield service is stopped. Start it in the Services app.");
+        return;
+    }
+    sync_scan_button(st);
+    invalidate_progress(st);
+    update_fast_timer(st);
+}
+
+static void show_recent(st_t *st, bool on);
+
+static void link_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    bool hover = sys_mouse_in(st->win, r, NULL, NULL);
+    uint32_t c = hover ? color_shade(t->link, t->dark ? 30 : -30) : t->link;
+    int tw = gfx_text(s, r.x + 1, r.y + 1, "Recent scanned files", c, FONT_UI);
+    gfx_hline(s, r.x + 1, r.y + 1 + font_ascent(FONT_UI) + 2, tw, c);
+    if (ui_has_focus(w) && win_is_focused(st->win))
+        gfx_rounded_rect(s, r.x - 3, r.y - 2, tw + 8, r.h + 4, 4, color_alpha(t->accent, 160));
+}
+
+static bool link_event(widget_t *w, const event_t *ev) {
+    st_t *st = ui_get_ctx(w);
+    switch (ev->type) {
+    case EV_MOUSE_MOVE:
+        return true;
+    case EV_MOUSE_DOWN:
+        if (ev->button == MOUSE_LEFT) show_recent(st, true);
+        return true;
+    case EV_MOUSE_UP:
+        return true;
+    case EV_KEY_DOWN:
+        if (ev->key == KEY_ENTER || ev->key == KEY_SPACE) { show_recent(st, true); return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+/* ---- the "Recent scanned files" list (covers the page, X at the top left) ---- */
+static rect_t rec_close_rect(void) { return rect_make(SIDE_W + 16, 16, 32, 32); }
+static rect_t rec_list_rect(void) { return rect_make(SIDE_W + 16, REC_TOP, SW - SIDE_W - 32, SH - REC_TOP - 12); }
+
+static int rec_max_scroll(void) {
+    int content = safetyshield_recent_count() * REC_ROW;
+    return MAX(0, content - rec_list_rect().h);
+}
+
+static rect_t rec_thumb(int scroll) {
+    rect_t l = rec_list_rect();
+    int content = safetyshield_recent_count() * REC_ROW;
+    if (content <= l.h) return rect_make(0, 0, 0, 0);
+    int th = MAX(28, l.h * l.h / content);
+    int ty = l.y + (int)((int64_t)(l.h - th) * scroll / MAX(1, content - l.h));
+    return rect_make(l.x + l.w - 6, ty, 6, th);
+}
+
+static void recent_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    gfx_fill_rect(s, r.x, r.y, r.w, r.h, t->window_bg);
+    rect_t x = rec_close_rect();
+    int mx, my;
+    bool in = sys_mouse_in(st->win, r, &mx, &my);
+    st->rec_hov_x = in && rect_contains(x, mx, my);
+    st->rec_hov = -1;
+    if (in && !st->rec_dragging && rect_contains(rect_make(rec_list_rect().x, rec_list_rect().y, rec_list_rect().w - 10,
+                                                          rec_list_rect().h), mx, my))
+        st->rec_hov = (my - rec_list_rect().y + st->rec_scroll) / REC_ROW;
+    if (st->rec_hov_x) gfx_fill_rounded_rect(s, x.x, x.y, x.w, x.h, 7, color_alpha(t->window_text, t->dark ? 34 : 22));
+    ui_draw_glyph(s, UI_GLYPH_CLOSE, x.x + 10, x.y + 10, 12, t->window_text);
+    gfx_text(s, x.x + x.w + 12, x.y + (x.h - font_height(FONT_UI_LARGE)) / 2, "Recent scanned files", t->window_text,
+             FONT_UI_LARGE);
+    rect_t l = rec_list_rect();
+    int n = safetyshield_recent_count();
+    st->rec_scroll = CLAMP(st->rec_scroll, 0, rec_max_scroll());
+    if (!n) {
+        gfx_text_aligned(s, rect_make(l.x, l.y + 40, l.w, 20), "No files have been scanned yet.", sys_text_dim(t),
+                         FONT_UI, ALIGN_CENTER);
+        return;
+    }
+    gfx_hline(s, l.x, l.y - 1, l.w, color_mix(t->window_bg, t->window_text, 40));
+    rect_t old = s->clip;
+    s->clip = rect_intersect(old, l);
+    safetyshield_entry_t *e = malloc(sizeof *e);
+    if (!e) { s->clip = old; return; }
+    int first = st->rec_scroll / REC_ROW;
+    int tw_max = l.w - 24;
+    for (int i = first; i < n; i++) {
+        int y = l.y + i * REC_ROW - st->rec_scroll;
+        if (y >= l.y + l.h) break;
+        if (!safetyshield_recent_get(i, e)) break;
+        if (i == st->rec_hov) gfx_fill_rect(s, l.x, y, l.w - 10, REC_ROW, color_alpha(t->window_text, t->dark ? 14 : 9));
+        const char *name = vfs_basename(e->path);
+        char dir[VFS_PATH_MAX];
+        vfs_dirname(e->path, dir);
+        int nw = gfx_text_ellipsis(s, l.x + 12, y + 6, tw_max * 2 / 3, name, t->window_text, FONT_UI_BOLD);
+        gfx_text_ellipsis(s, l.x + 12 + nw + 10, y + 6, tw_max - nw - 10, dir, sys_text_dim(t), FONT_UI);
+        uint32_t rc = safetyshield_risk_color(e->risk);
+        gfx_fill_circle_aa(s, l.x + 16, y + 32, 4, rc);
+        int rw = gfx_text(s, l.x + 26, y + 24, safetyshield_risk_name(e->risk), rc, FONT_UI_BOLD);
+        gfx_text_ellipsis(s, l.x + 26 + rw + 8, y + 24, tw_max - rw - 22, safetyshield_risk_summary(e->risk),
+                          sys_text_dim(t), FONT_UI);
+        gfx_hline(s, l.x, y + REC_ROW - 1, l.w - 10, color_mix(t->window_bg, t->window_text, 26));
+    }
+    free(e);
+    rect_t th = rec_thumb(st->rec_scroll);
+    if (th.w) gfx_fill_rounded_rect(s, th.x, th.y, th.w, th.h, 3, color_alpha(t->window_text, st->rec_dragging ? 120 : 70));
+    s->clip = old;
+}
+
+static void rec_scroll_to(st_t *st, int v) {
+    v = CLAMP(v, 0, rec_max_scroll());
+    if (v != st->rec_scroll) { st->rec_scroll = v; ui_invalidate(st->w_recent); }
+}
+
+static bool recent_event(widget_t *w, const event_t *ev) {
+    st_t *st = ui_get_ctx(w);
+    rect_t l = rec_list_rect();
+    switch (ev->type) {
+    case EV_MOUSE_MOVE: {
+        if (st->rec_dragging) {
+            int content = safetyshield_recent_count() * REC_ROW;
+            rect_t th = rec_thumb(st->rec_drag_scroll);
+            int track = l.h - th.h;
+            if (track > 0)
+                rec_scroll_to(st, st->rec_drag_scroll + (int)((int64_t)(ev->y - st->rec_drag_y) * (content - l.h) / track));
+            return true;
+        }
+        bool hx = rect_contains(rec_close_rect(), ev->x, ev->y);
+        int hr = rect_contains(rect_make(l.x, l.y, l.w - 10, l.h), ev->x, ev->y) ? (ev->y - l.y + st->rec_scroll) / REC_ROW : -1;
+        if (hr >= safetyshield_recent_count()) hr = -1;
+        if (hx != st->rec_hov_x || hr != st->rec_hov) { st->rec_hov_x = hx; st->rec_hov = hr; ui_invalidate(w); }
+        return true;
+    }
+    case EV_MOUSE_DOWN:
+        if (ev->button != MOUSE_LEFT) return true;
+        if (rect_contains(rec_close_rect(), ev->x, ev->y)) { show_recent(st, false); return true; }
+        {
+            rect_t th = rec_thumb(st->rec_scroll);
+            if (th.w && ev->x >= th.x - 6 && ev->x < l.x + l.w && ev->y >= l.y && ev->y < l.y + l.h) {
+                if (ev->y >= th.y && ev->y < th.y + th.h) {
+                    st->rec_dragging = true;
+                    st->rec_drag_y = ev->y;
+                    st->rec_drag_scroll = st->rec_scroll;
+                    ui_invalidate(w);
+                } else {
+                    rec_scroll_to(st, st->rec_scroll + (ev->y < th.y ? -l.h : l.h));
+                }
+            }
+        }
+        return true;
+    case EV_MOUSE_UP:
+        if (st->rec_dragging) { st->rec_dragging = false; ui_invalidate(w); }
+        return true;
+    case EV_MOUSE_WHEEL:
+        rec_scroll_to(st, st->rec_scroll + ev->wheel * REC_ROW * 2);
+        return true;
+    case EV_KEY_DOWN:
+        if (ev->mods & (MOD_CTRL | MOD_ALT)) return false;
+        if (ev->key == KEY_ESCAPE) { show_recent(st, false); return true; }
+        if (ev->key == KEY_UP) { rec_scroll_to(st, st->rec_scroll - REC_ROW); return true; }
+        if (ev->key == KEY_DOWN) { rec_scroll_to(st, st->rec_scroll + REC_ROW); return true; }
+        if (ev->key == KEY_PAGEUP) { rec_scroll_to(st, st->rec_scroll - l.h); return true; }
+        if (ev->key == KEY_PAGEDOWN) { rec_scroll_to(st, st->rec_scroll + l.h); return true; }
+        if (ev->key == KEY_HOME) { rec_scroll_to(st, 0); return true; }
+        if (ev->key == KEY_END) { rec_scroll_to(st, rec_max_scroll()); return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static void show_recent(st_t *st, bool on) {
+    if (!st->w_recent || on == st->recent_open) return;
+    st->recent_open = on;
+    for (int k = 0; k < st->pn[PG_SAFETY]; k++) ui_set_visible(st->pw[PG_SAFETY][k], !on && st->page == PG_SAFETY);
+    ui_set_visible(st->w_recent, on);
+    st->rec_scroll = 0;
+    st->rec_hov = -1;
+    st->rec_hov_x = st->rec_dragging = false;
+    if (on) ui_focus(st->w_recent);
+    else if (st->page == PG_SAFETY && st->w_link) ui_focus(st->w_link);
+    win_invalidate(st->win);
+}
+
+/* Fast refresh (bar, list) while a scan runs and the page is on screen. */
+static void update_fast_timer(st_t *st) {
+    safetyshield_status_t ss;
+    safetyshield_status(&ss);
+    bool want = st->page == PG_SAFETY && ss.scanning;
+    if (want && !st->fast) st->fast = win_set_timer(st->win, 40);
+    else if (!want && st->fast) { win_kill_timer(st->win, st->fast); st->fast = 0; }
+}
+
+static void safety_refresh(st_t *st) {
+    uint32_t g = safetyshield_generation();
+    if (g == st->ss_gen) return;
+    st->ss_gen = g;
+    sync_scan_button(st);
+    if (st->page == PG_SAFETY) {
+        if (st->recent_open) ui_invalidate(st->w_recent);
+        else invalidate_progress(st);
+    }
+    update_fast_timer(st);
+}
+
+/* ======================================================================================
  * Window
  * ==================================================================================== */
 static void paint_header(st_t *st, surface_t *s) {
     const theme_t *t = theme_get();
-    gfx_text(s, CX, 22, page_names[st->page], t->window_text, FONT_UI_TITLE);
+    if (st->page == PG_SAFETY) {             /* "SafetyShield" with its icon at the top */
+        icon_draw(ICON_SHIELD, s, CX, 21, 36);
+        gfx_text(s, CX + 46, 22, page_names[st->page], t->window_text, FONT_UI_TITLE);
+    } else {
+        gfx_text(s, CX, 22, page_names[st->page], t->window_text, FONT_UI_TITLE);
+    }
     gfx_text(s, CX + 1, 60, page_subtitles[st->page], sys_text_dim(t), FONT_UI);
 }
 
@@ -1347,6 +1719,9 @@ static void paint_page(st_t *st, surface_t *s) {
                          "control - only on or off.", sys_text_dim(t), FONT_UI);
         break;
     }
+    case PG_SAFETY:
+        paint_safety(st, s);
+        break;
     case PG_ABOUT:
         paint_about(st, s);
         break;
@@ -1385,6 +1760,12 @@ static void tick(st_t *st) {
         }
     }
     if (st->page == PG_SOUND && now < st->snd_until + 250) win_invalidate_rect(st->win, SPK_X, SPK_Y, SPK_S, SPK_S);
+    safety_refresh(st);
+    if (st->page == PG_SAFETY && !st->recent_open) {
+        static int last_total = -1;             /* files added / removed: "0/N" follows */
+        int n = safetyshield_total_files();
+        if (n != last_total) { last_total = n; invalidate_progress(st); }
+    }
     sync_controls(st);
     /* the solid colour can change without a theme event (wallpaper setters only repaint) */
     const theme_t *t = theme_get();
@@ -1409,7 +1790,8 @@ static void settings_event(window_t *win, const event_t *ev) {
         break;
     }
     case EV_TIMER:
-        tick(st);
+        if (st->fast && ev->timer_id == st->fast) safety_refresh(st);
+        else tick(st);
         break;
     case EV_THEME:
         refresh_thumbs(st, false);
@@ -1419,7 +1801,11 @@ static void settings_event(window_t *win, const event_t *ev) {
         sync_controls(st);
         break;
     case EV_KEY_DOWN:
-        if (ev->key == KEY_ESCAPE) { win_close(win); return; }
+        if (ev->key == KEY_ESCAPE) {
+            if (st->recent_open) show_recent(st, false);
+            else win_close(win);
+            return;
+        }
         if ((ev->mods & MOD_CTRL) && (ev->key == KEY_TAB || ev->key == KEY_PAGEDOWN || ev->key == KEY_PAGEUP)) {
             bool back = ev->key == KEY_PAGEUP || (ev->key == KEY_TAB && (ev->mods & MOD_SHIFT));
             set_page(st, (st->page + (back ? PG_COUNT - 1 : 1)) % PG_COUNT);
@@ -1493,6 +1879,24 @@ static void build_sound(st_t *st) {
     if (app_find("Piano")) add_pw(st, PG_SOUND, ui_button(win, CX, 434, 150, 32, "Open Piano", on_open_app, "Piano"));
 }
 
+static void build_safety(st_t *st) {
+    window_t *win = st->win;
+    st->w_risks = ui_custom(win, CX - 4, RISK_Y - 4, CW + 8, SS_RISK_COUNT * RISK_H + 6, risks_draw, risks_event, st);
+    add_pw(st, PG_SAFETY, st->w_risks);
+    st->w_scan = ui_button(win, CX, SCAN_Y, 120, 32, "Scan", on_scan, st);
+    add_pw(st, PG_SAFETY, st->w_scan);
+    st->w_link = ui_custom(win, CX, LINK_Y, font_text_width(FONT_UI, "Recent scanned files") + 4, 20, link_draw,
+                           link_event, st);
+    add_pw(st, PG_SAFETY, st->w_link);
+    st->w_recent = ui_custom(win, SIDE_W, 0, SW - SIDE_W, SH, recent_draw, recent_event, st);
+    ui_set_visible(st->w_recent, false);
+    safetyshield_status_t ss;
+    safetyshield_status(&ss);
+    st->ss_base_id = ss.scanning ? ss.scan_id - 1 : ss.scan_id;
+    st->ss_gen = safetyshield_generation();
+    sync_scan_button(st);
+}
+
 static void build_about(st_t *st) {
     window_t *win = st->win;
     int y = SH - 32 - 24;
@@ -1509,6 +1913,7 @@ static void settings_launch(const char *arg) {
     if (!win) { free(st); return; }
     st->win = win;
     st->hov_side = st->hov_mode = st->hov_accent = st->hov_wall = st->hov_solid = -1;
+    st->hov_risk = st->rec_hov = -1;
     st->last_wallpaper = theme_get()->wallpaper;
     sys_cpu_info(&st->cpu);
     win_set_userdata(win, st);
@@ -1519,6 +1924,7 @@ static void settings_launch(const char *arg) {
     build_mouse(st);
     build_datetime(st);
     build_sound(st);
+    build_safety(st);
     build_about(st);
 
     int page = PG_APPEARANCE;
