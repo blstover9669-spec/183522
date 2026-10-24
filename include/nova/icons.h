@@ -60,6 +60,8 @@ enum icon_kind {
     ICON_ERROR,
     ICON_QUESTION,
     ICON_SUCCESS,
+    /* security */
+    ICON_SHIELD,          /* SafetyShield */
     ICON_COUNT
 };
 

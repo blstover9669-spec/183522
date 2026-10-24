@@ -691,6 +691,36 @@ static void draw_status(ic_t *c, int kind) {
     }
 }
 
+/* ---- security ---------------------------------------------------------------------------- */
+/* SafetyShield: a two-tone blue shield with a white check mark. */
+static void draw_shield(ic_t *c) {
+    uint32_t rim = RGB(20, 92, 180), lite = RGB(70, 170, 252), deep = RGB(36, 128, 232), w = COLOR_WHITE;
+    if (c->sm) {
+        double out[16] = { 32, 2, 60, 10, 60, 32, 52, 48, 32, 62, 12, 48, 4, 32, 4, 10 };
+        POLY(c, out, 8, rim);
+        double in[16] = { 32, 7, 55, 13.5, 55, 31, 48.5, 45, 32, 57, 15.5, 45, 9, 31, 9, 13.5 };
+        POLY(c, in, 8, deep);
+        double half[12] = { 32, 7, 32, 57, 15.5, 45, 9, 31, 9, 13.5, 32, 7 };
+        POLY(c, half, 6, lite);
+        LINE(c, 18, 32, 28, 42, 7, w, false);
+        LINE(c, 26, 44, 46, 22, 7, w, false);
+        return;
+    }
+    double out[26] = { 32, 3, 44, 8, 56, 10, 56, 30, 54.5, 39, 50, 47, 43, 54, 32, 61,
+                       21, 54, 14, 47, 9.5, 39, 8, 30, 8, 10 };
+    POLY(c, out, 13, rim);
+    CIRC(c, 32, 4.2, 1.6, rim);
+    double in[26] = { 32, 7.5, 43, 12, 52, 13.5, 52, 30, 50.6, 38, 46.6, 45, 40.5, 51, 32, 56.5,
+                      23.5, 51, 17.4, 45, 13.4, 38, 12, 30, 12, 13.5 };
+    POLY(c, in, 13, deep);
+    double half[18] = { 32, 7.5, 32, 56.5, 23.5, 51, 17.4, 45, 13.4, 38, 12, 30, 12, 13.5, 21, 12, 32, 7.5 };
+    POLY(c, half, 9, lite);
+    double gloss[10] = { 32, 9.5, 32, 30, 14, 30, 14, 15, 22, 13.5 };
+    POLY(c, gloss, 5, RGBA(255, 255, 255, 40));
+    LINE(c, 20.5, 32, 28.5, 40.5, 5.2, w, true);
+    LINE(c, 28.5, 40.5, 44, 22.5, 5.2, w, true);
+}
+
 /* ---- dispatch ----------------------------------------------------------------------------- */
 static void render(int kind, surface_t *s, int x, int y, int box, int final_size) {
     ic_t c = { s, x, y, box, box / 64.0, final_size < 24 };
@@ -722,6 +752,7 @@ static void render(int kind, surface_t *s, int x, int y, int box, int final_size
     case ICON_INFO: case ICON_WARNING: case ICON_ERROR: case ICON_QUESTION: case ICON_SUCCESS:
         draw_status(&c, kind);
         break;
+    case ICON_SHIELD: draw_shield(&c); break;
     default: break;
     }
 }
@@ -774,7 +805,7 @@ static const char *const names[ICON_COUNT] = {
     "folder-desktop", "folder-system", "folder-home", "text", "code", "image", "audio", "archive",
     "binary", "unknown", "log", "config", "note", "paint", "app", "disk", "computer", "trash", "gear",
     "service", "settings", "bell", "alarm", "clock", "search", "run", "pin", "terminal", "info",
-    "warning", "error", "question", "success",
+    "warning", "error", "question", "success", "shield",
 };
 
 const char *icon_name(int kind) { return (kind >= 0 && kind < ICON_COUNT) ? names[kind] : "?"; }
