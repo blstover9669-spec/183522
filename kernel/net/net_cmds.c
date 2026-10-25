@@ -3,10 +3,14 @@
  *   net                  adapter, link, address, gateway, DNS, packet counters
  *   ping HOST [COUNT]    ICMP echo (results in the system log: logs net)
  *   nslookup HOST        DNS lookup (result in the system log)
+ *   dhcp [renew]         the DHCP lease
+ *   fetch URL [FILE]     HTTP / HTTPS download (result in the system log)
+ *   cookies [clear]      the cookie jar
  * Commands must return at once, so ping / nslookup start the work and report
  * through log lines ("[net] ..." on the serial log too).
  */
 #include "net_internal.h"
+#include "crypto/crypto.h"
 
 static int cmd_net(int argc, char **argv, cmd_writer_t *out) {
     (void)argc; (void)argv;
@@ -123,3 +127,106 @@ static int cmd_nslookup(int argc, char **argv, cmd_writer_t *out) {
     return 0;
 }
 REGISTER_COMMAND("nslookup", "nslookup HOST - look up a host name with DNS (result: logs net)", cmd_nslookup);
+
+/* ---- dhcp --------------------------------------------------------------------------------- */
+static int cmd_dhcp(int argc, char **argv, cmd_writer_t *out) {
+    if (argc > 1 && !strcmp(argv[1], "renew")) {
+        if (!net_link_up()) { cmd_printf(out, "dhcp: %s\n", net_status_text()); return 1; }
+        dhcp_start();
+        cmd_puts(out, "Asking the DHCP server for an address again (logs net)\n");
+        return 0;
+    }
+    net_info_t i;
+    net_get_info(&i);
+    if (!i.configured) { cmd_printf(out, "%s\n", net_status_text()); return 1; }
+    char a[16], b[16], c[16], d[16];
+    cmd_printf(out, "%s/%s gateway %s DNS %s lease %u s\n", net_ip_to_str(i.ip, a), net_ip_to_str(i.netmask, b),
+               net_ip_to_str(i.gateway, c), net_ip_to_str(i.dns, d), i.lease_seconds);
+    return 0;
+}
+REGISTER_COMMAND("dhcp", "dhcp [renew] - show the DHCP lease, or ask for an address again", cmd_dhcp);
+
+/* ---- fetch -------------------------------------------------------------------------------- */
+typedef struct { char path[256]; uint32_t start; bool verbose; } fetch_job_t;
+
+static void fetch_done(http_request_t *r, void *ctx) {
+    fetch_job_t *j = ctx;
+    uint32_t ms = net_now() - j->start;
+    if (http_error(r) != HTTP_OK) {
+        NLOG("fetch: FAILED (%s) after %u ms: %s", http_strerror(http_error(r)), ms, http_error_text(r));
+        if (http_cert_error(r)[0]) NLOG("fetch: certificate: %s", http_cert_error(r));
+    } else {
+        uint8_t h[32];
+        char hex[65];
+        sha256(http_body(r) ? http_body(r) : (const uint8_t *)"", http_body_len(r), h);
+        for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", h[i]);
+        NLOG("fetch: %d %s, %u bytes in %u ms, %d redirect(s), final URL %s", http_status(r), http_reason(r),
+             http_body_len(r), ms, http_redirect_count(r), http_url(r));
+        NLOG("fetch: body sha256 %s", hex);
+        if (http_is_https(r))
+            NLOG("fetch: %s; certificate %s; subject \"%s\", issuer \"%s\"", http_tls_info(r),
+                 http_cert_ok(r) ? "verified" : http_cert_error(r), http_cert_subject(r), http_cert_issuer(r));
+        if (j->verbose)
+            for (int i = 0; i < http_header_count(r); i++) {
+                const char *n, *v;
+                if (http_header_at(r, i, &n, &v)) NLOG("fetch: header %s: %s", n, v);
+            }
+        if (j->path[0]) {
+            int e = vfs_write_file(j->path, http_body(r) ? http_body(r) : (const uint8_t *)"", http_body_len(r));
+            if (e < 0) NLOG("fetch: could not save %s: %s", j->path, vfs_strerror(e));
+            else NLOG("fetch: saved %s", j->path);
+        } else if (http_body_len(r)) {
+            char line[121];
+            uint32_t n = MIN(http_body_len(r), sizeof line - 1);
+            for (uint32_t i = 0; i < n; i++) {
+                uint8_t ch = http_body(r)[i];
+                line[i] = (ch >= 32 && ch < 127) ? (char)ch : ' ';
+            }
+            line[n] = 0;
+            NLOG("fetch: body starts: %s", line);
+        }
+    }
+    http_free(r);
+    kfree(j);
+}
+
+static int cmd_fetch(int argc, char **argv, cmd_writer_t *out) {
+    const char *url = NULL, *file = NULL;
+    http_options_t o = { 0 };
+    fetch_job_t *j = kcalloc(1, sizeof *j);
+    if (!j) return 1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-k")) o.flags |= HTTP_F_ALLOW_BAD_CERT;
+        else if (!strcmp(argv[i], "-v")) j->verbose = true;
+        else if (!strcmp(argv[i], "-n")) o.flags |= HTTP_F_NO_REDIRECT;
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) { o.body = argv[++i]; o.body_len = (uint32_t)strlen(argv[i]);
+                                                           o.content_type = "application/x-www-form-urlencoded"; }
+        else if (!url) url = argv[i];
+        else if (!file) file = argv[i];
+    }
+    if (!url) {
+        cmd_puts(out, "usage: fetch [-k] [-v] [-n] [-d FORMDATA] URL [FILE]\n"
+                      "  -k accept a bad certificate, -v log the headers, -n don't follow redirects,\n"
+                      "  -d send a POST body; FILE saves the body\n");
+        kfree(j);
+        return 2;
+    }
+    if (file) cmd_resolve_path(out, file, j->path);
+    j->start = net_now();
+    if (!http_fetch_ex(url, &o, fetch_done, j)) { kfree(j); cmd_puts(out, "fetch: out of memory\n"); return 1; }
+    cmd_printf(out, "Fetching %s - the result goes to the system log (logs net)\n", url);
+    return 0;
+}
+REGISTER_COMMAND("fetch", "fetch [-k] [-v] URL [FILE] - download a web page (result: logs net)", cmd_fetch);
+
+/* ---- cookies ------------------------------------------------------------------------------ */
+static int cmd_cookies(int argc, char **argv, cmd_writer_t *out) {
+    if (argc > 1 && !strcmp(argv[1], "clear")) {
+        cookies_clear();
+        cmd_puts(out, "All cookies deleted\n");
+        return 0;
+    }
+    cmd_printf(out, "%d cookie(s) stored (cookies clear deletes them)\n", cookies_count());
+    return 0;
+}
+REGISTER_COMMAND("cookies", "cookies [clear] - count or delete the browser cookies", cmd_cookies);

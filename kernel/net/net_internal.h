@@ -132,6 +132,31 @@ uint32_t    tcp_write(tcp_conn_t *c, const void *data, uint32_t len);   /* bytes
 void        tcp_close(tcp_conn_t *c, bool abort);
 int         tcp_count(void);
 
+/* ---- TLS (tls.c) ------------------------------------------------------------------ */
+typedef struct tls_conn tls_conn_t;
+enum { TLSS_HANDSHAKE = 0, TLSS_OPEN, TLSS_PEER_CLOSED, TLSS_ERROR };
+#define TLS_ECERT   -1          /* certificate rejected (tls_cert_error says why)        */
+#define TLS_EFAIL   -2          /* handshake / protocol / decryption failure             */
+#define TLS_ETCP    -3          /* the TCP connection failed (tcp_error of the socket)   */
+#define TLS_F_ALLOW_BAD_CERT 1
+/* Start a TLS client on an open (or opening) TCP connection; takes ownership of tcp. */
+tls_conn_t *tls_open(tcp_conn_t *tcp, const char *host, uint32_t flags);
+void        tls_step(tls_conn_t *t);         /* drive the handshake / records (http_tick) */
+int         tls_state(tls_conn_t *t);
+int         tls_error(tls_conn_t *t);
+int         tls_tcp_error(tls_conn_t *t);
+const char *tls_error_text(tls_conn_t *t);
+uint32_t    tls_readable(tls_conn_t *t);
+uint32_t    tls_read(tls_conn_t *t, void *buf, uint32_t max);
+uint32_t    tls_writable(tls_conn_t *t);
+uint32_t    tls_write(tls_conn_t *t, const void *data, uint32_t len);
+bool        tls_cert_ok(tls_conn_t *t);
+const char *tls_cert_error(tls_conn_t *t);
+const char *tls_cert_subject(tls_conn_t *t);
+const char *tls_cert_issuer(tls_conn_t *t);
+const char *tls_info(tls_conn_t *t);
+void        tls_close(tls_conn_t *t, bool abort);
+
 /* ---- HTTP (http.c) / cookies (cookies.c) -------------------------------------------- */
 /* "Cookie: a=b; c=d" value for a request (malloc'd, NULL if none) */
 char *cookies_header_for(const url_t *u);
