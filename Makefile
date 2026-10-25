@@ -113,6 +113,8 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	@rm -rf $(BUILD)/isodir
 	@mkdir -p $(BUILD)/isodir/boot/grub
 	@cp $(KERNEL) $(BUILD)/isodir/boot/kernel.elf
+	@printf 'NovaOS installed drive\n' > $(BUILD)/isodir/boot/novadisk.sig   # = DISK_SIGNATURE
+	@truncate -s 512 $(BUILD)/isodir/boot/novadisk.sig
 	@printf '%s\n' \
 	  'set timeout=$(GRUB_TIMEOUT)' \
 	  'set default=0' \
@@ -122,6 +124,17 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  'set color_normal=light-gray/black' \
 	  'set menu_color_normal=light-gray/black' \
 	  'set menu_color_highlight=white/blue' \
+	  '' \
+	  '# A hard disk with an installed NovaOS drive (signature in sector 2047, see' \
+	  '# kernel/disk/diskfmt.h) boots by default: the restart after the NovaOS Drive' \
+	  '# installation goes straight into the installed system.' \
+	  'set novadisk=' \
+	  'for d in hd0 hd1 hd2 hd3; do' \
+	  '  if [ -z "$$novadisk" ]; then' \
+	  '    if cmp ($$d)2047+1 /boot/novadisk.sig; then set novadisk=$$d; fi' \
+	  '  fi' \
+	  'done' \
+	  'if [ -n "$$novadisk" ]; then set default=novadisk; fi' \
 	  '' \
 	  'menuentry "NovaOS 1.5 Developer Preview" {' \
 	  '  multiboot /boot/kernel.elf $(CMDLINE)' \
@@ -133,8 +146,9 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  '  set gfxpayload=800x600x32,800x600x24,800x600,auto' \
 	  '  boot' \
 	  '}' \
-	  'menuentry "Boot from the first hard disk (installed NovaOS)" {' \
-	  '  set root=(hd0)' \
+	  'menuentry "Boot from the first hard disk (installed NovaOS)" --id=novadisk {' \
+	  '  if [ -z "$$novadisk" ]; then set novadisk=hd0; fi' \
+	  '  set root=($$novadisk)' \
 	  '  chainloader +1' \
 	  '  boot' \
 	  '}' \
