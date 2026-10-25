@@ -1,14 +1,18 @@
 /*
  * installer.c - "Installer": install NovaOS onto a hard disk.
  *
- * A wizard: Welcome -> Choose disk -> Confirm -> Installing -> Finished.
+ * A wizard: Welcome -> Choose disk -> Drive size -> Confirm -> Installing ->
+ * Finished. The drive sizes are the same as on the NovaOS Drive installation
+ * screen of ISO boots (100 MB ... 10 GB, install_size_*); sizes bigger than the
+ * disk are greyed out and only the chosen size of the disk is used.
  * The heavy lifting is done by the kernel's installer back end
  * (<nova/disk.h>: install_begin / install_step); this app drives it from a
  * window timer in slices of ~12 ms so the desktop stays responsive, and
  * shows the progress.
  *
  * autorun=Installer:auto installs to the first suitable disk without
- * asking (used by automated tests) and logs "INSTALL: done" / "INSTALL: failed".
+ * asking (used by automated tests) and logs "INSTALL: done" / "INSTALL: failed";
+ * it takes the largest size that fits (the whole disk when none does).
  */
 #include <nova.h>
 #include <nova/disk.h>
@@ -24,13 +28,16 @@
 #define LIST_Y   104
 #define LIST_H   232
 
-enum { PG_WELCOME, PG_DISK, PG_CONFIRM, PG_INSTALL, PG_DONE, PG_FAILED };
+enum { PG_WELCOME, PG_DISK, PG_SIZE, PG_CONFIRM, PG_INSTALL, PG_DONE, PG_FAILED };
+#define NSTEPS 6
+#define TILE_GAP 12
 
 typedef struct {
     window_t *win;
     int page;
     int sel;                    /* selected disk index, -1 = none */
-    int hover;
+    int size;                   /* selected drive size (install_size_*), -1 = none */
+    int hover, size_hover;
     bool auto_mode;
     install_job_t *job;
     int timer;
@@ -39,17 +46,26 @@ typedef struct {
     uint32_t finished_ms;
     double spin;
     char error[200];
-    widget_t *back, *next, *cancel, *rescan, *copy, *list, *progress, *shutdown;
+    widget_t *back, *next, *cancel, *rescan, *copy, *list, *sizes, *progress, *shutdown;
 } inst_t;
 
-static const char *const step_names[] = { "Welcome", "Choose a disk", "Confirm", "Install", "Finish" };
+static const char *const step_names[] = { "Welcome", "Choose a disk", "Drive size", "Confirm", "Install", "Finish" };
 static const char *const phase_list[] = { "Writing the boot loader", "Copying NovaOS", "Copying your files",
                                           "Preparing file storage", "Verifying", "Making the disk bootable" };
 
 static void set_page(inst_t *in, int page);
 
 /* ---- helpers ------------------------------------------------------------------------ */
-static bool disk_ok(int i) { return install_check_disk(i, NULL, 0) == DISK_OK; }
+/* A disk can take NovaOS when the back end accepts it and at least the smallest size fits. */
+static bool disk_ok(int i) { return install_check_disk(i, NULL, 0) == DISK_OK && install_size_default(i) >= 0; }
+
+static bool size_fits(const inst_t *in, int i) {
+    return in->sel >= 0 && i >= 0 && i < install_size_count() && install_size_fits(in->sel, install_size_bytes(i));
+}
+
+static void pick_default_size(inst_t *in) {
+    if (!size_fits(in, in->size)) in->size = in->sel >= 0 ? install_size_default(in->sel) : -1;
+}
 
 static void size_str(uint64_t bytes, char *out, int n) { disk_format_size(bytes, out, n); }
 
@@ -114,7 +130,7 @@ static void list_draw(widget_t *w, surface_t *s, rect_t r) {
         gfx_text(s, r.x + 58, r.y + 18, "No hard disks found", t->window_text, FONT_UI_BOLD);
         gfx_text_wrapped(s, rect_make(r.x + 58, r.y + 40, r.w - 76, r.h - 50),
                          "NovaOS needs an IDE hard disk to install to. In VirtualBox: shut down, open "
-                         "Settings > Storage, add a new hard disk (VDI, 64 MB or more) to the IDE "
+                         "Settings > Storage, add a new hard disk (VDI, 100 MB or more) to the IDE "
                          "controller, start the VM again and click Rescan.",
                          text_dim(t), FONT_UI);
         return;
@@ -141,8 +157,8 @@ static void list_draw(widget_t *w, surface_t *s, rect_t r) {
         int code = ok ? DISK_OK : install_check_disk(i, why, sizeof why);
         if (install_is_boot_disk(i)) {
             snprintf(line, sizeof line, "%s  \x95  System disk (in use)", d->location);
-        } else if (code == DISK_ENOSPC) {
-            size_str(INSTALL_MIN_BYTES, need, sizeof need);
+        } else if (code == DISK_ENOSPC || (code == DISK_OK && !ok)) {
+            size_str(install_size_bytes(0), need, sizeof need);
             snprintf(line, sizeof line, "%s  \x95  Too small (needs %s)", d->location, need);
         } else if (why[0]) {
             snprintf(line, sizeof line, "%s  \x95  %s", d->location, why);
@@ -191,7 +207,7 @@ static bool list_event(widget_t *w, const event_t *ev) {
     }
     case EV_DOUBLE_CLICK: {
         int h = list_hit(w, ev->x, ev->y);
-        if (h >= 0 && h == in->sel) set_page(in, PG_CONFIRM);
+        if (h >= 0 && h == in->sel) set_page(in, PG_SIZE);
         return true;
     }
     case EV_KEY_DOWN:
@@ -202,6 +218,76 @@ static bool list_event(widget_t *w, const event_t *ev) {
             return true;
         }
         return false;
+    default:
+        return false;
+    }
+}
+
+/* ---- drive sizes (custom widget): a 3 x 3 grid of tiles ----------------------------------- */
+static rect_t tile_rect(widget_t *w, int i) {
+    rect_t r = ui_rect(w);
+    int cols = 3, rows = (install_size_count() + cols - 1) / cols;
+    int tw = (r.w - (cols - 1) * TILE_GAP) / cols, th = (r.h - (rows - 1) * TILE_GAP) / rows;
+    return rect_make(r.x + (i % cols) * (tw + TILE_GAP), r.y + (i / cols) * (th + TILE_GAP), tw, th);
+}
+
+static void sizes_draw(widget_t *w, surface_t *s, rect_t r) {
+    inst_t *in = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    (void)r;
+    for (int i = 0; i < install_size_count(); i++) {
+        rect_t c = tile_rect(w, i);
+        bool ok = size_fits(in, i), sel = ok && i == in->size, hov = ok && i == in->size_hover;
+        uint32_t bg = sel ? color_mix(t->window_bg, t->accent, t->dark ? 60 : 36)
+                          : hov ? color_mix(t->window_bg, t->accent, 16) : t->panel_bg;
+        gfx_fill_rounded_rect(s, c.x, c.y, c.w, c.h, 8, ok ? bg : color_mix(t->panel_bg, t->window_bg, 128));
+        gfx_rounded_rect(s, c.x, c.y, c.w, c.h, 8, sel ? t->accent : t->window_border);
+        if (sel) gfx_rounded_rect(s, c.x + 1, c.y + 1, c.w - 2, c.h - 2, 7, color_alpha(t->accent, 120));
+        if (sel && ui_has_focus(w))
+            gfx_rounded_rect(s, c.x - 3, c.y - 3, c.w + 6, c.h + 6, 10, color_alpha(t->accent, 150));
+        gfx_text_aligned(s, rect_make(c.x, c.y, c.w, c.h - 14), install_size_label(i),
+                         ok ? t->window_text : t->disabled_text, FONT_UI_LARGE, ALIGN_CENTER | ALIGN_MIDDLE);
+        const char *sub = ok ? (sel ? "Selected" : "") : "Bigger than the disk";
+        if (*sub) gfx_text_aligned(s, rect_make(c.x, c.y + c.h / 2 + 6, c.w, 18), sub,
+                                   sel ? t->accent : t->disabled_text, FONT_UI, ALIGN_CENTER);
+    }
+}
+
+static int sizes_hit(widget_t *w, int x, int y) {
+    for (int i = 0; i < install_size_count(); i++)
+        if (rect_contains(tile_rect(w, i), x, y)) return i;
+    return -1;
+}
+
+static bool sizes_event(widget_t *w, const event_t *ev) {
+    inst_t *in = ui_get_ctx(w);
+    switch (ev->type) {
+    case EV_MOUSE_MOVE: {
+        int h = sizes_hit(w, ev->x, ev->y);
+        if (h != in->size_hover) { in->size_hover = h; ui_invalidate(w); }
+        return true;
+    }
+    case EV_MOUSE_LEAVE:
+        if (in->size_hover != -1) { in->size_hover = -1; ui_invalidate(w); }
+        return false;
+    case EV_MOUSE_DOWN: {
+        int h = sizes_hit(w, ev->x, ev->y);
+        if (h >= 0 && size_fits(in, h)) { in->size = h; ui_invalidate(w); update_buttons(in); win_invalidate(in->win); }
+        else if (h >= 0) sys_beep(220, 60);
+        return true;
+    }
+    case EV_DOUBLE_CLICK: {
+        int h = sizes_hit(w, ev->x, ev->y);
+        if (h >= 0 && h == in->size && size_fits(in, h)) set_page(in, PG_CONFIRM);
+        return true;
+    }
+    case EV_KEY_DOWN: {
+        int d = ev->key == KEY_LEFT ? -1 : ev->key == KEY_RIGHT ? 1 : ev->key == KEY_UP ? -3 : ev->key == KEY_DOWN ? 3 : 0;
+        if (!d) return false;
+        for (int i = in->size + d; i >= 0 && i < install_size_count(); i += d)
+            if (size_fits(in, i)) { in->size = i; ui_invalidate(w); update_buttons(in); win_invalidate(in->win); break; }
+        return true;
+    }
     default:
         return false;
     }
@@ -220,7 +306,7 @@ static void paint_sidebar(inst_t *in, surface_t *s, const theme_t *t) {
 
     int cur = in->page;
     if (cur == PG_FAILED) cur = PG_INSTALL;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < NSTEPS; i++) {
         int y = 104 + i * 40;
         bool done = i < cur || (in->page == PG_DONE && i == PG_DONE);
         bool active = i == cur && in->page != PG_DONE;
@@ -272,7 +358,7 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
     int ccx = CX + 92, ccy = hy + 43;
     gfx_fill_circle_aa(s, ccx, ccy, 32, RGB(210, 216, 230));
     for (int i = 0; i < 6; i++)
-        gfx_circle_aa(s, ccx, ccy, 14 + i * 3, 1.2, color_hsv(200 + i * 25, 0.35, 0.95));
+        gfx_circle_aa(s, ccx, ccy, 14 + i * 3, 1.2, color_hsv(200 + i * 25, 90, 242));
     gfx_fill_circle_aa(s, ccx, ccy, 9, t->panel_bg);
     gfx_circle_aa(s, ccx, ccy, 9, 1, RGBA(0, 0, 0, 60));
     int ax0 = ccx + 50, ax1 = CX + CW - 150;
@@ -283,9 +369,9 @@ static void paint_welcome(inst_t *in, surface_t *s, const theme_t *t) {
     y = hy + 86 + 14;
     gfx_text(s, CX, y, "Before you start", t->window_text, FONT_UI_BOLD);
     y += 22;
-    char req[128], need[24];
-    size_str(INSTALL_MIN_BYTES, need, sizeof need);
-    snprintf(req, sizeof req, "You need a hard disk of at least %s (64 MB or more recommended).", need);
+    char req[128];
+    snprintf(req, sizeof req, "You need a hard disk of at least %s. You choose how much of it NovaOS uses "
+             "(%s to %s).", install_size_label(0), install_size_label(0), install_size_label(install_size_count() - 1));
     y += bullet(s, t, y, req);
     y += bullet(s, t, y, "Everything on the disk you choose will be erased.");
     y += bullet(s, t, y, "Installing takes less than a minute.");
@@ -317,13 +403,16 @@ static void paint_confirm(inst_t *in, surface_t *s, const theme_t *t) {
 
     /* summary */
     y = wb.y + wb.h + 18;
-    ui_draw_panel(s, rect_make(CX, y, CW, 146));
+    ui_draw_panel(s, rect_make(CX, y, CW, 172));
     int ly = y + 14;
     const int kx = CX + 16, vx = CX + 150;
-    struct { const char *k; char v[96]; } rows[5];
+    struct { const char *k; char v[96]; } rows[6];
     int nr = 0;
     rows[nr].k = "Disk";
     snprintf(rows[nr++].v, sizeof rows[0].v, "%s, %s", d->model, size);
+    rows[nr].k = "Drive size";
+    if (in->size >= 0) snprintf(rows[nr++].v, sizeof rows[0].v, "%s of the %s disk", install_size_label(in->size), size);
+    else snprintf(rows[nr++].v, sizeof rows[0].v, "The whole disk (%s)", size);
     rows[nr].k = "Location";
     snprintf(rows[nr++].v, sizeof rows[0].v, "%s (IDE)", d->location);
     char sys[24];
@@ -410,12 +499,11 @@ static void paint_done(inst_t *in, surface_t *s, const theme_t *t) {
     gfx_text(s, CX, y, "To start NovaOS from the hard disk:", t->window_text, FONT_UI_BOLD);
     y += 30;
     static const char *steps[] = {
-        "Remove the installation CD. In VirtualBox: Devices > Optical Drives > Remove disk "
-        "from virtual drive (or power off and detach the ISO in Settings > Storage).",
-        "Click Restart now. The computer starts NovaOS from the hard disk.",
+        "Click Restart now. The computer starts NovaOS from the hard disk (with the NovaOS CD "
+        "still inserted, its boot menu picks the installed drive by itself).",
         "Your files are saved to the disk automatically, and before every restart or shut down.",
     };
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < ARRAY_SIZE(steps); i++) {
         gfx_fill_circle_aa(s, CX + 11, y + 9, 11, color_mix(t->window_bg, t->accent, 50));
         char num[4];
         snprintf(num, sizeof num, "%d", i + 1);
@@ -446,6 +534,15 @@ static void installer_paint(inst_t *in) {
     switch (in->page) {
     case PG_WELCOME: paint_welcome(in, s, t); break;
     case PG_DISK: paint_title(s, t, "Choose a disk", "Select the hard disk to install NovaOS on."); break;
+    case PG_SIZE: {
+        const disk_info_t *d = disk_get(in->sel);
+        char sub[160], ds[24] = "";
+        if (d) size_str(d->sectors * 512, ds, sizeof ds);
+        snprintf(sub, sizeof sub, "Choose how much of the disk (%s) NovaOS uses. Sizes bigger than the disk are "
+                 "greyed out.", ds);
+        paint_title(s, t, "Drive size", sub);
+        break;
+    }
     case PG_CONFIRM: paint_confirm(in, s, t); break;
     case PG_INSTALL: paint_install(in, s, t); break;
     case PG_DONE: paint_done(in, s, t); break;
@@ -459,18 +556,21 @@ static void installer_paint(inst_t *in) {
 /* ---- navigation ------------------------------------------------------------------------- */
 static void update_buttons(inst_t *in) {
     bool installing = in->page == PG_INSTALL;
-    ui_set_visible(in->back, in->page == PG_DISK || in->page == PG_CONFIRM || in->page == PG_FAILED);
+    ui_set_visible(in->back, in->page == PG_DISK || in->page == PG_SIZE || in->page == PG_CONFIRM ||
+                             in->page == PG_FAILED);
     ui_set_visible(in->next, in->page != PG_FAILED);
     ui_set_visible(in->cancel, !installing);
     ui_set_visible(in->rescan, in->page == PG_DISK);
     ui_set_visible(in->copy, in->page == PG_DISK);
     ui_set_visible(in->list, in->page == PG_DISK);
+    ui_set_visible(in->sizes, in->page == PG_SIZE);
     ui_set_visible(in->progress, installing);
     ui_set_visible(in->shutdown, in->page == PG_DONE);
     ui_set_text(in->cancel, in->page == PG_DONE ? "Close" : "Cancel");
     switch (in->page) {
     case PG_WELCOME: ui_set_text(in->next, "Next"); ui_set_enabled(in->next, true); break;
     case PG_DISK: ui_set_text(in->next, "Next"); ui_set_enabled(in->next, in->sel >= 0 && disk_ok(in->sel)); break;
+    case PG_SIZE: ui_set_text(in->next, "Next"); ui_set_enabled(in->next, size_fits(in, in->size)); break;
     case PG_CONFIRM: ui_set_text(in->next, "Install"); ui_set_enabled(in->next, true); break;
     case PG_INSTALL: ui_set_text(in->next, "Next"); ui_set_enabled(in->next, false); break;
     case PG_DONE: ui_set_text(in->next, "Restart now"); ui_set_enabled(in->next, true); break;
@@ -506,7 +606,9 @@ static void install_tick(inst_t *in) {
 
 static void start_install(inst_t *in) {
     char err[160] = "";
-    in->job = install_begin(in->sel, ui_get_value(in->copy) != 0, err, sizeof err);
+    /* only the chosen size is used; automatic installs on a disk smaller than every size use all of it */
+    uint64_t bytes = size_fits(in, in->size) ? install_size_bytes(in->size) : 0;
+    in->job = install_begin_sized(in->sel, bytes, ui_get_value(in->copy) != 0, err, sizeof err);
     if (!in->job) {
         snprintf(in->error, sizeof in->error, "%s", err[0] ? err : "The installation could not be prepared.");
         klog("INSTALL: failed: %s", in->error);
@@ -519,12 +621,14 @@ static void start_install(inst_t *in) {
 }
 
 static void set_page(inst_t *in, int page) {
-    if (page == PG_DISK && in->page != PG_CONFIRM) {
+    if (page == PG_DISK && in->page != PG_SIZE) {
         if (in->sel < 0 || !disk_ok(in->sel)) pick_default_disk(in);
     }
+    if (page == PG_SIZE) pick_default_size(in);
     in->page = page;
     update_buttons(in);
     if (page == PG_DISK) ui_focus(in->list);
+    else if (page == PG_SIZE) ui_focus(in->sizes);
     else if (page != PG_INSTALL && ui_is_visible(in->next) && ui_is_enabled(in->next)) ui_focus(in->next);
     if (page == PG_INSTALL || page == PG_DONE) ui_button_set_default(in->next, true);
 }
@@ -534,7 +638,8 @@ static void on_next(widget_t *w, void *ctx) {
     (void)w;
     switch (in->page) {
     case PG_WELCOME: set_page(in, PG_DISK); break;
-    case PG_DISK: if (in->sel >= 0 && disk_ok(in->sel)) set_page(in, PG_CONFIRM); break;
+    case PG_DISK: if (in->sel >= 0 && disk_ok(in->sel)) set_page(in, PG_SIZE); break;
+    case PG_SIZE: if (size_fits(in, in->size)) set_page(in, PG_CONFIRM); break;
     case PG_CONFIRM: start_install(in); break;
     case PG_DONE: sys_reboot(); break;
     default: break;
@@ -545,7 +650,8 @@ static void on_back(widget_t *w, void *ctx) {
     inst_t *in = ctx;
     (void)w;
     if (in->page == PG_DISK) set_page(in, PG_WELCOME);
-    else if (in->page == PG_CONFIRM || in->page == PG_FAILED) set_page(in, PG_DISK);
+    else if (in->page == PG_SIZE || in->page == PG_FAILED) set_page(in, PG_DISK);
+    else if (in->page == PG_CONFIRM) set_page(in, PG_SIZE);
 }
 
 static void on_cancel(widget_t *w, void *ctx) {
@@ -613,6 +719,8 @@ static void installer_launch(const char *arg) {
     if (!win) { free(in); return; }
     in->win = win;
     in->hover = -1;
+    in->size = -1;
+    in->size_hover = -1;
     in->auto_mode = arg && !strcmp(arg, "auto");
     win_set_userdata(win, in);
     win_set_event_handler(win, installer_event);
@@ -624,6 +732,7 @@ static void installer_launch(const char *arg) {
     in->shutdown = ui_button(win, W - PAD - 120 - 10 - 110, by, 110, 32, "Shut down", on_shutdown, in);
     ui_button_set_default(in->next, true);
     in->list = ui_custom(win, CX, LIST_Y, CW, LIST_H, list_draw, list_event, in);
+    in->sizes = ui_custom(win, CX, 132, CW, 228, sizes_draw, sizes_event, in);
     in->rescan = ui_button(win, CX + CW - 96, H - FOOT_H - 44, 96, 30, "Rescan", on_rescan, in);
     in->copy = ui_checkbox(win, CX, H - FOOT_H - 40, CW - 110, 24, "Copy my current files to the new system", true,
                            on_copy, in);
@@ -633,12 +742,18 @@ static void installer_launch(const char *arg) {
     set_page(in, PG_WELCOME);
 
     if (in->auto_mode) {
+        /* the first disk the back end accepts, even if it is smaller than every size */
+        if (in->sel < 0)
+            for (int i = 0; i < disk_count() && in->sel < 0; i++)
+                if (install_check_disk(i, NULL, 0) == DISK_OK) in->sel = i;
         if (in->sel < 0) {
             klog("INSTALL: failed: no suitable disk");
             set_page(in, PG_DISK);
             return;
         }
-        set_page(in, PG_DISK);
+        in->size = install_size_default(in->sel);
+        in->page = PG_SIZE;
+        update_buttons(in);
         set_page(in, PG_CONFIRM);
         start_install(in);
     }

@@ -6,6 +6,10 @@
  * [__kernel_start, __data_end) with .data taken from the pristine copy that
  * boot.asm saves before any C code runs. See diskfmt.h for the layout.
  *
+ * The installation uses only the drive size the user chose (install_begin_sized):
+ * the partition ends there and the two file storage slots share the space after
+ * the kernel (each slot just under 2 GiB at most).
+ *
  * The work is split into slices (install_step) so the Installer app can drive
  * it from a timer and keep the GUI responsive. Order of writes: stage 2,
  * kernel, files, storage headers, verify (read back + compare), and only then
@@ -22,8 +26,33 @@ extern uint8_t __kernel_start[], __data_start[], __data_end[], __data_snapshot[]
 extern void _start(void);
 
 #define SLOT_MIN_SECTORS  (4u * 1024 * 1024 / 512)      /* 4 MiB per slot at least  */
-#define SLOT_MAX_SECTORS  (128u * 1024 * 1024 / 512)    /* 128 MiB per slot at most */
+/* At most just under 2 GiB per slot: a saved image is an int32-sized VFS image, and the
+   files live in RAM while NovaOS runs, so a bigger slot could never be filled. */
+#define SLOT_MAX_SECTORS  (2047u * 1024 * 1024 / 512)
 #define IO_SECTORS        32
+
+/* ---- drive sizes offered by the NovaOS Drive installation and the Installer app ------ */
+static const uint32_t size_mib[] = { 100, 150, 200, 250, 500, 700, 1024, 5 * 1024, 10 * 1024 };
+static const char *const size_names[] = { "100 MB", "150 MB", "200 MB", "250 MB", "500 MB",
+                                          "700 MB", "1 GB", "5 GB", "10 GB" };
+
+int install_size_count(void) { return ARRAY_SIZE(size_mib); }
+uint64_t install_size_bytes(int i) {
+    return (i >= 0 && i < ARRAY_SIZE(size_mib)) ? (uint64_t)size_mib[i] << 20 : 0;
+}
+const char *install_size_label(int i) { return (i >= 0 && i < ARRAY_SIZE(size_names)) ? size_names[i] : ""; }
+
+bool install_size_fits(int disk, uint64_t bytes) {
+    const disk_info_t *d = disk_get(disk);
+    return d && bytes >= INSTALL_MIN_BYTES && bytes <= d->sectors * 512;
+}
+
+int install_size_default(int disk) {
+    int best = -1;
+    for (int i = 0; i < ARRAY_SIZE(size_mib); i++)
+        if (install_size_fits(disk, install_size_bytes(i))) best = i;
+    return best;
+}
 
 static uint32_t kernel_bytes(void) { return (uint32_t)(__data_end - __kernel_start); }
 static uint32_t stage2_bytes(void) { return (uint32_t)(bootblob_stage2_end - bootblob_stage2); }
@@ -31,18 +60,25 @@ static uint32_t stage2_bytes(void) { return (uint32_t)(bootblob_stage2_end - boo
 uint32_t install_system_bytes(void) { return 1024 + ((stage2_bytes() + 511) & ~511u) + ((kernel_bytes() + 511) & ~511u); }
 
 typedef struct layout {
+    uint64_t total_sectors;       /* sectors used by the installation (chosen size) */
     uint32_t kernel_sectors, persist_lba, slot_sectors;
 } layout_t;
 
-static int compute_layout(const disk_info_t *d, layout_t *l, char *why, int n) {
+/* size_sectors: the drive size chosen by the user, 0 = the whole disk */
+static int compute_layout(const disk_info_t *d, uint64_t size_sectors, layout_t *l, char *why, int n) {
+    if (size_sectors > d->sectors) {
+        if (why) snprintf(why, (size_t)n, "The disk is smaller than the chosen drive size.");
+        return DISK_ENOSPC;
+    }
+    l->total_sectors = size_sectors ? size_sectors : d->sectors;
     l->kernel_sectors = (kernel_bytes() + 511) / 512;
     /* 1 MiB of slack after the kernel, then align to 1 MiB */
     l->persist_lba = (DISK_KERNEL_LBA + l->kernel_sectors + 2048 + 2047) & ~2047u;
-    uint64_t avail = d->sectors > l->persist_lba ? d->sectors - l->persist_lba : 0;
+    uint64_t avail = l->total_sectors > l->persist_lba ? l->total_sectors - l->persist_lba : 0;
     uint64_t slot = avail / 2;
     if (slot > SLOT_MAX_SECTORS) slot = SLOT_MAX_SECTORS;
     l->slot_sectors = (uint32_t)slot;
-    if (d->sectors * 512 < INSTALL_MIN_BYTES || slot < SLOT_MIN_SECTORS) {
+    if (l->total_sectors * 512 < INSTALL_MIN_BYTES || slot < SLOT_MIN_SECTORS) {
         char need[24];
         disk_format_size(INSTALL_MIN_BYTES, need, sizeof need);
         if (why) snprintf(why, (size_t)n, "The disk is too small (NovaOS needs at least %s).", need);
@@ -76,7 +112,7 @@ int install_check_disk(int disk, char *why, int n) {
         return DISK_EBUSY;
     }
     layout_t l;
-    return compute_layout(d, &l, why, n);
+    return compute_layout(d, 0, &l, why, n);
 }
 
 /* ---- job ------------------------------------------------------------------------------- */
@@ -126,12 +162,18 @@ static void build_cmdline(char *out, size_t n, uint32_t disk_id) {
 }
 
 install_job_t *install_begin(int disk, bool copy_files, char *err, int n) {
+    return install_begin_sized(disk, 0, copy_files, err, n);
+}
+
+install_job_t *install_begin_sized(int disk, uint64_t size_bytes, bool copy_files, char *err, int n) {
     if (install_check_disk(disk, err, n) != DISK_OK) return NULL;
     const disk_info_t *d = disk_get(disk);
+    layout_t l;
+    if (compute_layout(d, size_bytes / 512, &l, err, n) != DISK_OK) return NULL;
     install_job_t *j = kcalloc(1, sizeof *j);
     if (!j) goto nomem;
     j->disk = disk;
-    compute_layout(d, &j->l, NULL, 0);
+    j->l = l;
 
     /* kernel image: read-only part straight from memory, .data from the boot-time copy */
     uint32_t kb = kernel_bytes(), ksz = j->l.kernel_sectors * 512;
@@ -187,18 +229,19 @@ install_job_t *install_begin(int disk, bool copy_files, char *err, int n) {
     build_cmdline(h->cmdline, sizeof h->cmdline, disk_id);
     strlcpy(h->version_str, sys_version(), sizeof h->version_str);
     h->kernel_crc = crc32_buf(j->kernel, kb);
+    h->drive_sectors = (uint32_t)MIN(j->l.total_sectors, 0xFFFFFFFFull);
     h->checksum = crc32_buf(h, 508);
 
     /* MBR: stage 1 code, disk signature, one active partition, boot signature */
     memcpy(j->mbr, bootblob_mbr, 440);
     memcpy(j->mbr + 440, &disk_id, 4);
     uint8_t *pe = j->mbr + 446;
-    uint64_t part_len = d->sectors - DISK_KERNEL_LBA;
+    uint64_t part_len = j->l.total_sectors - DISK_KERNEL_LBA;
     if (part_len > 0xFFFFFFFFull) part_len = 0xFFFFFFFFull;
     pe[0] = 0x80;
     chs(DISK_KERNEL_LBA, pe + 1);
     pe[4] = DISK_PART_TYPE;
-    chs((uint32_t)MIN(d->sectors - 1, 0xFFFFFFFFull), pe + 5);
+    chs((uint32_t)MIN(j->l.total_sectors - 1, 0xFFFFFFFFull), pe + 5);
     uint32_t start = DISK_KERNEL_LBA, len32 = (uint32_t)part_len;
     memcpy(pe + 8, &start, 4);
     memcpy(pe + 12, &len32, 4);
@@ -208,8 +251,9 @@ install_job_t *install_begin(int disk, bool copy_files, char *err, int n) {
     j->total = j->stage2_sectors + j->l.kernel_sectors + j->files_sectors + 2 +
                (j->stage2_sectors + j->l.kernel_sectors) + 2;
     j->phase = PH_STAGE2;
-    klog("install: to disk %d (%s), kernel %u bytes, files %u bytes, storage 2 x %u KiB at lba %u, cmdline \"%s\"",
-         disk, d->model, kb, j->files_len, j->l.slot_sectors / 2, j->l.persist_lba, h->cmdline);
+    klog("install: to disk %d (%s), drive %u MiB, kernel %u bytes, files %u bytes, storage 2 x %u KiB at lba %u, "
+         "cmdline \"%s\"", disk, d->model, (uint32_t)(j->l.total_sectors / 2048), kb, j->files_len,
+         j->l.slot_sectors / 2, j->l.persist_lba, h->cmdline);
     return j;
 
 nomem:
@@ -246,6 +290,13 @@ int install_step(install_job_t *j, uint32_t budget_ms) {
         int r = DISK_OK;
         switch (j->phase) {
         case PH_STAGE2:
+            if (j->pos == 0) {
+                /* an old installation stops being "installed" (GRUB boots the CD) until
+                   this one is complete */
+                memset(j->verify, 0, 512);
+                r = disk_write(j->disk, DISK_SIG_LBA, 1, j->verify);
+                if (r) return fail(j, r, "Writing the boot loader failed");
+            }
             r = write_part(j, DISK_STAGE2_LBA, j->stage2, j->stage2_sectors, &complete);
             if (r) return fail(j, r, "Writing the boot loader failed");
             break;
@@ -310,6 +361,11 @@ int install_step(install_job_t *j, uint32_t budget_ms) {
         case PH_BOOT:
             r = disk_write(j->disk, DISK_HDR_LBA, 1, &j->hdr);
             if (!r) r = disk_flush(j->disk);
+            if (!r) {
+                memset(j->verify, 0, 512);
+                memcpy(j->verify, DISK_SIGNATURE, sizeof DISK_SIGNATURE - 1);
+                r = disk_write(j->disk, DISK_SIG_LBA, 1, j->verify);
+            }
             if (!r) r = disk_write(j->disk, 0, 1, j->mbr);
             if (!r) r = disk_flush(j->disk);
             if (r) return fail(j, r, "Making the disk bootable failed");

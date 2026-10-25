@@ -3,9 +3,12 @@
  *
  *   LBA 0            MBR: stage 1 boot code (bootloader/mbr.asm), disk signature,
  *                    partition table (one active partition, type 0x7F, from
- *                    LBA 2048 to the end of the disk), 0x55AA
+ *                    LBA 2048 to the end of the chosen drive size), 0x55AA
  *   LBA 1            install header (disk_header_t below), read by stage 1/2
  *   LBA 2 ..         stage 2 loader (bootloader/stage2.asm), up to 62 sectors
+ *   LBA 2047         drive signature (DISK_SIGNATURE padded with zeros): the ISO's
+ *                    GRUB menu compares it with /boot/novadisk.sig and then boots
+ *                    the hard disk by default ("restarts into the installed NovaOS")
  *   LBA 2048 ..      kernel: flat memory image of [__kernel_start, __data_end)
  *                    loaded at 1 MiB, entered at _start like a Multiboot kernel
  *   persist_lba ..   persistence area: two slots (A/B) of persist_slot_sectors,
@@ -28,6 +31,8 @@
 #define DISK_HDR_LBA      1
 #define DISK_STAGE2_LBA   2
 #define DISK_STAGE2_MAX   62
+#define DISK_SIG_LBA      2047
+#define DISK_SIGNATURE    "NovaOS installed drive\n"   /* keep in sync with the Makefile */
 #define DISK_KERNEL_LBA   2048
 #define DISK_PART_TYPE    0x7F
 #define DISK_LOAD_ADDR    0x100000u
@@ -51,7 +56,8 @@ typedef struct __attribute__((packed)) disk_header {
     char     cmdline[256];         /* 64: kernel command line ("boot=disk ...")    */
     char     version_str[32];      /* 320: "NovaOS 1.5"                            */
     uint32_t kernel_crc;           /* 352: CRC32 of the kernel image               */
-    uint8_t  reserved[508 - 356];
+    uint32_t drive_sectors;        /* 356: size of the installation (chosen size)  */
+    uint8_t  reserved[508 - 360];
     uint32_t checksum;             /* 508: CRC32 of bytes 0..507                   */
 } disk_header_t;
 

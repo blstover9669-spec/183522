@@ -101,6 +101,16 @@ bool           install_is_boot_disk(int disk);
 /* Prepare an installation onto `disk` (erases it once install_step runs).
    copy_files: also store the current files as the installed system's files. */
 install_job_t *install_begin(int disk, bool copy_files, char *err, int n);
+/* The same, using only the first size_bytes of the disk (partition and file storage
+   end there; 0 = the whole disk). */
+install_job_t *install_begin_sized(int disk, uint64_t size_bytes, bool copy_files, char *err, int n);
+/* The drive sizes offered to the user: 100 MB, 150 MB, 200 MB, 250 MB, 500 MB,
+   700 MB, 1 GB, 5 GB, 10 GB (binary units, like VirtualBox). */
+int            install_size_count(void);
+uint64_t       install_size_bytes(int i);
+const char    *install_size_label(int i);              /* "100 MB" ... "10 GB"  */
+bool           install_size_fits(int disk, uint64_t bytes);   /* not bigger than the disk */
+int            install_size_default(int disk);         /* largest that fits, -1 = none */
 /* Do up to `budget_ms` of work. Returns 0 while running, 1 when finished,
    or a negative DISK_E* error (see install_error()). Call from a timer. */
 int            install_step(install_job_t *job, uint32_t budget_ms);

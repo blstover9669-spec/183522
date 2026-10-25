@@ -101,8 +101,12 @@ void kmain(uint32_t magic, uint32_t mbi) {
     run_initcalls(INIT_FS);
 
     splash_animate();
-    /* Installed drive: the loading bar loads the OS. ISO boot: no loading bar. */
+    /* Installed drive: the loading bar loads the OS. ISO boot: no loading bar; the
+       NovaOS Drive installation follows (Install restarts into the installed system,
+       Continue ISO comes back here). */
     bool bar = persist_active();
+    bool setup = !bar && bootsetup_wanted();
+    if (setup) bootsetup_run();
 
     if (bar) splash_progress(15, NULL);
     apps_init();
@@ -116,6 +120,7 @@ void kmain(uint32_t magic, uint32_t mbi) {
     if (sys_cmdline_get("crashtest")) timer_add(1500, crash_cb, NULL, false);
     run_initcalls(INIT_LATE);
     shell_autorun();
+    if (setup) bootsetup_after_desktop();      /* after Continue ISO: the save file screen */
     klog("NOVA: desktop ready (%dx%d, %u MiB RAM, %d apps)", screen_width(), screen_height(),
          sys_mem_total() >> 20, app_count());
     wm_run();
