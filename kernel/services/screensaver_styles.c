@@ -508,7 +508,7 @@ static bool logos_init(ss_anim_t *a) {
     int nc = 0;
     for (int i = 0; i < app_count() && nc < 64; i++) {
         const app_desc_t *ap = app_get(i);
-        if (ap && !(ap->flags & APP_HIDDEN)) cand[nc++] = ap;
+        if (ap && !(ap->flags & APP_HIDDEN) && ap->draw_icon) cand[nc++] = ap;   /* the app's own icon */
     }
     for (int i = nc - 1; i > 0; i--) {            /* shuffle, take the first NLOGO */
         int j = rand() % (i + 1);
