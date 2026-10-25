@@ -132,6 +132,57 @@ uint32_t    tcp_write(tcp_conn_t *c, const void *data, uint32_t len);   /* bytes
 void        tcp_close(tcp_conn_t *c, bool abort);
 int         tcp_count(void);
 
+/* ---- X.509 certificates (x509.c) and the built-in roots (roots.c) ------------------------ */
+typedef struct { const uint8_t *der; uint16_t len; } tls_root_t;
+extern const tls_root_t tls_roots[];
+extern const int tls_root_count;
+
+enum { X509_KEY_NONE, X509_KEY_RSA, X509_KEY_EC };
+enum { X509_SIG_UNSUPPORTED, X509_SIG_SHA1, X509_SIG_RSA_PKCS1, X509_SIG_RSA_PSS, X509_SIG_ECDSA };
+struct hash_alg;
+typedef struct x509 {
+    const uint8_t *der, *tbs, *issuer, *subject, *spki, *sig;     /* point into the DER */
+    uint32_t der_len, tbs_len, issuer_len, subject_len, spki_len, sig_len;
+    int64_t  not_before, not_after;          /* unix time */
+    int      sig_alg;                        /* X509_SIG_* */
+    const struct hash_alg *sig_hash;
+    int      key_type, curve;                /* X509_KEY_*, EC_P256 / EC_P384 */
+    const uint8_t *rsa_n, *rsa_e, *ec_point;
+    uint32_t rsa_n_len, rsa_e_len, ec_point_len;
+    bool     has_bc, is_ca, has_ku, has_eku, eku_server;
+    int      path_len;                       /* -1 = no limit */
+    uint32_t ku;
+    const uint8_t *san;                      /* contents of the subjectAltName SEQUENCE */
+    uint32_t san_len;
+    char     cn[96], org[96], issuer_cn[96], issuer_org[96];
+} x509_t;
+
+bool x509_parse(x509_t *c, const uint8_t *der, uint32_t len);
+bool x509_check_signature(const x509_t *c, const x509_t *issuer);
+/* verify a signature over data with the certificate's public key (alg X509_SIG_*) */
+bool x509_verify_with_key(const x509_t *key, int alg, const struct hash_alg *h, const uint8_t *data, uint32_t len,
+                          const uint8_t *sig, uint32_t sig_len);
+bool x509_matches_host(const x509_t *c, const char *host);
+int  x509_root_count(void);
+
+#define X509_MAX_CHAIN 8
+enum { X509_PENDING = 1, X509_OK = 0, X509_EUNTRUSTED = -1, X509_EDATE = -2, X509_EHOST = -3,
+       X509_EBROKEN = -4, X509_EUSAGE = -5 };
+typedef struct x509_chain {
+    x509_t   certs[X509_MAX_CHAIN];          /* as sent by the server, certs[0] = the site's */
+    int      n;
+    /* verifier state */
+    char     host[256];
+    int64_t  now;
+    int      cur, cand, depth, result;
+    uint8_t  used[X509_MAX_CHAIN];
+    char     error[160], subject[128], issuer[128];
+} x509_chain_t;
+/* Fill certs[] / n, then start; step until it returns something other than X509_PENDING
+   (each step does at most one signature check). */
+void x509_chain_start(x509_chain_t *v, const char *host, int64_t now);
+int  x509_chain_step(x509_chain_t *v);
+
 /* ---- TLS (tls.c) ------------------------------------------------------------------ */
 typedef struct tls_conn tls_conn_t;
 enum { TLSS_HANDSHAKE = 0, TLSS_OPEN, TLSS_PEER_CLOSED, TLSS_ERROR };

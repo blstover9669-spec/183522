@@ -766,25 +766,3 @@ const char *http_cert_error(const http_request_t *r) { return valid(r) ? r->cert
 const char *http_cert_subject(const http_request_t *r) { return valid(r) ? r->cert_subject : ""; }
 const char *http_cert_issuer(const http_request_t *r) { return valid(r) ? r->cert_issuer : ""; }
 const char *http_tls_info(const http_request_t *r) { return valid(r) ? r->tlsinfo : ""; }
-
-/* TLS is optional at link time while it is being developed (tls.c overrides these) */
-#define WEAK __attribute__((weak))
-WEAK tls_conn_t *tls_open(tcp_conn_t *tcp, const char *host, uint32_t flags) {
-    (void)host; (void)flags;
-    tcp_close(tcp, true);
-    return NULL;
-}
-WEAK void tls_step(tls_conn_t *t) { (void)t; }
-WEAK int tls_state(tls_conn_t *t) { (void)t; return TLSS_ERROR; }
-WEAK int tls_error(tls_conn_t *t) { (void)t; return TLS_EFAIL; }
-WEAK int tls_tcp_error(tls_conn_t *t) { (void)t; return 0; }
-WEAK const char *tls_error_text(tls_conn_t *t) { (void)t; return "TLS is not available"; }
-WEAK uint32_t tls_readable(tls_conn_t *t) { (void)t; return 0; }
-WEAK uint32_t tls_read(tls_conn_t *t, void *b, uint32_t n) { (void)t; (void)b; (void)n; return 0; }
-WEAK uint32_t tls_write(tls_conn_t *t, const void *b, uint32_t n) { (void)t; (void)b; (void)n; return 0; }
-WEAK bool tls_cert_ok(tls_conn_t *t) { (void)t; return false; }
-WEAK const char *tls_cert_error(tls_conn_t *t) { (void)t; return ""; }
-WEAK const char *tls_cert_subject(tls_conn_t *t) { (void)t; return ""; }
-WEAK const char *tls_cert_issuer(tls_conn_t *t) { (void)t; return ""; }
-WEAK const char *tls_info(tls_conn_t *t) { (void)t; return ""; }
-WEAK void tls_close(tls_conn_t *t, bool abort) { (void)t; (void)abort; }
