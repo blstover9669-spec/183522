@@ -179,6 +179,8 @@ static void test_time(void) {
     check("time", ok);
 }
 
+int crypto_selftest(void (*report)(const char *name, bool ok));   /* kernel/crypto/crypto_test.c */
+
 void selftest_run(void) {
     klog("SELFTEST: starting");
     test_printf();
@@ -188,5 +190,6 @@ void selftest_run(void) {
     test_heap();
     test_vfs();
     test_time();
+    crypto_selftest(check);
     klog("SELFTEST: done, %d passed, %d failed", passed, failed);
 }
