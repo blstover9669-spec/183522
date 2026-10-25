@@ -75,7 +75,7 @@ typedef struct { uint32_t rk[60]; int rounds; } aes_ctx_t;
 void aes_set_key(aes_ctx_t *c, const uint8_t *key, int keylen);   /* 16 or 32 */
 void aes_encrypt_block(const aes_ctx_t *c, const uint8_t in[16], uint8_t out[16]);
 
-typedef struct { aes_ctx_t aes; uint8_t h[16]; uint32_t htab[16][4]; } aes_gcm_ctx_t;
+typedef struct { aes_ctx_t aes; uint64_t hl[16], hh[16]; } aes_gcm_ctx_t;   /* GHASH table: i * H */
 void aes_gcm_init(aes_gcm_ctx_t *c, const uint8_t *key, int keylen);
 /* in-place; tag = 16 bytes; nonce = 12 bytes */
 void aes_gcm_encrypt(const aes_gcm_ctx_t *c, const uint8_t nonce[12], const uint8_t *aad, size_t aadlen,
@@ -112,6 +112,19 @@ bool rsa_pkcs1_verify(const uint8_t *n, size_t nlen, const uint8_t *e, size_t el
                       const hash_alg_t *h, const uint8_t *hash, const uint8_t *sig, size_t slen);
 bool rsa_pss_verify(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen,
                     const hash_alg_t *h, const uint8_t *hash, const uint8_t *sig, size_t slen);
+
+/* ---- big integers (bignum.c): 32-bit limbs, least significant first ---------------------- */
+#define BN_MAX_LIMBS 256                      /* 8192 bits */
+int      bn_cmp(const uint32_t *a, const uint32_t *b, int n);
+bool     bn_is_zero(const uint32_t *a, int n);
+uint32_t bn_add(uint32_t *r, const uint32_t *a, const uint32_t *b, int n);   /* returns the carry  */
+uint32_t bn_sub(uint32_t *r, const uint32_t *a, const uint32_t *b, int n);   /* returns the borrow */
+bool     bn_from_bytes(uint32_t *r, int n, const uint8_t *b, size_t len);    /* big endian */
+void     bn_to_bytes(uint8_t *b, size_t len, const uint32_t *a, int n);
+uint32_t bn_m0inv(uint32_t m0);                                              /* -m^-1 mod 2^32 */
+void     bn_mont_mul(uint32_t *r, const uint32_t *a, const uint32_t *b, const uint32_t *m, uint32_t m0inv, int n);
+void     bn_r2(uint32_t *r, const uint32_t *m, int n);                       /* R^2 mod m */
+void     bn_modexp(uint32_t *r, const uint32_t *base, const uint8_t *exp, size_t elen, const uint32_t *m, int n);
 
 /* constant-time compare: true when equal */
 bool ct_equal(const void *a, const void *b, size_t n);
