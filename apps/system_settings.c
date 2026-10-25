@@ -8,6 +8,12 @@
  *                 styles as live thumbnails, solid colours or a picture from
  *                 the disk), window shadows. Everything goes through the core
  *                 theme API and is applied live to the whole desktop.
+ *   Styles      - Screensavers: pick one of the five styles (Nova Drop,
+ *                 Original, Bubbles, Bouncing App Logos, Lines) with a live
+ *                 preview and a Preview button (full screen); the choice is
+ *                 kept by the screensaver service. Splash screen: "No
+ *                 animation on splash screen" (/system/config/splash.cfg,
+ *                 noanimation=1/0), which needs a restart.
  *   Mouse       - pointer speed, double-click speed, a double-click / wheel
  *                 test area, restore defaults.
  *   Date & Time - live analog + digital clock, ISO week / day of year, month
@@ -28,12 +34,13 @@
  * button) and saves those too. Options given on the kernel command line
  * (dark=, wallpaper=, mousespeed=) win over saved settings.
  *
- * autorun=Settings:mouse opens a page directly (appearance, mouse, time,
- * sound, safetyshield, about).
+ * autorun=Settings:mouse opens a page directly (appearance, styles, mouse,
+ * time, sound, safetyshield, about).
  */
 #include "system_common.h"
 #include <nova/disk.h>
 #include <nova/safetyshield.h>
+#include <nova/screensaver.h>
 
 #define SW       780
 #define SH       520
@@ -94,19 +101,34 @@
 #define REC_TOP  64
 #define REC_ROW  46
 
-enum { PG_APPEARANCE, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_SAFETY, PG_ABOUT, PG_COUNT };
+/* styles layout */
+#define STY_Y    124                  /* screensaver list                           */
+#define STY_ROW  40
+#define STY_W    220
+#define PV_X     (CX + STY_W + 24)    /* preview: a dark bezel around the animation */
+#define PV_Y     STY_Y
+#define PV_W     240
+#define PV_PAD   8
+#define PVB_Y    336                  /* Preview button                             */
+#define SPL_Y    392                  /* "Splash screen" section                    */
+#define SPL_CB_Y 416
+#define RST_Y    452
 
-static const char *const page_names[PG_COUNT] = { "Appearance", "Mouse", "Date & Time", "Sound", "SafetyShield",
-                                                  "About" };
+enum { PG_APPEARANCE, PG_STYLES, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_SAFETY, PG_ABOUT, PG_COUNT };
+
+static const char *const page_names[PG_COUNT] = { "Appearance", "Styles", "Mouse", "Date & Time", "Sound",
+                                                  "SafetyShield", "About" };
 static const char *const page_subtitles[PG_COUNT] = {
     "Choose light or dark mode, an accent colour and a wallpaper.",
+    "Choose a screensaver and how the splash screen starts.",
     "Adjust how the pointer and the mouse buttons respond.",
     "The system clock, read from the computer's real-time clock.",
     "System sounds, played on the PC speaker.",
     "Scans every file in NovaOS for threats automatically every 1 minute.",
     "Information about NovaOS and this computer.",
 };
-static const char *const page_keys[PG_COUNT] = { "appearance", "mouse", "time", "sound", "safetyshield", "about" };
+static const char *const page_keys[PG_COUNT] = { "appearance", "styles", "mouse", "time", "sound", "safetyshield",
+                                                 "about" };
 
 static const uint32_t solid_colors[NSOLID] = {
     RGB(40, 90, 150), RGB(24, 118, 128), RGB(44, 112, 72), RGB(106, 64, 140),
@@ -155,6 +177,14 @@ typedef struct {
     int rec_scroll, rec_hov, rec_drag_y, rec_drag_scroll;
     bool rec_hov_x, rec_dragging;
     int fast;                       /* fast timer while a scan runs on screen */
+    /* styles */
+    widget_t *w_styles, *w_preview, *w_splash, *w_restart;
+    ss_anim_t *pv_anim;             /* live preview of the chosen screensaver (Styles page only) */
+    surface_t *pv_surf;
+    int pv_w, pv_h, pv_timer, pv_style;
+    bool pv_full;
+    int hov_style;
+    bool restart_needed;            /* splash setting differs from the one this boot started with */
     /* about */
     sys_cpu_info_t cpu;
 } st_t;
@@ -345,10 +375,12 @@ static void settings_icon(surface_t *s, int x, int y, int size) {
 
 /* Small coloured tile + white glyph for each page (sidebar, drawn directly at sz px). */
 static void page_icon(surface_t *s, int page, int x, int y, int sz) {
-    static const uint32_t top[PG_COUNT] = { RGB(176, 116, 250), RGB(70, 156, 252), RGB(252, 168, 64),
-                                            RGB(250, 98, 126), RGB(70, 170, 252), RGB(146, 154, 170) };
-    static const uint32_t bot[PG_COUNT] = { RGB(120, 72, 222), RGB(36, 104, 228), RGB(236, 112, 30),
-                                            RGB(222, 52, 88), RGB(36, 128, 232), RGB(96, 104, 122) };
+    static const uint32_t top[PG_COUNT] = { RGB(176, 116, 250), RGB(52, 206, 170), RGB(70, 156, 252),
+                                            RGB(252, 168, 64), RGB(250, 98, 126), RGB(70, 170, 252),
+                                            RGB(146, 154, 170) };
+    static const uint32_t bot[PG_COUNT] = { RGB(120, 72, 222), RGB(16, 150, 132), RGB(36, 104, 228),
+                                            RGB(236, 112, 30), RGB(222, 52, 88), RGB(36, 128, 232),
+                                            RGB(96, 104, 122) };
     if (page == PG_SAFETY) { icon_draw(ICON_SHIELD, s, x, y, sz); return; }
     sys_tile(s, x, y, sz, top[page], bot[page]);
     double cx = x + sz / 2.0, cy = y + sz / 2.0, u = sz / 22.0;
@@ -369,6 +401,25 @@ static void page_icon(surface_t *s, int page, int x, int y, int sz) {
         gfx_fill_rounded_rect(s, mx, my, mw, mh, mw / 2, W);
         gfx_fill_rect(s, mx + mw / 2, my + 1, MAX(1, (int)u), (int)(5 * u), bot[page]);
         gfx_fill_rect(s, mx, my + (int)(5 * u), mw, MAX(1, (int)u), bot[page]);
+        break;
+    }
+    case PG_STYLES: {
+        /* a little screen with the Nova star on it */
+        int b = MAX(1, (int)lround(1.4 * u));
+        int mw = (int)lround(15 * u), mh = (int)lround(11 * u);
+        int mx = (int)lround(cx - mw / 2.0), my = (int)lround(cy - mh / 2.0 - 0.5 * u);
+        gfx_fill_rounded_rect(s, mx, my, mw, mh, MAX(1, (int)lround(2 * u)), W);
+        gfx_fill_rect(s, mx + b, my + b, mw - 2 * b, mh - 2 * b, bot[page]);
+        point_t p[8];
+        double scx = mx + mw / 2.0, scy = my + mh / 2.0, R = 3.6 * u, r = 1.0 * u;
+        for (int i = 0; i < 8; i++) {
+            double a = i * M_PI / 4 - M_PI / 2, rr = i % 2 ? r : R;
+            p[i].x = (int)lround(scx + cos(a) * rr);
+            p[i].y = (int)lround(scy + sin(a) * rr);
+        }
+        gfx_fill_polygon(s, p, 8, W);
+        gfx_fill_rect(s, (int)lround(cx - 3 * u), my + mh + MAX(1, (int)lround(u)), (int)lround(6 * u),
+                      MAX(1, (int)lround(1.5 * u)), W);
         break;
     }
     case PG_DATETIME:
@@ -420,12 +471,17 @@ static void add_pw(st_t *st, int page, widget_t *w) {
 
 static void show_recent(st_t *st, bool on);
 static void update_fast_timer(st_t *st);
+static void preview_start(st_t *st);
+static void preview_stop(st_t *st);
 
 static void set_page(st_t *st, int p) {
     if (p < 0 || p >= PG_COUNT) return;
     st->page = p;
     for (int i = 0; i < PG_COUNT; i++)
         for (int k = 0; k < st->pn[i]; k++) ui_set_visible(st->pw[i][k], i == p && !(i == PG_SAFETY && st->recent_open));
+    if (st->w_restart) ui_set_visible(st->w_restart, p == PG_STYLES && st->restart_needed);
+    if (p == PG_STYLES) preview_start(st);
+    else preview_stop(st);
     if (st->recent_open && p != PG_SAFETY) show_recent(st, false);
     st->last_sec = 0;
     update_fast_timer(st);
@@ -1651,6 +1707,209 @@ static void safety_refresh(st_t *st) {
     update_fast_timer(st);
 }
 
+
+/* ======================================================================================
+ * Styles page: screensavers (pick, live preview, Preview button), splash screen setting
+ * ==================================================================================== */
+#define SPLASH_CFG "/system/config/splash.cfg"
+
+static int g_splash_boot = -1;          /* noanimation value this boot started with */
+
+/* noanimation=1 in /system/config/splash.cfg (read by the splash once per start). */
+static int splash_cfg_read(void) {
+    char *text = vfs_read_file(SPLASH_CFG, NULL);
+    if (!text) return 0;
+    int on = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (strncmp(line, "noanimation", 11)) continue;
+        char *v = line + 11;
+        while (*v == ' ' || *v == '\t') v++;
+        if (*v++ != '=') continue;
+        while (*v == ' ' || *v == '\t') v++;
+        on = *v == '1';
+    }
+    free(text);
+    return on;
+}
+
+/* Write noanimation=1 or noanimation=0, keeping any other lines of the file. */
+static int splash_cfg_write(int on) {
+    char *old = vfs_read_file(SPLASH_CFG, NULL);
+    size_t cap = (old ? strlen(old) : 0) + 32, n = 0;
+    char *out = malloc(cap);
+    if (!out) { free(old); return -1; }
+    if (old) {
+        char *save = NULL;
+        for (char *line = strtok_r(old, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
+            const char *l = line;
+            while (*l == ' ' || *l == '\t') l++;
+            if (!*l || !strncmp(l, "noanimation", 11)) continue;
+            size_t k = strlen(line);
+            memcpy(out + n, line, k);
+            n += k;
+            out[n++] = '\n';
+        }
+    }
+    n += (size_t)snprintf(out + n, cap - n, "noanimation=%d\n", on ? 1 : 0);
+    vfs_mkdirs("/system/config");
+    int r = vfs_write_file(SPLASH_CFG, out, (uint32_t)n);
+    free(out);
+    free(old);
+    if (r >= 0) klog("settings: %s noanimation=%d", SPLASH_CFG, on ? 1 : 0);
+    return r;
+}
+
+/* The splash has already read the file when INIT_LATE runs: remember what it used. */
+static void splash_boot_setting(void) { g_splash_boot = splash_cfg_read(); }
+REGISTER_INIT(INIT_LATE, splash_boot_setting);
+
+/* ---- the five screensavers: a list to pick from ---- */
+static rect_t style_rect(int i) { return rect_make(CX, STY_Y + i * STY_ROW, STY_W, STY_ROW - 4); }
+
+static int style_at(int x, int y) {
+    for (int i = 0; i < screensaver_style_count(); i++)
+        if (rect_contains(style_rect(i), x, y)) return i;
+    return -1;
+}
+
+static void styles_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    int mx, my, hov = -1;
+    if (sys_mouse_in(st->win, r, &mx, &my)) hov = style_at(mx, my);
+    bool focus = ui_has_focus(w) && win_is_focused(st->win);
+    int cur = screensaver_get_style();
+    for (int i = 0; i < screensaver_style_count(); i++) {
+        rect_t a = style_rect(i);
+        bool sel = i == cur;
+        if (sel) gfx_fill_rounded_rect(s, a.x, a.y, a.w, a.h, 8, color_alpha(t->accent, t->dark ? 70 : 42));
+        else if (i == hov) gfx_fill_rounded_rect(s, a.x, a.y, a.w, a.h, 8, color_alpha(t->window_text, t->dark ? 22 : 14));
+        if (sel && focus) gfx_rounded_rect(s, a.x - 1, a.y - 1, a.w + 2, a.h + 2, 9, t->accent);
+        double rx = a.x + 18, ry = a.y + a.h / 2.0;
+        gfx_circle_aa(s, rx, ry, 7.5, 1.5, sel ? t->accent : sys_text_dim(t));
+        if (sel) gfx_fill_circle_aa(s, rx, ry, 4, t->accent);
+        gfx_text(s, a.x + 36, a.y + (a.h - font_height(FONT_UI)) / 2, screensaver_style_name(i), t->window_text,
+                 sel ? FONT_UI_BOLD : FONT_UI);
+    }
+}
+
+static void set_style(st_t *st, int i) {
+    if (i < 0 || i >= screensaver_style_count() || i == screensaver_get_style()) return;
+    screensaver_set_style(i);
+    ui_invalidate(st->w_styles);
+    preview_stop(st);
+    preview_start(st);
+}
+
+static bool styles_event(widget_t *w, const event_t *ev) {
+    st_t *st = ui_get_ctx(w);
+    switch (ev->type) {
+    case EV_MOUSE_MOVE: {
+        int h = style_at(ev->x, ev->y);
+        if (h != st->hov_style) { st->hov_style = h; ui_invalidate(w); }
+        return true;
+    }
+    case EV_MOUSE_DOWN: {
+        int h = style_at(ev->x, ev->y);
+        if (ev->button == MOUSE_LEFT && h >= 0) set_style(st, h);
+        return true;
+    }
+    case EV_MOUSE_UP:
+        return true;
+    case EV_KEY_DOWN:
+        if (ev->mods & (MOD_CTRL | MOD_ALT)) return false;
+        if (ev->key == KEY_UP) { set_style(st, screensaver_get_style() - 1); return true; }
+        if (ev->key == KEY_DOWN) { set_style(st, screensaver_get_style() + 1); return true; }
+        if (ev->key == KEY_HOME) { set_style(st, 0); return true; }
+        if (ev->key == KEY_END) { set_style(st, screensaver_style_count() - 1); return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+/* ---- live preview: the real animation drawn small; only what changes is repainted ---- */
+static rect_t pv_screen(const st_t *st) { return rect_make(PV_X + PV_PAD, PV_Y + PV_PAD, st->pv_w, st->pv_h); }
+
+static void preview_frame(st_t *st) {
+    if (!st->pv_anim || !st->pv_surf || st->page != PG_STYLES) return;
+    if (win_is_minimized(st->win) || screensaver_active()) return;    /* nobody can see it */
+    rect_t d[16];
+    int n = ss_anim_frame(st->pv_anim, st->pv_surf, st->pv_full, d, 16);
+    st->pv_full = false;
+    rect_t ps = pv_screen(st);
+    for (int i = 0; i < n; i++) win_invalidate_rect(st->win, ps.x + d[i].x, ps.y + d[i].y, d[i].w, d[i].h);
+}
+
+static void preview_stop(st_t *st) {
+    if (st->pv_timer) { win_kill_timer(st->win, st->pv_timer); st->pv_timer = 0; }
+    ss_anim_destroy(st->pv_anim);
+    st->pv_anim = NULL;
+    surface_destroy(st->pv_surf);
+    st->pv_surf = NULL;
+}
+
+static void preview_start(st_t *st) {
+    if (st->pv_anim || st->page != PG_STYLES || st->pv_w <= 0) return;
+    st->pv_surf = surface_create(st->pv_w, st->pv_h);
+    if (!st->pv_surf) return;
+    st->pv_style = screensaver_get_style();
+    st->pv_anim = ss_anim_create(st->pv_style, st->pv_w, st->pv_h, true);
+    if (!st->pv_anim) { surface_destroy(st->pv_surf); st->pv_surf = NULL; return; }
+    st->pv_full = true;
+    preview_frame(st);
+    st->pv_timer = win_set_timer(st->win, (uint32_t)ss_anim_interval(st->pv_anim));
+    if (st->w_preview) ui_invalidate(st->w_preview);
+}
+
+static void preview_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 12, t->dark ? RGB(70, 74, 84) : RGB(28, 30, 36));
+    gfx_fill_rounded_rect(s, r.x + 1, r.y + 1, r.w - 2, r.h - 2, 11, t->dark ? RGB(14, 15, 18) : RGB(36, 39, 46));
+    rect_t ps = pv_screen(st);
+    if (st->pv_surf) gfx_blit(s, ps.x, ps.y, st->pv_surf);
+    else gfx_fill_rect(s, ps.x, ps.y, ps.w, ps.h, COLOR_BLACK);
+}
+
+static bool preview_event(widget_t *w, const event_t *ev) {
+    (void)w; (void)ev;
+    return false;
+}
+
+/* ---- "No animation on splash screen" ---- */
+static void sync_restart(st_t *st) {
+    bool need = g_splash_boot >= 0 && st->w_splash && (ui_get_value(st->w_splash) != 0) != (g_splash_boot != 0);
+    st->restart_needed = need;
+    if (st->w_restart) ui_set_visible(st->w_restart, need && st->page == PG_STYLES);
+    win_invalidate_rect(st->win, CX - 4, RST_Y - 12, CW + 8, 44);
+}
+
+static void on_splash(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    int on = ui_get_value(w) != 0;
+    int r = splash_cfg_write(on);
+    if (r < 0) {
+        ui_set_value(w, !on);
+        char msg[160];
+        snprintf(msg, sizeof msg, "The splash screen setting could not be saved: %s.", vfs_strerror(r));
+        ui_message_box(st->win, "Settings", msg, MB_OK | MB_ICON_ERROR, NULL, NULL);
+    }
+    sync_restart(st);
+}
+
+static void restart_cb(void *ctx) {
+    (void)ctx;
+    sys_reboot();
+}
+
+static void on_restart(widget_t *w, void *ctx) {
+    (void)w; (void)ctx;
+    timer_add(60, restart_cb, NULL, false);     /* let the button paint released first */
+}
+
 /* ======================================================================================
  * Window
  * ==================================================================================== */
@@ -1679,6 +1938,14 @@ static void paint_page(st_t *st, surface_t *s) {
         gfx_text(s, CX + 226, SOL_Y + 57, "Screensaver", t->window_text, FONT_UI);
         break;
     }
+    case PG_STYLES:
+        section(s, CX, 100, "Screensavers");
+        section(s, CX, SPL_Y, "Splash screen");
+        if (st->restart_needed) {
+            ui_draw_glyph(s, UI_GLYPH_WARNING, CX + 1, RST_Y, 16, RGB(232, 150, 20));
+            gfx_text(s, CX + 26, RST_Y, "Restart required", t->window_text, FONT_UI_BOLD);
+        }
+        break;
     case PG_MOUSE: {
         bool test = sys_cmdline_get("testmouse") != NULL;
         section(s, CX, 100, "Pointer speed");
@@ -1761,6 +2028,11 @@ static void tick(st_t *st) {
     }
     if (st->page == PG_SOUND && now < st->snd_until + 250) win_invalidate_rect(st->win, SPK_X, SPK_Y, SPK_S, SPK_S);
     safety_refresh(st);
+    if (st->page == PG_STYLES && st->pv_anim && st->pv_style != screensaver_get_style()) {   /* changed elsewhere */
+        preview_stop(st);
+        preview_start(st);
+        ui_invalidate(st->w_styles);
+    }
     if (st->page == PG_SAFETY && !st->recent_open) {
         static int last_total = -1;             /* files added / removed: "0/N" follows */
         int n = safetyshield_total_files();
@@ -1790,7 +2062,8 @@ static void settings_event(window_t *win, const event_t *ev) {
         break;
     }
     case EV_TIMER:
-        if (st->fast && ev->timer_id == st->fast) safety_refresh(st);
+        if (st->pv_timer && ev->timer_id == st->pv_timer) preview_frame(st);
+        else if (st->fast && ev->timer_id == st->fast) safety_refresh(st);
         else tick(st);
         break;
     case EV_THEME:
@@ -1814,6 +2087,8 @@ static void settings_event(window_t *win, const event_t *ev) {
         break;
     case EV_CLOSE:
         settings_watch(NULL);
+        st->pv_timer = 0;                       /* the window's timers go with it */
+        preview_stop(st);
         for (int i = 0; i < 8; i++) surface_destroy(st->thumb[i]);
         win_set_userdata(win, NULL);
         free(st);
@@ -1844,6 +2119,28 @@ static void build_appearance(st_t *st) {
     add_pw(st, PG_APPEARANCE, st->w_saver);
     add_pw(st, PG_APPEARANCE, ui_button(win, CX + CW - 80, SOL_Y + 50, 80, 32, "Preview", on_saver_preview, st));
     refresh_thumbs(st, true);
+}
+
+static void build_styles(st_t *st) {
+    window_t *win = st->win;
+    int sw = MAX(1, screen_width()), sh = MAX(1, screen_height());
+    st->pv_w = PV_W;
+    st->pv_h = CLAMP(PV_W * sh / sw, 120, 188);    /* the screen's shape */
+    st->w_styles = ui_custom(win, CX - 4, STY_Y - 4, STY_W + 8, screensaver_style_count() * STY_ROW + 4, styles_draw,
+                             styles_event, st);
+    add_pw(st, PG_STYLES, st->w_styles);
+    int bw = st->pv_w + 2 * PV_PAD, bh = st->pv_h + 2 * PV_PAD;
+    st->w_preview = ui_custom(win, PV_X, PV_Y, bw, bh, preview_draw, preview_event, st);
+    add_pw(st, PG_STYLES, st->w_preview);
+    add_pw(st, PG_STYLES, ui_button(win, PV_X + (bw - 120) / 2, PV_Y + bh + 12, 120, 32, "Preview", on_saver_preview, st));
+    if (g_splash_boot < 0) g_splash_boot = splash_cfg_read();
+    st->w_splash = ui_checkbox(win, CX, SPL_CB_Y, 300, 24, "No animation on splash screen", splash_cfg_read(), on_splash,
+                               st);
+    add_pw(st, PG_STYLES, st->w_splash);
+    int tx = CX + 26 + font_text_width(FONT_UI_BOLD, "Restart required") + 14;
+    st->w_restart = ui_button(win, tx, RST_Y - 7, 120, 30, "Restart now", on_restart, st);
+    ui_set_visible(st->w_restart, false);
+    sync_restart(st);
 }
 
 static void build_mouse(st_t *st) {
@@ -1913,7 +2210,7 @@ static void settings_launch(const char *arg) {
     if (!win) { free(st); return; }
     st->win = win;
     st->hov_side = st->hov_mode = st->hov_accent = st->hov_wall = st->hov_solid = -1;
-    st->hov_risk = st->rec_hov = -1;
+    st->hov_risk = st->rec_hov = st->hov_style = -1;
     st->last_wallpaper = theme_get()->wallpaper;
     sys_cpu_info(&st->cpu);
     win_set_userdata(win, st);
@@ -1921,6 +2218,7 @@ static void settings_launch(const char *arg) {
 
     st->side = ui_custom(win, 0, 0, SIDE_W, SH, side_draw, side_event, st);
     build_appearance(st);
+    build_styles(st);
     build_mouse(st);
     build_datetime(st);
     build_sound(st);
