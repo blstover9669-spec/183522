@@ -148,6 +148,25 @@ tools/shot.py --kernel build/kernel.elf --cmdline "screensaver=4" --out shots-sv
 tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Services" ready wait:1 shot:services
 ```
 
+The screensaver swallows the input that dismisses it, so mouse moves made
+while it runs never reach the pointer and shot.py's idea of the pointer
+position goes stale: dismiss it with a key (`key:esc`) when more clicks
+follow. Settings > Styles (`autorun=Settings:styles`) picks the style
+(rows at about (450, 258 + 40 * N) for style N = 0..4, Preview at (725,
+462)); the serial log names it: `[screensaver] activated after N s idle
+(Bubbles)`.
+
+SafetyShield: `safetyshield_test=N` makes a test file count as a threat of
+risk level N, so a scan logs `[safetyshield] WARN: ...` and shows the
+notification (`[notifyd] SafetyShield: SafetyShield detected a threat in
+your system`); the Scan button of Settings > SafetyShield is at about
+(414, 468):
+
+```sh
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Settings:safetyshield safetyshield_test=4" ready \
+    click:414,468 wait:0.7 shot:scanning "serial:scan finished" shot:done click:400,504 wait:0.5 shot:recent
+```
+
 ### Sound (recorded to a WAV file)
 
 shot.py's QEMU has no sound card unless you add one, so by default NovaOS
