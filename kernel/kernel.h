@@ -69,6 +69,8 @@ void pic_init(void);
 void pic_eoi(int irq);
 void pit_init(uint32_t hz);
 void fpu_init(void);
+void fpu_check(void);                 /* main loop: reset x87 state leaked by earlier code */
+void panic_symbolize(uint32_t addr, char *out, size_t n);   /* "function+0xoff" */
 void cpu_detect(void);
 void paging_init(void);
 void stack_guard_init(void);
