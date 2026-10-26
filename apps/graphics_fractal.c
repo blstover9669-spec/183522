@@ -6,8 +6,14 @@
  * passes (8x8 blocks, then 4x4, 2x2 and single pixels, each pass computing
  * only the pixels the previous passes have not), and every window timer tick
  * does at most RENDER_BUDGET_MS of work before returning to the main loop.
- * The smooth iteration value of every pixel is kept (`mu`), so switching or
- * cycling the palette only recolours - no recomputation.
+ * The palette position of every pixel is kept (`idx`, from the smooth iteration
+ * count), so switching or cycling the palette only recolours - no recomputation,
+ * and no floating point: recolouring is pure integer work, so the colours are
+ * exactly the same on every redraw whatever state the FPU is in.
+ *
+ * Zooming stops at the precision limit of doubles (min_scale()): further
+ * zoom-in is ignored and the status bar shows "Maximum zoom reached"; zooming
+ * out, Back and Reset keep working.
  *
  * Mouse: click = zoom in 2x centred on the point, right-click = zoom out,
  * drag = zoom to a box, wheel = zoom around the pointer, middle-drag = pan,
@@ -32,7 +38,10 @@
 #define RENDER_TICK_MS  4
 #define CYCLE_TICK_MS   50
 #define BAILOUT         65536.0          /* |z|^2 > 256^2: smooth colouring      */
-#define MIN_SCALE       2e-15            /* about the limit of double precision  */
+#define DBL_EPS         2.220446049250313e-16   /* 2^-52 */
+#define PREC_ULPS       256.0            /* a pixel is at least this many ulps wide */
+#define IDX_INSIDE      (-1)             /* idx[]: in the set                     */
+#define IDX_NONE        (-2)             /* idx[]: not computed yet               */
 #define MSG_MS          5000
 
 enum { F_MANDEL, F_JULIA, F_SHIP, F_TRICORN, F_COUNT };
@@ -113,7 +122,7 @@ typedef struct fractal {
 
     int vw, vh;              /* view size in pixels */
     surface_t *img;
-    float *mu;               /* smooth iteration count, -1 inside, -2 not computed */
+    int16_t *idx;            /* palette position 0..LUT_N-1, IDX_INSIDE or IDX_NONE */
 
     bool rendering;
     int pass, ry, rx, render_timer;
@@ -168,6 +177,21 @@ static void default_view(fractal_t *f, view_t *v, int type) {
 
 static double zoom_factor(const fractal_t *f) { return default_scale(f, f->v.type) / f->v.scale; }
 
+/* The precision limit: the smallest pixel size (units per pixel) doubles can draw
+   cleanly around view v. Every iteration step rounds z and c to one unit in the
+   last place (ulp) of the largest numbers involved - |z| and |c| are up to 2 near
+   a fractal, more for a centre far away - and those errors add up over thousands
+   of iterations. Neighbouring pixels must differ by much more than that, so a
+   pixel is kept at least PREC_ULPS ulps wide: about 1.1e-13 near the sets (a zoom
+   of about 4e10). Deeper than that the picture breaks up into black areas and
+   noise. */
+static double min_scale(const view_t *v) {
+    double m = fmax(2.0, fmax(fabs(v->cx), fabs(v->cy)));
+    return m * (PREC_ULPS * DBL_EPS);
+}
+
+static bool at_max_zoom(const fractal_t *f) { return f->v.scale <= min_scale(&f->v) * 1.000001; }
+
 static void px_to_c(const fractal_t *f, double px, double py, double *re, double *im) {
     *re = f->v.cx + (px - f->vw * 0.5) * f->v.scale;
     double dy = (py - f->vh * 0.5) * f->v.scale;
@@ -214,17 +238,25 @@ static void build_lut(fractal_t *f) {
     }
 }
 
-static inline uint32_t fx_color(const fractal_t *f, float m) {
-    if (m < 0) return m < -1.5f ? f->bg : f->inside;
-    return f->lut[((int)(m * DENS) + f->cycle_off) & (LUT_N - 1)];
+/* Palette position of a smooth escape count (the only float -> integer step). A
+   bad maths value - NaN, infinity, anything out of range - becomes a pixel in
+   the inside colour instead of a crash. */
+static int16_t mu_index(float m) {
+    if (m != m || m < 0.0f || m > 1.0e6f) return IDX_INSIDE;
+    return (int16_t)((int)(m * (float)DENS) & (LUT_N - 1));
+}
+
+static inline uint32_t fx_color(const fractal_t *f, int i) {
+    if (i < 0) return i == IDX_NONE ? f->bg : f->inside;
+    return f->lut[(i + f->cycle_off) & (LUT_N - 1)];
 }
 
 static void recolor(fractal_t *f) {
     if (!f->img) return;
     for (int y = 0; y < f->vh; y++) {
         uint32_t *row = surface_row(f->img, y);
-        const float *m = f->mu + (size_t)y * f->vw;
-        for (int x = 0; x < f->vw; x++) row[x] = fx_color(f, m[x]);
+        const int16_t *ix = f->idx + (size_t)y * f->vw;
+        for (int x = 0; x < f->vw; x++) row[x] = fx_color(f, ix[x]);
     }
     view_dirty(f);
 }
@@ -235,7 +267,8 @@ static void recolor(fractal_t *f) {
 static float smooth_mu(int n, double m2) {
     double lz = 0.5 * log(m2);                 /* log|z| */
     double mu = n + 1 - log(lz / M_LN2) / M_LN2;
-    return mu < 0 ? 0.0f : (float)mu;
+    if (mu != mu) return -1.0f;                /* NaN (only from broken maths) */
+    return mu < 0 ? 0.0f : mu > 1.0e6 ? 1.0e6f : (float)mu;
 }
 
 /* Smooth escape count of one point, or -1 if it does not escape. */
@@ -300,13 +333,13 @@ static float fx_point(const fractal_t *f, double re, double im) {
 /* ======================================================================================
  * progressive, time-sliced rendering
  * ====================================================================================== */
-static void fill_block(fractal_t *f, int x, int y, int s, float m) {
-    uint32_t c = fx_color(f, m);
+static void fill_block(fractal_t *f, int x, int y, int s, int16_t ix) {
+    uint32_t c = fx_color(f, ix);
     int w = MIN(s, f->vw - x), h = MIN(s, f->vh - y);
     for (int j = 0; j < h; j++) {
-        float *mr = f->mu + (size_t)(y + j) * f->vw + x;
+        int16_t *ir = f->idx + (size_t)(y + j) * f->vw + x;
         uint32_t *row = surface_row(f->img, y + j) + x;
-        for (int i = 0; i < w; i++) { mr[i] = m; row[i] = c; }
+        for (int i = 0; i < w; i++) { ir[i] = ix; row[i] = c; }
     }
 }
 
@@ -315,7 +348,7 @@ static void fill_block(fractal_t *f, int x, int y, int s, float m) {
    the most expensive pixels (they run to the iteration limit); the only
    possible error is an exterior gap narrower than one pixel. */
 static bool guess_inside(const fractal_t *f, int x, int y) {
-    const float *m = f->mu;
+    const int16_t *m = f->idx;
     int w = f->vw, h = f->vh, n = 0;
     bool ox = x & 1, oy = y & 1;
     for (int dy = -1; dy <= 1; dy++)
@@ -324,7 +357,7 @@ static bool guess_inside(const fractal_t *f, int x, int y) {
             if (!dx && !dy) continue;
             int nx = x + dx, ny = y + dy;
             if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-            if (m[(size_t)ny * w + nx] != -1.0f) return false;
+            if (m[(size_t)ny * w + nx] != IDX_INSIDE) return false;
             n++;
         }
     return n > 0;
@@ -357,7 +390,7 @@ static void render_slice(fractal_t *f) {
         for (; f->rx < f->vw; f->rx += dx) {
             double re = re0 + f->rx * f->v.scale;
             bool guess = s == 1 && guess_inside(f, f->rx, y);
-            fill_block(f, f->rx, y, s, guess ? -1.0f : fx_point(f, re, im));
+            fill_block(f, f->rx, y, s, guess ? IDX_INSIDE : mu_index(fx_point(f, re, im)));
             f->done++;
             if ((++cnt & 15) == 0 && sys_uptime_ms() - t0 >= RENDER_BUDGET_MS) {
                 f->rx += dx;
@@ -405,22 +438,22 @@ static bool fx_alloc(fractal_t *f) {
     int vw = MAX(16, W), vh = MAX(16, H - TB_H - ST_H);
     if (f->img && vw == f->vw && vh == f->vh) return true;
     surface_t *img = surface_create(vw, vh);
-    float *mu = malloc((size_t)vw * vh * sizeof *mu);
-    if (!img || !mu) {
+    int16_t *idx = malloc((size_t)vw * vh * sizeof *idx);
+    if (!img || !idx) {
         surface_destroy(img);
-        free(mu);
+        free(idx);
         return false;
     }
-    for (size_t i = 0; i < (size_t)vw * vh; i++) mu[i] = -2.0f;
+    for (size_t i = 0; i < (size_t)vw * vh; i++) idx[i] = IDX_NONE;
     gfx_clear(img, f->bg);
     /* keep the old picture centred while the new one renders */
     if (f->img) {
         gfx_blit(img, (vw - f->vw) / 2, (vh - f->vh) / 2, f->img);
         surface_destroy(f->img);
     }
-    free(f->mu);
+    free(f->idx);
     f->img = img;
-    f->mu = mu;
+    f->idx = idx;
     f->vw = vw;
     f->vh = vh;
     return true;
@@ -448,10 +481,7 @@ static void push_hist(fractal_t *f) {
 /* Change to view nv (recording the old one) and re-render. */
 static void go(fractal_t *f, const view_t *nv) {
     view_t v = *nv;
-    if (v.scale < MIN_SCALE) {
-        v.scale = MIN_SCALE;
-        fx_message(f, "Maximum zoom reached (the limit of double precision)");
-    }
+    if (v.scale < min_scale(&v)) v.scale = min_scale(&v);
     if (v.scale > 1.0) v.scale = 1.0;
     push_hist(f);
     if (f->v.type == F_MANDEL && v.type != F_MANDEL) { f->mandel = f->v; f->have_mandel = true; }
@@ -460,8 +490,10 @@ static void go(fractal_t *f, const view_t *nv) {
     fx_restart(f);
 }
 
-/* Zoom by `factor` (> 1 = in) keeping view point (px,py) fixed, or centring it. */
+/* Zoom by `factor` (> 1 = in) keeping view point (px,py) fixed, or centring it.
+   At the precision limit zooming in is ignored (zooming out always works). */
 static void zoom_at(fractal_t *f, double px, double py, double factor, bool centre) {
+    if (factor > 1.0 && at_max_zoom(f)) return;       /* the status bar says why */
     view_t v = f->v;
     double re, im;
     px_to_c(f, px, py, &re, &im);
@@ -633,17 +665,20 @@ static void draw_status(fractal_t *f, surface_t *s) {
     int rx = strip_x - 14 - rw;
     gfx_text(s, rx, ty, right, f->rendering ? t->window_text : muted, FONT_UI);
 
-    /* left: message, pointer position or view info */
+    /* left: "Maximum zoom reached" at the precision limit, then a message, the
+       pointer position or the view info */
     char left[200];
+    int lx = 12;
+    if (at_max_zoom(f)) lx += gfx_text(s, lx, ty, "Maximum zoom reached", t->window_text, FONT_UI_BOLD) + 16;
     if (f->msg[0]) {
-        gfx_text_ellipsis(s, 12, ty, rx - 24, f->msg, t->window_text, FONT_UI_BOLD);
+        gfx_text_ellipsis(s, lx, ty, rx - 12 - lx, f->msg, t->window_text, FONT_UI_BOLD);
         return;
     }
     char zs[32];
     double z = zoom_factor(f);
     if (z < 10000) snprintf(zs, sizeof zs, "%.1fx", z);
     else snprintf(zs, sizeof zs, "%.2ex", z);
-    int w = gfx_text(s, 12, ty, g_type_names[f->v.type], t->window_text, FONT_UI_BOLD);
+    int w = gfx_text(s, lx, ty, g_type_names[f->v.type], t->window_text, FONT_UI_BOLD);
     double re = f->v.cx, im = f->v.cy;
     const char *what = "centre";
     if (f->mouse_in && f->press_btn == 0) {
@@ -653,7 +688,7 @@ static void draw_status(fractal_t *f, surface_t *s) {
     int prec = z < 1e3 ? 6 : z < 1e7 ? 10 : 14;
     snprintf(left, sizeof left, "%s %.*f %c %.*fi    zoom %s    %d iterations", what, prec, re,
              im < 0 ? '-' : '+', prec, fabs(im), zs, f->maxit);
-    gfx_text_ellipsis(s, 12 + w + 12, ty, rx - 36 - w, left, muted, FONT_UI);
+    gfx_text_ellipsis(s, lx + w + 12, ty, rx - 24 - lx - w, left, muted, FONT_UI);
 }
 
 static void fx_paint(fractal_t *f) {
@@ -777,7 +812,7 @@ static void fx_mouse_move(fractal_t *f, const event_t *ev) {
     if (f->press_btn == MOUSE_LEFT && !f->shift_click) {
         f->px1 = x;
         f->py1 = y;
-        if (!f->box && (abs(x - f->px0) > 4 || abs(y - f->py0) > 4)) f->box = true;
+        if (!f->box && !at_max_zoom(f) && (abs(x - f->px0) > 4 || abs(y - f->py0) > 4)) f->box = true;
         if (f->box) view_dirty(f);
     } else if (f->press_btn == MOUSE_MIDDLE) {
         f->pan_dx = x - f->px0;
@@ -798,7 +833,7 @@ static void fx_mouse_up(fractal_t *f, const event_t *ev) {
         if (dx || dy) {
             /* shift the current picture so the preview matches the new view */
             surface_t *n = surface_create(f->vw, f->vh);
-            float *m = malloc((size_t)f->vw * f->vh * sizeof *m);
+            int16_t *m = malloc((size_t)f->vw * f->vh * sizeof *m);
             if (n && m) {
                 gfx_clear(n, f->bg);
                 gfx_blit(n, dx, dy, f->img);
@@ -806,12 +841,12 @@ static void fx_mouse_up(fractal_t *f, const event_t *ev) {
                     for (int i = 0; i < f->vw; i++) {
                         int sx = i - dx, sy = j - dy;
                         m[(size_t)j * f->vw + i] = (sx >= 0 && sy >= 0 && sx < f->vw && sy < f->vh)
-                                                   ? f->mu[(size_t)sy * f->vw + sx] : -2.0f;
+                                                   ? f->idx[(size_t)sy * f->vw + sx] : IDX_NONE;
                     }
                 surface_destroy(f->img);
-                free(f->mu);
+                free(f->idx);
                 f->img = n;
-                f->mu = m;
+                f->idx = m;
             } else {
                 surface_destroy(n);
                 free(m);
@@ -883,7 +918,7 @@ static void fx_key(fractal_t *f, const event_t *ev) {
 
 static void fx_free(fractal_t *f) {
     surface_destroy(f->img);
-    free(f->mu);
+    free(f->idx);
     free(f);
 }
 
