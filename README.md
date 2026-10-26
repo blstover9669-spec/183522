@@ -245,6 +245,9 @@ hard disk (installed NovaOS)** in the GRUB menu, or remove the ISO.
 * **No sound:** the audio controller must be *ICH AC97* or *SoundBlaster 16*
   with audio output enabled. `sound` in the Terminal shows which output
   NovaOS uses.
+* **PrintScreen does nothing:** your host computer kept the key (Windows 11
+  opens its Snipping Tool with it). Press **Ctrl+Alt+S** instead - it saves the
+  same screenshot to `/home/user/Pictures`.
 * **Ctrl+Alt+Del** is caught by your host computer; send it with
   **Right Ctrl+Del** (host key + Del) to open Task Manager.
 * **Closing the VM window:** choose *Send the shutdown signal* - NovaOS
@@ -320,7 +323,7 @@ mouse.
 | Alt+Tab | Switch windows |
 | Alt+F4 | Close the active window |
 | Ctrl+Alt+Del (VirtualBox: Right Ctrl+Del) | Task Manager |
-| PrintScreen | Save a screenshot to `/home/user/Pictures` |
+| PrintScreen (also with Alt, Ctrl or Shift), Ctrl+Alt+S | Save a screenshot to `/home/user/Pictures` |
 | Esc | Close menus and dialogs |
 | Ctrl+N / O / S / W | New / open / save / close in Notepad and Paint |
 | Ctrl+Z / Ctrl+Y | Undo / redo (Notepad, Paint) |

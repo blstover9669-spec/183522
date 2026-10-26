@@ -315,7 +315,10 @@ default button), your handler does not get it.
 
 System shortcuts handled before apps: Alt+Tab, Alt+F4, Win key / Ctrl+Esc
 (Start menu), Ctrl+Alt+Del (launches "Task Manager" or "System Monitor" if
-installed), PrintScreen (saves a screenshot to `~/Pictures`).
+installed), PrintScreen with or without Alt / Ctrl / Shift, and Ctrl+Alt+S
+(both save a screenshot to `~/Pictures` - `bool wm_screenshot(void)` in the
+kernel; Ctrl+Alt+S is there because hosts such as Windows 11 often keep the
+PrintScreen key for themselves, so VirtualBox never passes it on).
 
 ---
 
