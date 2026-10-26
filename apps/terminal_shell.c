@@ -1289,16 +1289,32 @@ static int cmd_rm(tctx_t *c, int argc, char **argv) {
             if (!f['f']) { tc_err(c, "rm: %s: No such file or directory", argv[i]); status = 1; }
             continue;
         }
-        /* never delete /, home, /system, or the directory we are standing in */
+        /* never delete home or the directory we are standing in; rm -r of the drive
+           itself (/, /system, /home) does delete it - NovaOS then shows "No drive found" */
         size_t pl = strlen(path);
         bool holds_cwd = !strncmp(c->t->cwd, path, pl) && (c->t->cwd[pl] == 0 || c->t->cwd[pl] == '/');
-        if (protected_path(path) || holds_cwd) {
+        bool drive = rec && (!strcmp(path, "/") || !strcmp(path, "/system") || !strcmp(path, "/home"));
+        if (!drive && (protected_path(path) || holds_cwd)) {
             tc_err(c, "rm: refusing to remove '%s'", path);
             status = 1;
             continue;
         }
         int r;
-        if (vfs_is_dir(path)) {
+        if (!strcmp(path, "/")) {
+            /* the root itself stays: remove everything in it */
+            int n = vfs_list("/", NULL, 0);
+            vfs_dirent_t *e = n > 0 ? malloc(sizeof *e * (size_t)n) : NULL;
+            r = n > 0 && !e ? VFS_ENOMEM : 0;
+            if (e) {
+                n = MIN(n, vfs_list("/", e, n));
+                for (int k = 0; k < n && !r; k++) {
+                    char p[VFS_PATH_MAX];
+                    vfs_join("/", e[k].name, p);
+                    r = vfs_remove_recursive(p);
+                }
+                free(e);
+            }
+        } else if (vfs_is_dir(path)) {
             if (!rec) { tc_err(c, "rm: %s: is a directory (use rm -r)", argv[i]); status = 1; continue; }
             r = vfs_remove_recursive(path);
         } else {
