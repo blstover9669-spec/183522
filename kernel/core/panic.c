@@ -22,6 +22,8 @@ static void symbolize(uint32_t addr, char *out, size_t n) {
         snprintf(out, n, "%08x", addr);
 }
 
+void panic_symbolize(uint32_t addr, char *out, size_t n) { symbolize(addr, out, n); }
+
 static int pan_x, pan_y;
 static bool in_panic;
 

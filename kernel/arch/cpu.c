@@ -118,8 +118,13 @@ static const char *exception_names[32] = {
 };
 
 extern void panic_exception(regs_t *r, const char *name) NORETURN;
+static void fpu_error(regs_t *r);
 
 void isr_dispatch(regs_t *r) {
+    if (r->int_no == 16) {           /* x87 floating-point error: never fatal */
+        fpu_error(r);
+        return;
+    }
     if (r->int_no < 32) {
         panic_exception(r, exception_names[r->int_no]);
     }
@@ -174,6 +179,17 @@ void sys_udelay(uint32_t us) {
 }
 
 /* ---- FPU ---------------------------------------------------------------------------- */
+/* All FPU exceptions masked, round to nearest, precision control = 53-bit
+   (double): results match IEEE double arithmetic like on SSE machines. */
+#define FPU_CW_DEFAULT 0x027F
+
+/* Clear the exception flags (and with them a pending #MF), then load the default
+   control word. Leaves the register stack alone. */
+static inline void fpu_load_default(void) {
+    uint16_t cw = FPU_CW_DEFAULT;
+    __asm__ volatile("fnclex\n\tfldcw %0" : : "m"(cw));
+}
+
 void fpu_init(void) {
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -183,11 +199,84 @@ void fpu_init(void) {
     cr0 &= ~(1u << 3);   /* TS: clear task switched   */
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
     __asm__ volatile("fninit");
-    /* All FPU exceptions masked, round to nearest, precision control = 53-bit
-       (double): results match IEEE double arithmetic like on SSE machines. */
-    uint16_t cw = 0x027F;
-    __asm__ volatile("fldcw %0" : : "m"(cw));
+    fpu_load_default();
 }
+
+static uint32_t fpu_errors, fpu_repairs;
+static volatile bool fpu_error_unlogged;     /* #MF seen; fpu_check() puts it in the syslog */
+static uint32_t fpu_error_eip;
+static uint16_t fpu_error_cw, fpu_error_sw;
+
+/* #MF (vector 16): an x87 instruction raised an exception that is unmasked in the
+   control word. With FPU_CW_DEFAULT every exception is masked, so this only
+   happens when something changed the control word (or restored a bad FPU state).
+   It is never fatal: clear the flags, mask everything again and continue - the
+   instruction that reported the error runs again and the maths goes on with the
+   IEEE default results (NaN, infinity...), which apps must tolerate anyway.
+   Runs on the interrupted code's stack: it must not touch the x87 registers. */
+static void fpu_error(regs_t *r) {
+    uint16_t cw, sw;
+    __asm__ volatile("fnstcw %0\n\tfnstsw %1" : "=m"(cw), "=m"(sw));
+    fpu_load_default();
+    fpu_errors++;
+    fpu_error_eip = r->eip;
+    fpu_error_cw = cw;
+    fpu_error_sw = sw;
+    fpu_error_unlogged = true;
+    if (fpu_errors <= 8 || (fpu_errors & 1023) == 0) {
+        char sym[96];
+        panic_symbolize(r->eip, sym, sizeof sym);
+        klog("fpu: warning: x87 floating-point error at %s (cw %04x, sw %04x), cleared and masked "
+             "again, continuing (#%u)", sym, cw, sw, fpu_errors);
+    }
+}
+
+/* Called by the window manager at the top of every main-loop iteration. That is a
+   function call between two callbacks, so by the i386 calling convention the x87
+   register stack must be empty and the control word must be the default one.
+   Anything else is state that leaked out of earlier code (or was lost by the
+   machine): reset it here, so it can never build up from one redraw to the next
+   or reach the next app with unmasked exceptions. Cost: a few hundred cycles. */
+void fpu_check(void) {
+    struct PACKED { uint16_t cw, r0, sw, r1, tw, r2; uint32_t ip, cs, dp, ds; } env;
+    __asm__ volatile("fnstenv %0" : "=m"(env));      /* (also masks all exceptions) */
+    if ((env.cw & 0x0F3F) == (FPU_CW_DEFAULT & 0x0F3F) && env.tw == 0xFFFF && !(env.sw & 0x0080)) {
+        fpu_load_default();                         /* clears the sticky exception flags */
+    } else {
+        __asm__ volatile("fninit");
+        fpu_load_default();
+        fpu_repairs++;
+        if (fpu_repairs <= 8 || (fpu_repairs & 1023) == 0)
+            log_warn("fpu", "x87 state was not clean between callbacks (control %04x, status %04x, "
+                     "tags %04x): reset (#%u)", env.cw, env.sw, env.tw, fpu_repairs);
+    }
+    if (fpu_error_unlogged) {
+        fpu_error_unlogged = false;
+        char sym[96];
+        panic_symbolize(fpu_error_eip, sym, sizeof sym);
+        log_warn("fpu", "x87 floating-point error at %s (control %04x, status %04x) - cleared, "
+                 "the system continues (%u so far)", sym, fpu_error_cw, fpu_error_sw, fpu_errors);
+    }
+}
+
+/* fputest=1: 2 s after boot, unmask every x87 exception and divide by zero, so the
+   #MF handler above runs (QEMU only reports x87 errors at FWAIT, hence the fwait). */
+static void fputest_cb(void *ctx) {
+    (void)ctx;
+    volatile double a = 1.0, b = 0.0, r;
+    uint16_t cw = 0x0240;
+    klog("fputest: unmasking x87 exceptions and dividing by zero");
+    __asm__ volatile("fldcw %0" : : "m"(cw));
+    r = a / b;
+    __asm__ volatile("fwait");
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    klog("fputest: still running (result %d, control word %04x)", (int)(r == r), cw);
+}
+
+static void fputest_init(void) {
+    if (sys_cmdline_get("fputest")) timer_add(2000, fputest_cb, NULL, false);
+}
+REGISTER_INIT(INIT_LATE, fputest_init);
 
 /* ---- CPUID ------------------------------------------------------------------------------ */
 char g_cpu_name[49];
