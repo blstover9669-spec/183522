@@ -47,8 +47,13 @@ available after
   **Callbacks must return quickly. Never block, never busy-wait, never sleep.**
   A loop that waits for something freezes the whole OS. Split long work into
   chunks driven by a timer (see section 7).
-* The x87 FPU is on (53-bit double precision); `float`/`double` are fine in
-  apps. Do not use the FPU in IRQ handlers.
+* The x87 FPU is on (53-bit double precision, every exception masked);
+  `float`/`double` are fine in apps. Do not use the FPU in IRQ handlers. Maths
+  errors never stop the system: an x87 floating-point error (#MF) is cleared,
+  the exceptions are masked again and the code continues (with the usual
+  IEEE results such as NaN or infinity - check for them before converting to
+  an integer index); a `[fpu]` warning goes to the system log. The window
+  manager also resets any x87 state left over between two callbacks.
 * The kernel stack is 256 KiB and shared by everything: keep big buffers on
   the heap (`malloc`), not in local arrays.
 
@@ -758,6 +763,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `startmenu` | open the Start menu after boot |
 | `selftest=1` | run kernel self tests (libc, heap, VFS, time) and log `SELFTEST:` lines |
 | `crashtest=1` | trigger a divide error 1.5 s after boot (tests the panic screen) |
+| `fputest=1` | raise an x87 floating-point error 2 s after boot (tests that it is not fatal: `fpu: warning: ...` in the log) |
 | `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
 | `safetyshield_test=N` | SafetyShield test rule: flags `/tmp/safetyshield-test.txt` with risk level N (1 Risky .. 6 Severe) and runs the first automatic scan after 5 s - tests the threat log, list and notification |
 | `sound=ac97\|sb16\|speaker` | sound output: only probe that card, or use the PC speaker (default: AC'97, else SB16, else speaker) |
