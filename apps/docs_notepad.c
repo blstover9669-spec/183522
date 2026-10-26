@@ -12,7 +12,13 @@
  *   - Find / Find next / Replace all / Go to line, Time/Date insertion;
  *   - View options (monospace or proportional font, zoom, line numbers,
  *     status bar) shown with check marks in the menus;
- *   - a status bar with the caret's line/column, selection size and counts.
+ *   - a status bar with the caret's line/column, selection size and counts;
+ *   - a viewer for big files (over 2 MB, lines longer than 16 KB, or OSaver codes
+ *     with their hidden separators): only the text that is on screen is loaded and
+ *     drawn - scrolling up/down/left/right loads the newly visible part and drops
+ *     the rest - so a multi-megabyte single-line code opens at once and scrolls
+ *     smoothly. The file is indexed in the background (a line-start checkpoint
+ *     every 64 lines or 16 KB); the view reads only the visible rows from the file.
  *
  * launch(arg) opens the file `arg` (a path that does not exist yet becomes
  * the target of the first Save). Opening a file that is already open in
@@ -27,11 +33,38 @@
 #define NP_W       680
 #define NP_H       470
 #define STATUS_H   26
-#define NP_MAX_FILE (8u << 20)      /* refuse to open files above 8 MiB */
+#define NP_VIEW_BYTES (2u << 20)    /* bigger files open in the viewer */
+#define NP_VIEW_LINE  16384         /* ... and files with lines longer than this */
+#define NP_HS        '\x1f'         /* OSaver's hidden chunk separator: drawn as nothing */
+#define CP_LINES     64             /* viewer index: a checkpoint every 64 lines ... */
+#define CP_BYTES     16384          /* ... or 16 KB */
+#define VIEW_SB      12
+#define NP_TAB       4
 #define MSG_MS     3500             /* transient status-bar messages */
 
 /* What to do once the current document has been saved or discarded. */
 enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_OPEN_PATH, ACT_CLOSE };
+
+/* The big-file viewer: an index of line starts, the visible window, nothing else. */
+typedef struct { uint32_t line, off; } np_cp_t;
+
+typedef struct {
+    bool on;
+    widget_t *w;                      /* ui_custom drawing the visible rows        */
+    uint32_t size, mtime;             /* the file as indexed (change detection)    */
+    np_cp_t *cp; int ncp, capcp;      /* checkpoints: line starts                  */
+    uint32_t nstarts;                 /* line starts found (= lines when indexed)  */
+    uint32_t scan_pos;                /* bytes indexed so far                      */
+    uint32_t cur_start;               /* start of the line being indexed           */
+    uint32_t max_len;                 /* longest line so far (bytes)               */
+    bool indexed;
+    int timer;
+    uint32_t top, hcol;               /* first visible line / column               */
+    int sb_drag, sb_off;              /* scrollbar drag: 1 vertical, 2 horizontal  */
+    uint8_t *buf;                     /* index / row scratch buffer                */
+    uint32_t blk_off, blk_len;        /* line-start lookup cache (in buf2)         */
+    uint8_t *buf2;
+} npview_t;
 
 typedef struct notepad {
     window_t *win;
@@ -48,6 +81,7 @@ typedef struct notepad {
     char msg[160];                    /* transient status message              */
     uint32_t msg_until;
     int  msg_timer;
+    npview_t view;                    /* big-file viewer (view.on)             */
     struct notepad *next;             /* list of open editors                  */
 } notepad_t;
 
@@ -114,6 +148,7 @@ static void np_layout(notepad_t *np, int w, int h) {
     int top = UI_MENUBAR_H - 2;
     int bottom = np->show_status ? h - STATUS_H + 2 : h + 2;
     ui_move(np->area, -1, top, w + 2, MAX(40, bottom - top));
+    if (np->view.w) ui_move(np->view.w, -1, top, w + 2, MAX(40, bottom - top));
     /* a hidden status bar keeps a zero-height rect so it still repairs the corners */
     if (np->show_status) ui_move(np->status, 0, h - STATUS_H, w, STATUS_H);
     else ui_move(np->status, 0, h, w, 0);
@@ -127,8 +162,368 @@ static void np_apply_view(notepad_t *np) {
     win_invalidate(np->win);
 }
 
+/* ---- big-file viewer ------------------------------------------------------------------ */
+/* Only the rows on screen are ever read from the file (through a descriptor, a few
+   hundred bytes per row); the index keeps one line start per 64 lines / 16 KB, so a
+   line start is found by reading at most 16 KB from the nearest checkpoint. */
+static const font_t *view_font(notepad_t *np) { return np->zoom ? FONT_MONO_2X : FONT_MONO; }
+
+static void view_reset_index(npview_t *v) {
+    v->ncp = 0;
+    v->nstarts = 1;
+    v->scan_pos = v->cur_start = v->max_len = 0;
+    v->indexed = false;
+    v->blk_len = 0;
+    if (v->capcp == 0) {
+        v->cp = malloc(256 * sizeof *v->cp);
+        if (v->cp) v->capcp = 256;
+    }
+    if (v->cp) { v->cp[0].line = 0; v->cp[0].off = 0; v->ncp = 1; }
+}
+
+static void view_add_cp(npview_t *v, uint32_t line, uint32_t off) {
+    if (v->ncp == v->capcp) {
+        int nc = v->capcp * 2;
+        np_cp_t *n = realloc(v->cp, (size_t)nc * sizeof *n);
+        if (!n) return;
+        v->cp = n;
+        v->capcp = nc;
+    }
+    v->cp[v->ncp].line = line;
+    v->cp[v->ncp].off = off;
+    v->ncp++;
+}
+
+static uint32_t view_lines(const npview_t *v) { return v->nstarts; }
+
+static uint32_t view_maxlen(const npview_t *v) {
+    uint32_t m = v->max_len;
+    if (!v->indexed && v->scan_pos - v->cur_start > m) m = v->scan_pos - v->cur_start;
+    return m;
+}
+
+/* Index the next part of the file (called from the window timer, ~8 ms per call). */
+static void view_index_step(notepad_t *np) {
+    npview_t *v = &np->view;
+    if (!v->on || v->indexed || !v->buf) return;
+    uint32_t t0 = sys_uptime_ms();
+    int fd = vfs_open(np->path, VFS_O_READ);
+    if (fd < 0) { v->indexed = true; return; }
+    while (v->scan_pos < v->size && sys_uptime_ms() - t0 < 8) {
+        uint32_t n = MIN(256u * 1024u, v->size - v->scan_pos);
+        if (vfs_seek(fd, (int32_t)v->scan_pos, VFS_SEEK_SET) < 0) break;
+        int got = vfs_read(fd, v->buf, n);
+        if (got <= 0) { v->size = v->scan_pos; break; }
+        const uint8_t *p = v->buf, *end = v->buf + got;
+        while (p < end) {
+            const uint8_t *nl = memchr(p, '\n', (size_t)(end - p));
+            if (!nl) break;
+            uint32_t at = v->scan_pos + (uint32_t)(nl - v->buf);
+            uint32_t len = at - v->cur_start;
+            if (len > v->max_len) v->max_len = len;
+            uint32_t s = at + 1, line = v->nstarts;
+            if (line % CP_LINES == 0 || s - v->cp[v->ncp - 1].off >= CP_BYTES) view_add_cp(v, line, s);
+            v->nstarts++;
+            v->cur_start = s;
+            p = nl + 1;
+        }
+        v->scan_pos += (uint32_t)got;
+    }
+    vfs_close(fd);
+    if (v->scan_pos >= v->size) {
+        v->indexed = true;
+        if (v->size - v->cur_start > v->max_len) v->max_len = v->size - v->cur_start;
+        if (v->timer) { win_kill_timer(np->win, v->timer); v->timer = 0; }
+        klog("notepad: indexed %s: %u lines, longest %u characters", np->path, v->nstarts, v->max_len);
+    }
+}
+
+/* Start offset of line `line` (< nstarts), reading at most 16 KB. */
+static uint32_t view_line_start(notepad_t *np, int fd, uint32_t line) {
+    npview_t *v = &np->view;
+    int lo = 0, hi = v->ncp - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (v->cp[mid].line <= line) lo = mid; else hi = mid - 1;
+    }
+    uint32_t cl = v->cp[lo].line, off = v->cp[lo].off;
+    if (cl == line) return off;
+    if (v->blk_off != off || !v->blk_len) {
+        v->blk_len = 0;
+        if (vfs_seek(fd, (int32_t)off, VFS_SEEK_SET) < 0) return off;
+        int got = vfs_read(fd, v->buf2, CP_BYTES + 1);
+        if (got <= 0) return off;
+        v->blk_off = off;
+        v->blk_len = (uint32_t)got;
+    }
+    const uint8_t *p = v->buf2, *end = v->buf2 + v->blk_len;
+    while (cl < line && p < end) {
+        const uint8_t *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) break;
+        p = nl + 1;
+        cl++;
+    }
+    return off + (uint32_t)(p - v->buf2);
+}
+
+typedef struct { rect_t text, vsb, hsb, gutter; bool has_vsb, has_hsb; int rows, cols, lh, cw; } view_geom_t;
+
+static int view_gutter_w(notepad_t *np) {
+    if (!np->line_numbers) return 0;
+    int digits = 1;
+    for (uint32_t n = view_lines(&np->view); n >= 10; n /= 10) digits++;
+    return MAX(digits, 3) * font_char_width(FONT_MONO, '0') + 14;
+}
+
+static view_geom_t view_geom(notepad_t *np) {
+    npview_t *v = &np->view;
+    view_geom_t g;
+    rect_t r = ui_rect(v->w);
+    const font_t *f = view_font(np);
+    g.lh = font_height(f);
+    g.cw = font_char_width(f, 'M');
+    int gw = view_gutter_w(np);
+    int aw = r.w - 2 - gw - 2 * 6, ah = r.h - 2 - 4;
+    g.has_vsb = (int64_t)view_lines(v) * g.lh > ah;
+    if (g.has_vsb) aw -= VIEW_SB;
+    g.has_hsb = (int64_t)view_maxlen(v) * g.cw > aw;
+    if (g.has_hsb) {
+        ah -= VIEW_SB;
+        if (!g.has_vsb && (int64_t)view_lines(v) * g.lh > ah) { g.has_vsb = true; aw -= VIEW_SB; }
+    }
+    g.gutter = rect_make(r.x + 1, r.y + 1, gw, r.h - 2 - (g.has_hsb ? VIEW_SB : 0));
+    g.text = rect_make(r.x + 1 + gw + 6, r.y + 3, MAX(1, aw), MAX(1, ah));
+    g.rows = MAX(1, ah / g.lh);
+    g.cols = MAX(1, aw / g.cw);
+    g.vsb = rect_make(r.x + r.w - 1 - VIEW_SB, r.y + 1, VIEW_SB, r.h - 2 - (g.has_hsb ? VIEW_SB : 0));
+    g.hsb = rect_make(r.x + 1, r.y + r.h - 1 - VIEW_SB, r.w - 2 - (g.has_vsb ? VIEW_SB : 0), VIEW_SB);
+    return g;
+}
+
+static void view_clamp(notepad_t *np) {
+    npview_t *v = &np->view;
+    view_geom_t g = view_geom(np);
+    uint32_t lines = view_lines(v), ml = view_maxlen(v);
+    uint32_t maxtop = lines > (uint32_t)g.rows ? lines - (uint32_t)g.rows : 0;
+    if (v->top > maxtop) v->top = maxtop;
+    uint32_t maxcol = ml + 1 > (uint32_t)g.cols ? ml + 1 - (uint32_t)g.cols : 0;
+    if (v->hcol > maxcol) v->hcol = maxcol;
+}
+
+static void view_scroll(notepad_t *np, int64_t dlines, int64_t dcols) {
+    npview_t *v = &np->view;
+    int64_t t = (int64_t)v->top + dlines, c = (int64_t)v->hcol + dcols;
+    v->top = (uint32_t)MAX(0, MIN(t, (int64_t)0xFFFFFFF0));
+    v->hcol = (uint32_t)MAX(0, MIN(c, (int64_t)0xFFFFFFF0));
+    view_clamp(np);
+    ui_invalidate(v->w);
+    ui_invalidate(np->status);
+}
+
+static void view_draw(widget_t *w, surface_t *s, rect_t r) {
+    notepad_t *np = ui_get_ctx(w);
+    npview_t *v = &np->view;
+    const theme_t *th = theme_get();
+    bool focused = ui_has_focus(w) && win_is_focused(np->win);
+    ui_draw_field(s, r, focused ? UI_STATE_FOCUSED : 0);
+    if (!v->on || !v->buf) return;
+    view_clamp(np);
+    view_geom_t g = view_geom(np);
+    const font_t *f = view_font(np);
+    rect_t old = s->clip;
+    int fd = vfs_open(np->path, VFS_O_READ);
+    uint32_t lines = view_lines(v);
+    if (g.gutter.w) {
+        surface_set_clip(s, rect_intersect(old, g.gutter));
+        gfx_fill_rect(s, g.gutter.x, g.gutter.y, g.gutter.w, g.gutter.h, color_mix(th->field_bg, th->field_text, 14));
+        for (int i = 0; i <= g.rows && v->top + (uint32_t)i < lines; i++) {
+            char num[12];
+            snprintf(num, sizeof num, "%u", v->top + (uint32_t)i + 1);
+            int tw = font_text_width(FONT_MONO, num);
+            gfx_text(s, g.gutter.x + g.gutter.w - 8 - tw, g.text.y + i * g.lh + (g.lh - 16) / 2, num,
+                     color_mix(th->field_text, th->field_bg, 120), FONT_MONO);
+        }
+    }
+    surface_set_clip(s, rect_intersect(old, rect_make(g.text.x - 2, g.text.y, g.text.w + 2, g.text.h)));
+    uint32_t want = (uint32_t)g.cols + 64;          /* bytes per row (hidden separators take no room) */
+    if (want > 256u * 1024u) want = 256u * 1024u;
+    for (int i = 0; fd >= 0 && i <= g.rows && v->top + (uint32_t)i < lines; i++) {
+        uint32_t ln = v->top + (uint32_t)i;
+        uint32_t start = view_line_start(np, fd, ln);
+        uint32_t avail;                               /* bytes of this line from hcol on */
+        if (ln + 1 < lines) {
+            uint32_t next = view_line_start(np, fd, ln + 1);
+            uint32_t len = next > start ? next - start - 1 : 0;
+            avail = len > v->hcol ? len - v->hcol : 0;
+        } else {
+            uint32_t known = (v->indexed ? v->size : v->scan_pos) - start;
+            avail = known > v->hcol ? known - v->hcol : 0;
+        }
+        uint32_t n = MIN(avail, want);
+        if (!n) continue;
+        if (vfs_seek(fd, (int32_t)(start + v->hcol), VFS_SEEK_SET) < 0) continue;
+        int got = vfs_read(fd, v->buf, n);
+        if (got <= 0) continue;
+        int y = g.text.y + i * g.lh, col = 0;
+        for (int k = 0; k < got && col <= g.cols; k++) {
+            unsigned char c = v->buf[k];
+            if (c == '\n') break;
+            if (c == (unsigned char)NP_HS || c == '\r') continue;
+            if (c == '\t') { col += NP_TAB - (int)((v->hcol + (uint32_t)col) % (uint32_t)NP_TAB); continue; }
+            if (c != ' ' && c) gfx_char(s, g.text.x + col * g.cw, y, c, th->field_text, f);
+            col++;
+        }
+    }
+    if (fd >= 0) vfs_close(fd);
+    s->clip = old;
+    if (g.has_vsb) ui_draw_scrollbar(s, g.vsb, true, (int)MIN(lines, 0x7FFFFFFFu), g.rows, (int)v->top, v->sb_drag == 1 ? UI_STATE_PRESSED : 0);
+    if (g.has_hsb) ui_draw_scrollbar(s, g.hsb, false, (int)MIN(view_maxlen(v) + 1, 0x7FFFFFFFu), g.cols, (int)v->hcol, v->sb_drag == 2 ? UI_STATE_PRESSED : 0);
+    if (g.has_vsb && g.has_hsb) gfx_fill_rect(s, g.vsb.x, g.hsb.y, VIEW_SB, VIEW_SB, th->scrollbar_bg);
+}
+
+/* Scrollbar thumb geometry (the same rules as the toolkit's scrollbars). */
+static void view_thumb(int len, int64_t total, int page, int64_t pos, int *tp, int *tl) {
+    *tl = total > 0 ? (int)MAX(24, (int64_t)len * page / total) : len;
+    if (*tl > len) *tl = len;
+    int64_t maxpos = total - page;
+    *tp = maxpos > 0 ? (int)((int64_t)(len - *tl) * pos / maxpos) : 0;
+}
+
+static int64_t view_thumb_pos(int m, int origin, int len, int64_t total, int page, int off) {
+    int tp, tl;
+    view_thumb(len, total, page, 0, &tp, &tl);
+    int64_t maxpos = total - page;
+    if (len - tl <= 0 || maxpos <= 0) return 0;
+    int64_t p = (int64_t)(m - origin - off) * maxpos / (len - tl);
+    return MAX(0, MIN(p, maxpos));
+}
+
+static bool view_event(widget_t *w, const event_t *ev) {
+    notepad_t *np = ui_get_ctx(w);
+    npview_t *v = &np->view;
+    if (!v->on) return false;
+    view_geom_t g = view_geom(np);
+    int64_t lines = view_lines(v), cols = (int64_t)view_maxlen(v) + 1;
+    switch (ev->type) {
+    case EV_MOUSE_WHEEL:
+        if (ev->mods & MOD_SHIFT) view_scroll(np, 0, (int64_t)ev->wheel * 6);
+        else view_scroll(np, (int64_t)ev->wheel * 3, 0);
+        return true;
+    case EV_MOUSE_DOWN: {
+        if (ev->button != MOUSE_LEFT) return true;
+        int tp, tl;
+        if (g.has_vsb && rect_contains(g.vsb, ev->x, ev->y)) {
+            view_thumb(g.vsb.h, lines, g.rows, v->top, &tp, &tl);
+            int rel = ev->y - g.vsb.y;
+            if (rel >= tp && rel < tp + tl) { v->sb_drag = 1; v->sb_off = rel - tp; ui_invalidate(w); }
+            else view_scroll(np, rel < tp ? -g.rows : g.rows, 0);
+        } else if (g.has_hsb && rect_contains(g.hsb, ev->x, ev->y)) {
+            view_thumb(g.hsb.w, cols, g.cols, v->hcol, &tp, &tl);
+            int rel = ev->x - g.hsb.x;
+            if (rel >= tp && rel < tp + tl) { v->sb_drag = 2; v->sb_off = rel - tp; ui_invalidate(w); }
+            else view_scroll(np, 0, rel < tp ? -g.cols : g.cols);
+        }
+        return true;
+    }
+    case EV_MOUSE_MOVE:
+        if (v->sb_drag == 1) {
+            v->top = (uint32_t)view_thumb_pos(ev->y, g.vsb.y, g.vsb.h, lines, g.rows, v->sb_off);
+            view_scroll(np, 0, 0);
+        } else if (v->sb_drag == 2) {
+            v->hcol = (uint32_t)view_thumb_pos(ev->x, g.hsb.x, g.hsb.w, cols, g.cols, v->sb_off);
+            view_scroll(np, 0, 0);
+        }
+        return true;
+    case EV_MOUSE_UP:
+        if (v->sb_drag) { v->sb_drag = 0; ui_invalidate(w); }
+        return true;
+    case EV_KEY_DOWN: {
+        bool ctrl = ev->mods & MOD_CTRL;
+        switch (ev->key) {
+        case KEY_UP:       view_scroll(np, -1, 0); return true;
+        case KEY_DOWN:     view_scroll(np, 1, 0); return true;
+        case KEY_PAGEUP:   view_scroll(np, -g.rows, 0); return true;
+        case KEY_PAGEDOWN: view_scroll(np, g.rows, 0); return true;
+        case KEY_LEFT:     view_scroll(np, 0, ctrl ? -g.cols : -1); return true;
+        case KEY_RIGHT:    view_scroll(np, 0, ctrl ? g.cols : 1); return true;
+        case KEY_HOME:     if (ctrl) v->top = 0; v->hcol = 0; view_scroll(np, 0, 0); return true;
+        case KEY_END:
+            if (ctrl) v->top = 0xFFFFFFF0u;
+            else v->hcol = 0xFFFFFFF0u;
+            view_scroll(np, 0, 0);
+            return true;
+        default: return false;        /* Ctrl+O, Ctrl+W, ... reach the window */
+        }
+    }
+    default:
+        return false;
+    }
+}
+
+/* Has the viewed file changed since it was indexed? Then index it again. */
+static void view_check(notepad_t *np) {
+    npview_t *v = &np->view;
+    if (!v->on) return;
+    vfs_stat_t st;
+    if (vfs_stat(np->path, &st) < 0 || st.is_dir) return;
+    if (st.size == v->size && st.mtime == v->mtime) return;
+    v->size = st.size;
+    v->mtime = st.mtime;
+    view_reset_index(v);
+    if (!v->timer) v->timer = win_set_timer(np->win, 15);
+    view_index_step(np);
+    view_clamp(np);
+    ui_invalidate(v->w);
+    ui_invalidate(np->status);
+}
+
+static void view_close(notepad_t *np) {
+    npview_t *v = &np->view;
+    if (!v->on) return;
+    v->on = false;
+    if (v->timer) { win_kill_timer(np->win, v->timer); v->timer = 0; }
+    free(v->buf); v->buf = NULL;
+    free(v->buf2); v->buf2 = NULL;
+    free(v->cp); v->cp = NULL;
+    v->ncp = v->capcp = 0;
+    ui_set_visible(v->w, false);
+    ui_set_visible(np->area, true);
+}
+
+/* Show `path` (size bytes) in the viewer. */
+static bool view_open(notepad_t *np, const char *path, const vfs_stat_t *st) {
+    npview_t *v = &np->view;
+    view_close(np);
+    if (!v->w) return false;
+    v->buf = malloc(256u * 1024u);
+    v->buf2 = malloc(CP_BYTES + 1);
+    if (!v->buf || !v->buf2) { free(v->buf); free(v->buf2); v->buf = v->buf2 = NULL; return false; }
+    v->on = true;
+    v->size = st->size;
+    v->mtime = st->mtime;
+    v->top = v->hcol = 0;
+    v->sb_drag = 0;
+    view_reset_index(v);
+    strlcpy(np->path, path, sizeof np->path);
+    ui_set_text(np->area, "");
+    ui_textarea_set_modified(np->area, false);
+    ui_set_visible(np->area, false);
+    ui_set_visible(v->w, true);
+    ui_focus(v->w);
+    v->timer = win_set_timer(np->win, 15);
+    view_index_step(np);
+    np_update_title(np);
+    np_build_menus(np);
+    ui_invalidate(v->w);
+    ui_invalidate(np->status);
+    return true;
+}
+
 /* ---- document --------------------------------------------------------------------- */
 static void np_set_document(notepad_t *np, const char *path, const char *text) {
+    bool was_view = np->view.on;
+    view_close(np);
+    if (was_view) np_build_menus(np);
     strlcpy(np->path, path ? path : "", sizeof np->path);
     ui_set_text(np->area, text ? text : "");
     ui_textarea_set_modified(np->area, false);
@@ -144,13 +539,28 @@ static bool np_load(notepad_t *np, const char *path) {
     int err = vfs_stat(path, &st);
     if (err < 0) { np_error(np, "Cannot open \"%s\":\n%s.", path, vfs_strerror(err)); return false; }
     if (st.is_dir) { np_error(np, "\"%s\" is a folder, not a text file.", path); return false; }
-    if (st.size > NP_MAX_FILE) {
-        np_error(np, "\"%s\" is too large to open in Notepad (%u KB).", vfs_basename(path), st.size >> 10);
-        return false;
-    }
     uint32_t size = 0;
-    char *data = vfs_read_file(path, &size);
-    if (!data) { np_error(np, "Cannot read \"%s\".", path); return false; }
+    char *data = NULL;
+    bool big = st.size > NP_VIEW_BYTES;
+    if (!big) {
+        data = vfs_read_file(path, &size);
+        if (!data) { np_error(np, "Cannot read \"%s\".", path); return false; }
+        /* very long lines or OSaver's hidden separators: the viewer */
+        uint32_t run = 0;
+        for (uint32_t i = 0; i < size && !big; i++) {
+            if (data[i] == '\n') run = 0;
+            else if (++run > NP_VIEW_LINE || data[i] == NP_HS) big = true;
+        }
+    }
+    if (big) {
+        free(data);
+        char full[VFS_PATH_MAX];
+        strlcpy(full, path, sizeof full);
+        if (!view_open(np, full, &st)) { np_error(np, "There is not enough memory to open \"%s\".", vfs_basename(full)); return false; }
+        np_message(np, "Opened %s (%u bytes, read only)", full, st.size);
+        klog("notepad: viewing %s (%u bytes)", full, st.size);
+        return true;
+    }
     /* The editor works on C strings: show NUL bytes (binary files) as spaces. */
     bool binary = false;
     for (uint32_t i = 0; i < size; i++)
@@ -165,6 +575,19 @@ static bool np_load(notepad_t *np, const char *path) {
 
 /* Write the editor contents to `path`. */
 static bool np_write(notepad_t *np, const char *path) {
+    if (np->view.on) {                   /* viewer: nothing changed, Save as copies the file */
+        if (strcmp(path, np->path)) {
+            char dst[VFS_PATH_MAX];
+            strlcpy(dst, path, sizeof dst);
+            int err = vfs_copy(np->path, dst);
+            if (err < 0) { np_error(np, "Could not save \"%s\":\n%s.", dst, vfs_strerror(err)); return false; }
+            strlcpy(np->path, dst, sizeof np->path);
+            view_check(np);
+        }
+        np_update_title(np);
+        np_message(np, "Saved %s", np->path);
+        return true;
+    }
     const char *text = ui_get_text(np->area);
     int len = ui_textarea_length(np->area);
     int err = vfs_write_file(path, text, (uint32_t)len);
@@ -399,7 +822,13 @@ static void np_goto_cb(const char *text, void *ctx) {
     notepad_t *np = ctx;
     if (!text) return;
     int n = atoi(text);
-    int lines = ui_textarea_line_count(np->area);
+    int lines = np->view.on ? (int)MIN(view_lines(&np->view), 0x7FFFFFFFu) : ui_textarea_line_count(np->area);
+    if (np->view.on && n >= 1 && n <= lines) {
+        np->view.top = (uint32_t)(n - 1);
+        view_scroll(np, 0, 0);
+        ui_focus(np->view.w);
+        return;
+    }
     if (n < 1 || n > lines) {
         char msg[96];
         snprintf(msg, sizeof msg, "The line number must be between 1 and %d.", lines);
@@ -411,10 +840,12 @@ static void np_goto_cb(const char *text, void *ctx) {
 }
 
 static void np_goto_dialog(notepad_t *np) {
-    int ln, col;
-    ui_textarea_get_cursor(np->area, &ln, &col);
+    int ln = 0, col = 0;
+    int lines = ui_textarea_line_count(np->area);
+    if (np->view.on) { ln = (int)np->view.top; lines = (int)MIN(view_lines(&np->view), 0x7FFFFFFFu); }
+    else ui_textarea_get_cursor(np->area, &ln, &col);
     char prompt[64], init[16];
-    snprintf(prompt, sizeof prompt, "Line number (1 - %d):", ui_textarea_line_count(np->area));
+    snprintf(prompt, sizeof prompt, "Line number (1 - %d):", lines);
     snprintf(init, sizeof init, "%d", ln + 1);
     ui_input_box(np->win, "Go to line", prompt, init, np_goto_cb, np);
 }
@@ -500,23 +931,25 @@ static void np_build_menus(notepad_t *np) {
     if (!mb) return;
     bool sel = np_has_selection(np);
     np->menu_has_sel = sel;
+    const char *ro = np->view.on ? "!" : "";     /* viewer: read only */
     ui_menubar_add(mb, "File",
                    "New\tCtrl+N|New window\tCtrl+Shift+N|Open...\tCtrl+O|Save\tCtrl+S|"
                    "Save as...\tCtrl+Shift+S|-|Close\tCtrl+W", np_file_menu, np);
     char edit[256];
     snprintf(edit, sizeof edit,
-             "Undo\tCtrl+Z|Redo\tCtrl+Y|-|%sCut\tCtrl+X|%sCopy\tCtrl+C|Paste\tCtrl+V|%sDelete\tDel|-|"
-             "Select all\tCtrl+A|Time/Date\tF5", sel ? "" : "!", sel ? "" : "!", sel ? "" : "!");
+             "%sUndo\tCtrl+Z|%sRedo\tCtrl+Y|-|%sCut\tCtrl+X|%sCopy\tCtrl+C|%sPaste\tCtrl+V|%sDelete\tDel|-|"
+             "%sSelect all\tCtrl+A|%sTime/Date\tF5", ro, ro, sel ? "" : "!", sel ? "" : "!", ro, sel ? "" : "!", ro, ro);
     ui_menubar_add(mb, "Edit", edit, np_edit_menu, np);
     char search[200];
     snprintf(search, sizeof search,
-             "Find...\tCtrl+F|Find next\tF3|Replace...\tCtrl+H|Go to line...\tCtrl+G|-|Match case%s",
-             np->match_case ? "\t\x96" : "");
+             "%sFind...\tCtrl+F|%sFind next\tF3|%sReplace...\tCtrl+H|Go to line...\tCtrl+G|-|Match case%s",
+             ro, ro, ro, np->match_case ? "\t\x96" : "");
     ui_menubar_add(mb, "Search", search, np_search_menu, np);
     char view[256];
+    bool mono = np->mono || np->view.on;
     snprintf(view, sizeof view,
-             "Monospace font%s|Proportional font%s|-|%sZoom in\tCtrl++|%sZoom out\tCtrl+-|-|Line numbers%s|Status bar%s",
-             np->mono ? "\t\x96" : "", np->mono ? "" : "\t\x96",
+             "%sMonospace font%s|%sProportional font%s|-|%sZoom in\tCtrl++|%sZoom out\tCtrl+-|-|Line numbers%s|Status bar%s",
+             ro, mono ? "\t\x96" : "", ro, mono ? "" : "\t\x96",
              np->zoom ? "!" : "", np->zoom ? "" : "!",
              np->line_numbers ? "\t\x96" : "", np->show_status ? "\t\x96" : "");
     ui_menubar_add(mb, "View", view, np_view_menu, np);
@@ -569,15 +1002,25 @@ static void np_status_draw(widget_t *w, surface_t *s, rect_t r) {
     int ty = r.y + 1 + (r.h - 1 - font_height(FONT_UI)) / 2;
 
     char cells[4][64];
-    int ln = 0, col = 0, a = 0, b = 0;
-    ui_textarea_get_cursor(np->area, &ln, &col);
-    ui_textarea_get_selection(np->area, &a, &b);
-    if (b > a) snprintf(cells[0], sizeof cells[0], "Ln %d, Col %d  (%d selected)", ln + 1, col + 1, b - a);
-    else snprintf(cells[0], sizeof cells[0], "Ln %d, Col %d", ln + 1, col + 1);
-    int lines = ui_textarea_line_count(np->area), chars = ui_textarea_length(np->area);
-    snprintf(cells[1], sizeof cells[1], "%d line%s, %d char%s", lines, lines == 1 ? "" : "s", chars, chars == 1 ? "" : "s");
-    snprintf(cells[2], sizeof cells[2], "%s", np->zoom ? (np->mono ? "200%" : "140%") : "100%");
-    snprintf(cells[3], sizeof cells[3], "%s", np->mono ? "Plain text" : "Plain text (proportional)");
+    if (np->view.on) {
+        npview_t *v = &np->view;
+        uint32_t lines = view_lines(v);
+        snprintf(cells[0], sizeof cells[0], "Ln %u, Col %u", v->top + 1, v->hcol + 1);
+        snprintf(cells[1], sizeof cells[1], "%u%s line%s, %u char%s", lines, v->indexed ? "" : "+",
+                 lines == 1 ? "" : "s", v->size, v->size == 1 ? "" : "s");
+        snprintf(cells[2], sizeof cells[2], "%s", np->zoom ? "200%" : "100%");
+        snprintf(cells[3], sizeof cells[3], "Read only");
+    } else {
+        int ln = 0, col = 0, a = 0, b = 0;
+        ui_textarea_get_cursor(np->area, &ln, &col);
+        ui_textarea_get_selection(np->area, &a, &b);
+        if (b > a) snprintf(cells[0], sizeof cells[0], "Ln %d, Col %d  (%d selected)", ln + 1, col + 1, b - a);
+        else snprintf(cells[0], sizeof cells[0], "Ln %d, Col %d", ln + 1, col + 1);
+        int lines = ui_textarea_line_count(np->area), chars = ui_textarea_length(np->area);
+        snprintf(cells[1], sizeof cells[1], "%d line%s, %d char%s", lines, lines == 1 ? "" : "s", chars, chars == 1 ? "" : "s");
+        snprintf(cells[2], sizeof cells[2], "%s", np->zoom ? (np->mono ? "200%" : "140%") : "100%");
+        snprintf(cells[3], sizeof cells[3], "%s", np->mono ? "Plain text" : "Plain text (proportional)");
+    }
 
     /* right-aligned cells separated by hairlines */
     int x = r.x + r.w - 14;
@@ -605,8 +1048,8 @@ static void np_key(notepad_t *np, const event_t *ev) {
         case 'o': np_confirm(np, ACT_OPEN); return;
         case 's': if (shift) np_save_as(np, ACT_NONE); else np_save(np, ACT_NONE); return;
         case 'w': np_confirm(np, ACT_CLOSE); return;   /* may free np */
-        case 'f': np_find_dialog(np); return;
-        case 'h': np_replace_dialog(np); return;
+        case 'f': if (!np->view.on) np_find_dialog(np); return;
+        case 'h': if (!np->view.on) np_replace_dialog(np); return;
         case 'g': np_goto_dialog(np); return;
         case '=': case '+': np_zoom(np, np->zoom + 1); return;
         case '-': np_zoom(np, np->zoom - 1); return;
@@ -614,6 +1057,7 @@ static void np_key(notepad_t *np, const event_t *ev) {
         default: return;
         }
     }
+    if (np->view.on) return;
     switch (ev->key) {
     case KEY_F3: np_find_next(np); break;
     case KEY_F5: np_insert_datetime(np); break;
@@ -632,6 +1076,12 @@ static void np_event(window_t *win, const event_t *ev) {
         np_key(np, ev);
         break;
     case EV_TIMER:
+        if (np->view.on && ev->timer_id == np->view.timer) {
+            view_index_step(np);
+            ui_invalidate(np->view.w);
+            ui_invalidate(np->status);
+            break;
+        }
         if (ev->timer_id == np->msg_timer && sys_uptime_ms() >= np->msg_until) {
             np->msg[0] = 0;
             win_kill_timer(win, np->msg_timer);
@@ -640,12 +1090,14 @@ static void np_event(window_t *win, const event_t *ev) {
         }
         break;
     case EV_FOCUS:
-        ui_focus(np->area);
+        if (np->view.on) { view_check(np); ui_focus(np->view.w); }
+        else ui_focus(np->area);
         break;
     case EV_CLOSE_REQUEST:
         np_confirm(np, ACT_CLOSE);        /* may free np */
         break;
     case EV_CLOSE:
+        view_close(np);
         for (notepad_t **pp = &g_editors; *pp; pp = &(*pp)->next)
             if (*pp == np) { *pp = np->next; break; }
         win_set_userdata(win, NULL);
@@ -662,7 +1114,19 @@ static void np_launch(const char *arg) {
     if (path[0] && vfs_is_dir(path)) path[0] = 0;
     if (path[0]) {
         notepad_t *open = np_find_open(path);
-        if (open && win_is_valid(open->win)) { win_focus(open->win); return; }
+        if (open && win_is_valid(open->win)) {
+            win_focus(open->win);
+            if (open->view.on) view_check(open);
+            else if (!ui_textarea_modified(open->area)) {
+                /* unchanged document, but the file was rewritten (e.g. OSaver's View source) */
+                uint32_t size = 0;
+                char *d = vfs_read_file(path, &size);
+                if (d && ((int)size != ui_textarea_length(open->area) || memcmp(d, ui_get_text(open->area), size)))
+                    np_load(open, path);
+                free(d);
+            }
+            return;
+        }
     }
 
     notepad_t *np = calloc(1, sizeof *np);
@@ -678,6 +1142,8 @@ static void np_launch(const char *arg) {
 
     /* creation order matters: the menu bar and status bar paint over the text area's edges */
     np->area = ui_textarea(win, 0, UI_MENUBAR_H, NP_W, NP_H - UI_MENUBAR_H - STATUS_H, "");
+    np->view.w = ui_custom(win, 0, UI_MENUBAR_H, NP_W, NP_H - UI_MENUBAR_H - STATUS_H, view_draw, view_event, np);
+    if (np->view.w) ui_set_visible(np->view.w, false);
     np->status = ui_custom(win, 0, NP_H - STATUS_H, NP_W, STATUS_H, np_status_draw, NULL, np);
     ui_set_enabled(np->status, false);     /* passive: clicks fall through, never focused */
     if (!np->area || !np->status) { win_close(win); return; }
