@@ -12,9 +12,9 @@
  *                from /system/ui at startup
  *
  * Boot order (kernel/core/kmain.c): splash background -> devices -> files
- * (installed drive: the saved files are restored) -> drive check -> splash
- * animation -> [installed: loading bar] load UI files, apps, desktop ->
- * [ISO: NovaOS Drive installation] -> desktop.
+ * (installed drive: the saved files are restored) -> drive check -> INIT_FS
+ * hooks -> splash animation -> [ISO: NovaOS Drive installation] ->
+ * [installed: loading bar] apps, desktop -> desktop (-> ISO: save file screen).
  */
 #ifndef BOOTSCREEN_H
 #define BOOTSCREEN_H
@@ -57,10 +57,13 @@ void bootsetup_run(void);
 void bootsetup_after_desktop(void);
 
 /* ---- nodrive.c ----------------------------------------------------------------------- */
-/* Check the drive at startup and start watching it while NovaOS runs. */
+/* Check the drive at startup (No drive found if it is incomplete) and start watching
+   it while NovaOS runs. */
 void nodrive_check_startup(void);
-/* Black screen, Nova icon, "No drive found" - forever. */
+/* Black screen, Nova icon, "No drive found" - forever. `why`: the missing path. */
 void nodrive_show(const char *why) NORETURN;
+/* Liberation Sans 30 px, ASCII (nodrive_font.c, tools/genfont.py --nodrive). */
+extern const font_t font_nodrive;
 
 /* ---- sysfiles.c ---------------------------------------------------------------------- */
 /* Write the system files into /system from the built-in copies (ISO boot / first boot). */

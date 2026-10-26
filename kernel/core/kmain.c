@@ -2,6 +2,7 @@
 #include "kernel.h"
 #include <nova/disk.h>
 #include "gui/bootscreen.h"
+#include "disk/diskfmt.h"
 
 const char *sys_version(void) { return "NovaOS " NOVA_VERSION; }
 const char *sys_edition(void) { return NOVA_EDITION; }
@@ -95,9 +96,13 @@ void kmain(uint32_t magic, uint32_t mbi) {
     run_initcalls(INIT_DRIVER);
 
     /* Files before the animation: on an installed drive the saved files (and with
-       them /system/config/splash.cfg) are restored by the INIT_FS stage. */
+       them /system/config/splash.cfg) replace the defaults first. Then the drive
+       check: without its System / home folders it is "No drive found". */
     vfs_init();
     vfs_populate_defaults();
+    persist_restore();
+    nodrive_check_startup();
+    persist_start();
     run_initcalls(INIT_FS);
 
     splash_animate();

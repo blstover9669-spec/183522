@@ -89,4 +89,9 @@ int  persist_find_disk(uint32_t disk_id, disk_header_t *hdr_out);   /* -> disk i
 bool persist_read_header(int disk, disk_header_t *hdr);             /* valid NovaOS header? */
 int  persist_boot_disk(void);                                       /* disk we booted from, -1 */
 
+/* boot sequence (kernel/core/kmain.c): restore the saved files of an installed drive
+   (true if files came from the disk), then - after the drive check - start saving */
+bool persist_restore(void);
+void persist_start(void);
+
 #endif

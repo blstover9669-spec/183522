@@ -3,8 +3,10 @@
  *
  * Active only when the kernel was started by the NovaOS disk loader with
  * "boot=disk diskid=XXXXXXXX" on its command line (the installer writes that
- * into the install header). At boot (INIT_FS) the newest valid save is read
- * and handed to vfs_deserialize(). Afterwards the tree is written back:
+ * into the install header). At boot kmain calls persist_restore(): the newest
+ * valid save is read and handed to vfs_deserialize(), before the drive check
+ * ("No drive found") and before the INIT_FS hooks, so they all see the saved
+ * files. persist_start() then begins saving. The tree is written back:
  *   - a few seconds after the last change (vfs sync hook),
  *   - every 60 s while there are unsaved changes,
  *   - before reboot / shut down (shutdown hook, synchronous),
@@ -157,11 +159,12 @@ static void sync_hook(void);
 static void periodic(void *ctx);
 static void shutdown_hook(void);
 
-static void persist_init(void) {
+/* Restore the newest save of the installed drive. True if files came from the disk. */
+bool persist_restore(void) {
     const char *boot = sys_cmdline_get("boot");
     if (!boot || strcmp(boot, "disk")) {
         klog("persist: off (live system - files stay in memory)");
-        return;
+        return false;
     }
     const char *ids = sys_cmdline_get("diskid");
     uint32_t id = ids ? (uint32_t)strtoul(ids, NULL, 16) : 0;
@@ -169,7 +172,7 @@ static void persist_init(void) {
     if (d < 0 && id) d = persist_find_disk(0, &P.hdr);
     if (d < 0) {
         klog("persist: installed disk (id %08x) not found - files will not be saved", id);
-        return;
+        return false;
     }
     P.active = true;
     P.disk = d;
@@ -204,7 +207,13 @@ static void persist_init(void) {
     kfree(ph[0]);
     kfree(ph[1]);
     if (!P.loaded) klog("persist: no saved files on disk yet - starting with the default files");
-    refresh_system_files();
+    return P.loaded;
+}
+
+/* After the drive check: bring the system info up to date and start saving. */
+void persist_start(void) {
+    if (!P.active) return;
+    if (P.loaded) refresh_system_files();
     P.saved_gen = P.loaded ? vfs_generation() : vfs_generation() - 1;   /* first boot: save defaults soon */
 
     vfs_set_sync_hook(sync_hook, SYNC_DELAY_MS);
@@ -212,7 +221,6 @@ static void persist_init(void) {
     sys_add_shutdown_hook(shutdown_hook);
     if (!P.loaded) persist_save_async();
 }
-REGISTER_INIT(INIT_FS, persist_init);
 
 /* ---- saving ------------------------------------------------------------------------------ */
 static int serialize(uint8_t **out, uint32_t *len, uint32_t *gen) {
