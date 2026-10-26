@@ -9,6 +9,13 @@
  * The exchange runs asynchronously from the IRQ handler (send 0xED, the ACK
  * sends the mask, the second ACK completes it; 0xFE resends, 150 ms timeout),
  * so the GUI never waits for the keyboard.
+ *
+ * PrintScreen arrives in several shapes (set 1): E0 2A E0 37 / E0 B7 E0 AA on
+ * its own (the E0 2A / E0 AA "fake shifts" are dropped), E0 37 / E0 B7 with
+ * Ctrl or Shift held (Shift: E0 AA E0 37 / E0 B7 E0 2A), and 54 / D4 (SysRq)
+ * with Alt held. All of them become KEY_PRINTSCREEN. Some hosts pass only the
+ * key release to the virtual machine; a release without a press is turned
+ * into a press + release, so the screenshot is still taken.
  */
 #include "kernel.h"
 
@@ -173,12 +180,19 @@ static void kb_byte(uint8_t sc) {
             else if (kp == '.') key = KEY_DELETE;
         } else if (code == 0x37) {
             key = '*'; ch = '*';
+        } else if (code == 0x54) {
+            key = KEY_PRINTSCREEN;             /* Alt+PrintScreen = SysRq */
         }
         if (!key) return;
     }
 
     /* modifiers */
     bool was_down = input_key_down(key);
+    if (key == KEY_PRINTSCREEN && release && !was_down) {
+        /* only the release reached us: deliver the press first */
+        input_event_t pev = { .type = IN_KEY, .pressed = 1, .key = KEY_PRINTSCREEN, .mods = (uint8_t)mods };
+        input_push(&pev);
+    }
     set_key(key, !release);
     switch (key) {
     case KEY_LSHIFT: case KEY_RSHIFT:

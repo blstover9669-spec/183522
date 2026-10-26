@@ -1313,7 +1313,12 @@ static void key_event(const input_event_t *ie) {
             if (!app_launch_by_name("Task Manager", NULL)) app_launch_by_name("System Monitor", NULL);
             return;
         }
-        if (ie->key == KEY_PRINTSCREEN) { wm_screenshot(); return; }
+        /* screenshots: PrintScreen (any modifiers), or Ctrl+Alt+S - hosts such as
+           Windows 11 often keep PrintScreen for themselves */
+        if (ie->key == KEY_PRINTSCREEN || ((mods & MOD_CTRL) && (mods & MOD_ALT) && ie->key == 's')) {
+            if (!ie->repeat) wm_screenshot();
+            return;
+        }
         if ((mods & MOD_WIN) && (ie->key == 'r' || ie->key == 'R')) { wm_close_popups(NULL); shell_run_dialog(); return; }
     } else {
         if ((ie->key == KEY_LWIN || ie->key == KEY_RWIN) && win_key_alone) {
@@ -1408,27 +1413,50 @@ static void paint_all(void) {
     if (btn_win && !win_is_valid(btn_win)) btn_win = NULL;
 }
 
-/* ---- screenshot (PrintScreen) ---------------------------------------------------------- */
+/* ---- screenshot (PrintScreen, Ctrl+Alt+S) ---------------------------------------------- */
+#define SHOT_DIR "/home/user/Pictures"
+
+static bool screenshot_failed(const char *why) {
+    klog("wm: screenshot failed: %s", why);
+    notify("Screenshot not saved", why, ICON_ERROR);
+    return false;
+}
+
+/* Save the whole screen as a BMP in ~/Pictures ("Screenshot 2026-10-26 143005.bmp";
+   a second one in the same second gets " (2)", ...). The notification names the
+   file; on an installed system the file is saved to the disk with the next
+   automatic save, a few seconds later. */
 bool wm_screenshot(void) {
     surface_t *s = screen_capture();
-    if (!s) return false;
+    if (!s) return screenshot_failed("Not enough memory.");
     size_t size;
     void *bmp = image_encode_bmp(s, &size);
     surface_destroy(s);
-    if (!bmp) return false;
-    char path[VFS_PATH_MAX];
+    if (!bmp) return screenshot_failed("Not enough memory.");
+    char path[VFS_PATH_MAX], base[VFS_PATH_MAX];
     datetime_t dt;
     sys_datetime(&dt);
-    vfs_mkdirs("/home/user/Pictures");
-    snprintf(path, sizeof path, "/home/user/Pictures/Screenshot %04d-%02d-%02d %02d%02d%02d.bmp",
-             dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-    int r = vfs_write_file(path, bmp, (uint32_t)size);
-    kfree(bmp);
-    if (r == 0) {
-        ui_notify("Screenshot saved", vfs_basename(path));
-        klog("wm: screenshot %s", path);
+    int r = vfs_mkdirs(SHOT_DIR);
+    if (r < 0 && !vfs_is_dir(SHOT_DIR)) {
+        kfree(bmp);
+        char why[96];
+        snprintf(why, sizeof why, "Could not create %s: %s.", SHOT_DIR, vfs_strerror(r));
+        return screenshot_failed(why);
     }
-    return r == 0;
+    snprintf(base, sizeof base, SHOT_DIR "/Screenshot %04d-%02d-%02d %02d%02d%02d",
+             dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+    snprintf(path, sizeof path, "%s.bmp", base);
+    for (int n = 2; vfs_exists(path) && n < 100; n++) snprintf(path, sizeof path, "%s (%d).bmp", base, n);
+    r = vfs_write_file(path, bmp, (uint32_t)size);
+    kfree(bmp);
+    if (r < 0) {
+        char why[96];
+        snprintf(why, sizeof why, "Could not write to Pictures: %s.", vfs_strerror(r));
+        return screenshot_failed(why);
+    }
+    notify("Screenshot saved", vfs_basename(path), ICON_FILE_IMAGE);
+    klog("wm: screenshot %s (%u bytes)", path, (unsigned)size);
+    return true;
 }
 
 /* ---- init + main loop ------------------------------------------------------------------- */
