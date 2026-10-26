@@ -85,6 +85,12 @@ static const char latin_ext[] =
     "AaAaAaCcCcCcCcDd" "DdEeEeEeEeEeGgGg" "GgGgHhHhIiIiIiIi" "IiIiJjKkkLlLlLlL"
     "lLlNnNnNnnNnOoOo" "OoOoRrRrRrSsSsSs" "SsTtTtTtUuUuUuUu" "UuUuWwYyYZzZzZzs";
 
+uint32_t web_1252_to_cp(int c) {
+    c &= 255;
+    if (c >= 0x80 && c < 0xA0) return cp80[c - 0x80];
+    return (uint32_t)c;
+}
+
 /* -1 = drop the character entirely */
 int web_cp_to_1252(uint32_t cp) {
     if (cp == '\t' || cp == '\n' || cp == '\r' || cp == '\f') return (int)cp;

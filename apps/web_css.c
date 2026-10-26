@@ -1956,7 +1956,9 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         if (v->t == CV_KW) st->floating = v->kw == K_LEFT ? 1 : v->kw == K_RIGHT ? 2 : 0;
         else if (initial) st->floating = 0;
         break;
-    case P_CLEAR: break;
+    case P_CLEAR:
+        if (v->t == CV_KW) st->clear = v->kw == K_LEFT ? 1 : v->kw == K_RIGHT ? 2 : v->kw == K_BOTH ? 3 : 0;
+        break;
     case P_BOX_SIZING:
         if (v->t == CV_KW) st->border_box = v->kw == K_BORDER_BOX;
         else if (inherit) st->border_box = ps->border_box;

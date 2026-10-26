@@ -44,7 +44,6 @@ static uint8_t *b64_decode(const char *s, uint32_t *outlen) {
 
 /* Unpack a pack into (table, coverage) bytes. */
 static uint8_t *unpack(const web_fontpack_t *p) {
-    if (!WEB_HAVE(inflate_buffer)) return NULL;
     uint32_t zl;
     uint8_t *z = b64_decode(p->b64, &zl);
     if (!z) return NULL;
@@ -224,7 +223,7 @@ const font_t *web_font(int px, int flags) {
         if (m && web_fonts_real()) f = font_scaled(m, 48, px);
     }
     if (!f) {
-        if (!WEB_HAVE(inflate_buffer) || px <= 24) {
+        if (px <= 24) {
             if (!failed) klog("browser: page fonts unavailable, using system fonts");
             failed = true;
         }
@@ -235,6 +234,5 @@ const font_t *web_font(int px, int flags) {
 }
 
 bool web_fonts_real(void) {
-    if (failed) return false;
-    return WEB_HAVE(inflate_buffer);
+    return !failed;
 }

@@ -18,35 +18,6 @@
 #include <nova/net.h>
 #include "gfx/font_internal.h"
 
-/* The networking code (agent E) may not be linked into every build yet:
-   these declarations are weak, so a missing function is NULL instead of a
-   link error. Check with WEB_HAVE(fn) before calling. */
-#define WEB_WEAK __attribute__((weak))
-extern __typeof__(net_is_up)        net_is_up        WEB_WEAK;
-extern __typeof__(net_status_text)  net_status_text  WEB_WEAK;
-extern __typeof__(http_fetch_ex)    http_fetch_ex    WEB_WEAK;
-extern __typeof__(http_free)        http_free        WEB_WEAK;
-extern __typeof__(http_error)       http_error       WEB_WEAK;
-extern __typeof__(http_error_text)  http_error_text  WEB_WEAK;
-extern __typeof__(http_status)      http_status      WEB_WEAK;
-extern __typeof__(http_url)         http_url         WEB_WEAK;
-extern __typeof__(http_header)      http_header      WEB_WEAK;
-extern __typeof__(http_body)        http_body        WEB_WEAK;
-extern __typeof__(http_body_len)    http_body_len    WEB_WEAK;
-extern __typeof__(http_take_body)   http_take_body   WEB_WEAK;
-extern __typeof__(http_progress)    http_progress    WEB_WEAK;
-extern __typeof__(http_is_https)    http_is_https    WEB_WEAK;
-extern __typeof__(http_cert_ok)     http_cert_ok     WEB_WEAK;
-extern __typeof__(http_cert_error)  http_cert_error  WEB_WEAK;
-extern __typeof__(http_cert_subject) http_cert_subject WEB_WEAK;
-extern __typeof__(http_cert_issuer) http_cert_issuer WEB_WEAK;
-extern __typeof__(http_tls_info)    http_tls_info    WEB_WEAK;
-extern __typeof__(cookies_clear)    cookies_clear    WEB_WEAK;
-extern __typeof__(cookies_count)    cookies_count    WEB_WEAK;
-extern __typeof__(url_resolve)      url_resolve      WEB_WEAK;
-extern __typeof__(inflate_buffer)   inflate_buffer   WEB_WEAK;
-#define WEB_HAVE(fn) ((fn) != NULL)
-
 /* ==== arena (all of a document's nodes and strings) ======================== */
 typedef struct web_chunk web_chunk_t;
 typedef struct web_arena { web_chunk_t *head; size_t used; } web_arena_t;
@@ -76,6 +47,8 @@ int   web_cp_to_1252(uint32_t cp);                  /* '?' when not representabl
 enum { WEB_CS_AUTO = 0, WEB_CS_UTF8, WEB_CS_1252 };
 int   web_detect_charset(const char *src, size_t len, const char *content_type);
 char *web_to_1252(const char *src, size_t len, int cs, size_t *outlen);   /* malloc'd */
+/* Unicode code point of a page-text byte (the 1252 variant the page fonts use). */
+uint32_t web_1252_to_cp(int c);
 /* Page text (1252) -> NovaOS system font charset, for window titles / tabs. */
 void  web_1252_to_ui(const char *in, char *out, size_t size);
 
@@ -190,7 +163,7 @@ typedef struct web_var { const char *name, *value; const struct web_var *next; }
 typedef struct web_style {
     uint8_t  display, visibility_hidden, ws, align, valign, list, transform, position;
     uint8_t  bold, italic, mono, deco, floating, border_box, overflow_hidden, align_legacy;
-    uint8_t  collapse, flex_column, nowrap_flex, list_inside;
+    uint8_t  collapse, flex_column, nowrap_flex, list_inside, clear;   /* clear: 1 left, 2 right, 3 both */
     int16_t  fsize;          /* px (zoomed)                     */
     int16_t  lh;             /* line height px, 0 = normal      */
     int16_t  indent;         /* text-indent px                  */
@@ -220,7 +193,7 @@ bool web_css_color(const char *s, uint32_t *out);
 /* ==== page resources used by layout ======================================== */
 enum { IMG_PENDING = 0, IMG_LOADING, IMG_DECODE, IMG_OK, IMG_FAILED };
 typedef struct web_image {
-    char      *url;
+    char      *url;           /* absolute URL (malloc'd)                            */
     int        state;
     surface_t *surf;          /* decoded image (SURF_ALPHA if it had transparency) */
     surface_t *scaled;        /* cached copy at the size it was last drawn         */
@@ -230,25 +203,27 @@ typedef struct web_image {
 } web_image_t;
 
 enum { C_TEXT = 1, C_PASSWORD, C_CHECKBOX, C_RADIO, C_SUBMIT, C_RESET, C_BUTTON,
-       C_SELECT, C_TEXTAREA, C_HIDDEN, C_IMAGE };
+       C_SELECT, C_TEXTAREA, C_HIDDEN, C_IMAGE, C_FILE };
 typedef struct web_ctrl {
     web_node_t *node, *form;
     int      type;
-    char    *name;
+    char    *name;            /* malloc'd (1252) or NULL                        */
     char    *value;           /* malloc'd, editable (1252)                     */
     int      vlen, vcap, caret, scroll;
-    bool     checked, disabled;
-    int      sel;             /* select: chosen option                          */
+    char    *init_value;      /* for reset                                      */
+    bool     checked, init_checked, disabled, readonly;
+    int      sel, init_sel;   /* select: chosen option                          */
     int      nopts;
     char   **opt_text, **opt_val;
-    char     label[96];       /* buttons                                        */
+    char     label[96];       /* buttons (1252)                                 */
     int      size, rows, cols, maxlen;
-    int      x, y, w, h;      /* layout rect (document coordinates)             */
+    int      img;             /* C_IMAGE: image index                           */
+    int      x, y, w, h;      /* layout rect (document coordinates; w 0 = hidden) */
     const font_t *font;
     uint32_t color;
 } web_ctrl_t;
 
-typedef struct web_link { web_node_t *node; const char *href; } web_link_t;
+typedef struct web_link { web_node_t *node; const char *href; const char *target; } web_link_t;
 
 /* ==== layout / display list ================================================= */
 enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT };
@@ -257,40 +232,46 @@ typedef struct web_item {
     int      link;            /* link index or -1                    */
     int      x, y, w, h;      /* document coordinates                */
     uint32_t color;
-    const font_t *font;       /* WI_TEXT / WI_MARKER                  */
-    const char *text;         /* WI_TEXT (1252)                       */
+    const font_t *font;       /* WI_TEXT / WI_MARKER / WI_IMGALT      */
+    const char *text;         /* WI_TEXT / WI_IMGALT (1252)           */
     int      len;
-    int      ref;             /* image / control index                */
+    int      ref;             /* image / control index; WI_TEXT: baseline offset */
 } web_item_t;
+
+typedef struct web_anchor { const char *name; int y, mark; } web_anchor_t;
 
 typedef struct web_layout {
     web_item_t *items;
     int      nitems, cap;
     int      width, height;   /* document size                       */
     uint32_t bg;              /* page background                     */
-    web_link_t *links;
-    int      nlinks, lcap;
-    uint32_t gen;
+    web_anchor_t *anchors;    /* elements with an id / <a name>      */
+    int      nanchors, acap;
+    web_arena_t ar;           /* text runs                           */
     int      ms;              /* time the last layout took           */
+    int      vw;              /* viewport width it was made for      */
 } web_layout_t;
 
 typedef struct web_page {
     web_doc_t   *doc;
     web_image_t *imgs;   int nimgs, icap;
     web_ctrl_t  *ctrls;  int nctrls, ccap;
+    web_link_t  *links;  int nlinks, lcap;
     web_layout_t lay;
-    int          zoom;
-    char         url[2048];
+    int          zoom;        /* percent                                    */
+    char         base[2048];  /* URL links and images are resolved against  */
 } web_page_t;
 
-/* Collect <img> and form controls of a parsed document into the page
-   (resolving image URLs against base). */
-void web_page_collect(web_page_t *pg, const char *base_url);
+/* Collect links, <img> and form controls of a parsed document into the page
+   (image URLs resolved against pg->base, which the caller sets first). */
+void web_page_collect(web_page_t *pg);
 void web_page_free_resources(web_page_t *pg);
-/* Lay out the styled document for a viewport width. */
+/* Lay out the styled document for a viewport size. */
 void web_layout(web_page_t *pg, int width, int height);
 void web_layout_free(web_layout_t *L);
-/* Paint the part of the layout visible in view (doc coords sx,sy at s's clip). */
+/* y of an anchor (#name), -1 if none. */
+int  web_anchor_y(web_page_t *pg, const char *name);
+/* Paint the part of the layout visible in view (doc coords sx,sy at view's top-left). */
 typedef struct web_paint_opts {
     int hover_link;
     int focus_ctrl;
@@ -303,6 +284,12 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
 /* Hit test (document coordinates): link index, control index (or -1). */
 int  web_hit_link(web_page_t *pg, int x, int y);
 int  web_hit_ctrl(web_page_t *pg, int x, int y);
+/* Draw one form control at (x, y) of s (used by web_paint). */
+void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, bool focused, bool caret);
+/* Replace a control's value (len < 0: strlen). */
+void web_ctrl_set_value(web_ctrl_t *c, const char *s, int len);
+/* URL-encode 1252 text as UTF-8 (form submission). Appends to out. */
+void web_urlencode(const char *s, char *out, size_t size);
 
 /* ==== images ================================================================= */
 /* Decode PNG / JPEG / GIF (first frame) / BMP. NULL if unsupported or broken. */
