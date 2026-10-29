@@ -1224,6 +1224,10 @@ static bool content_event(widget_t *w, const event_t *ev) {
             if (range > 0) scroll_to(b, (int)((int64_t)pos * (total - v.w) / range), t->sy);
             return true;
         }
+        if (b->hover != HS_NONE) {   /* the pointer left the toolbar for the page */
+            b->hover = HS_NONE;
+            win_invalidate_rect(b->win, 0, 0, win_width(b->win), top_h());
+        }
         int l = -1, cursor = CURSOR_ARROW;
         if (rect_contains(v, ev->x, ev->y) && t->styled) {
             int dx = ev->x - v.x + t->sx, dy = ev->y - v.y + t->sy;

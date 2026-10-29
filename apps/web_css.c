@@ -2237,7 +2237,10 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     st->display = D_INLINE;
     st->width.u = U_AUTO; st->height.u = U_AUTO; st->maxw.u = U_NONE; st->minw.u = U_AUTO;
     st->left.u = U_AUTO; st->top.u = U_AUTO;
-    for (int i = 0; i < 4; i++) st->bc[i] = 0x00000001;   /* current colour */
+    for (int i = 0; i < 4; i++) {
+        st->bc[i] = 0x00000001;   /* current colour */
+        st->margin[i] = st->padding[i] = (web_len_t){ 0, U_PX };
+    }
 
     /* collect matching declarations */
     cx->nm = 0;

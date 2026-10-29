@@ -6,7 +6,7 @@
  * for the proportional styles, and stores each one as base64(zlib(...)) in
  * apps/web_fontdata.c. A font is unpacked into a normal font_t the first time
  * a page uses it, so the usual gfx_text / font_text_width calls work with it.
- * Sizes above 24 px are made from the 48 px master by area-averaging.
+ * Sizes above 24 px are made from the 48 px master (4 x 4 supersampling).
  */
 #include "web.h"
 
@@ -84,88 +84,69 @@ static font_t *font_from_raw(const web_fontpack_t *p, uint8_t *raw) {
     return f;
 }
 
-/* 1-D area resampling of n source samples into m (scale k = m/n). */
-static void resample(const float *src, int n, float *dst, int m, float k, float o) {
-    for (int i = 0; i < m; i++) {
-        float a = o + i / k, b = o + (i + 1) / k;   /* source interval */
-        int ia = (int)floorf(a), ib = (int)ceilf(b);
-        float sum = 0;
-        for (int j = ia; j < ib; j++) {
-            if (j < 0 || j >= n) continue;
-            float lo = j < a ? a : (float)j;
-            float hi = j + 1 > b ? b : (float)(j + 1);
-            if (hi > lo) sum += src[j] * (hi - lo);
-        }
-        dst[i] = sum * k;
-    }
-}
+static int floor_div(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+static int ceil_div(int a, int b) { return -floor_div(-a, b); }
 
-/* Scale the 48 px master to px. */
+/* Scale the 48 px master to px: every target pixel averages 4 x 4 samples of
+   the master (integer arithmetic only - the x87 is slow under emulation). */
 static font_t *font_scaled(const font_t *m, int masterpx, int px) {
-    float k = (float)px / masterpx;
     int count = m->count;
     glyph_t *g = calloc(count, sizeof *g);
     font_t *f = calloc(1, sizeof *f);
     if (!g || !f) { free(g); free(f); return NULL; }
-    /* first pass: sizes */
     size_t total = 0;
     for (int i = 0; i < count; i++) {
         const glyph_t *s = &m->glyphs[i];
-        g[i].adv = (uint8_t)CLAMP((int)lroundf(s->adv * k), 0, 255);
-        if (!s->w || !s->h) { g[i].xoff = (int8_t)lroundf(s->xoff * k); g[i].yoff = (int8_t)lroundf(s->yoff * k); continue; }
-        float x0 = s->xoff * k, x1 = (s->xoff + s->w) * k;
-        float y0 = s->yoff * k, y1 = (s->yoff + s->h) * k;
-        int tx0 = (int)floorf(x0), tx1 = (int)ceilf(x1);
-        int ty0 = (int)floorf(y0), ty1 = (int)ceilf(y1);
+        g[i].adv = (uint8_t)CLAMP((s->adv * px + masterpx / 2) / masterpx, 0, 255);
+        int tx0 = floor_div(s->xoff * px, masterpx), ty0 = floor_div(s->yoff * px, masterpx);
         g[i].xoff = (int8_t)CLAMP(tx0, -128, 127);
         g[i].yoff = (int8_t)CLAMP(ty0, -128, 127);
+        if (!s->w || !s->h) continue;
+        int tx1 = ceil_div((s->xoff + s->w) * px, masterpx), ty1 = ceil_div((s->yoff + s->h) * px, masterpx);
         g[i].w = (uint8_t)CLAMP(tx1 - tx0, 1, 255);
         g[i].h = (uint8_t)CLAMP(ty1 - ty0, 1, 255);
         total += (size_t)g[i].w * g[i].h;
     }
     uint8_t *data = calloc(1, total + 1);
-    float *row = malloc(sizeof(float) * 512), *tmp = malloc(sizeof(float) * 512);
-    float *mid = malloc(sizeof(float) * 256 * 256);
-    if (!data || !row || !tmp || !mid) { free(g); free(f); free(data); free(row); free(tmp); free(mid); return NULL; }
+    int *cols = malloc(sizeof(int) * 256 * 4), *rows = malloc(sizeof(int) * 256 * 4);
+    if (!data || !cols || !rows) { free(g); free(f); free(data); free(cols); free(rows); return NULL; }
     uint32_t off = 0;
     for (int i = 0; i < count; i++) {
         const glyph_t *s = &m->glyphs[i];
         g[i].off = off;
         if (!s->w || !s->h) continue;
         int W = g[i].w, H = g[i].h;
-        /* source placed in a padded frame whose origin maps to (xoff, yoff) of the target */
-        float sx0 = g[i].xoff / k, sy0 = g[i].yoff / k;   /* master coords of target origin */
-        int padx = (int)floorf(s->xoff - sx0), pady = (int)floorf(s->yoff - sy0);
-        if (padx < 0) padx = 0;
-        if (pady < 0) pady = 0;
-        float fx = (s->xoff - sx0) - padx, fy = (s->yoff - sy0) - pady;
-        int SW = s->w + padx + 2, SH = s->h + pady + 2;
-        if (SW > 512 || SH > 512 || W > 256 || H > 256) { off += W * H; continue; }
+        /* source column / row of each sub-sample (-1 = outside the bitmap) */
+        for (int x = 0; x < W * 4; x++) {
+            int t8 = (g[i].xoff + x / 4) * 8 + 2 * (x % 4) + 1;
+            int sx = floor_div(t8 * masterpx, 8 * px) - s->xoff;
+            cols[x] = sx >= 0 && sx < s->w ? sx : -1;
+        }
+        for (int y = 0; y < H * 4; y++) {
+            int t8 = (g[i].yoff + y / 4) * 8 + 2 * (y % 4) + 1;
+            int sy = floor_div(t8 * masterpx, 8 * px) - s->yoff;
+            rows[y] = sy >= 0 && sy < s->h ? sy : -1;
+        }
         const uint8_t *bits = m->data + s->off;
-        /* horizontal pass: each source row -> W samples */
-        for (int y = 0; y < SH; y++) {
-            for (int x = 0; x < SW; x++) {
-                int bx = x - padx, by = y - pady;
-                row[x] = (bx >= 0 && by >= 0 && bx < s->w && by < s->h) ? bits[by * s->w + bx] : 0.0f;
-            }
-            resample(row, SW, tmp, W, k, -fx);
-            for (int x = 0; x < W; x++) mid[y * W + x] = tmp[x];
-        }
-        /* vertical pass */
-        for (int x = 0; x < W; x++) {
-            for (int y = 0; y < SH; y++) row[y] = mid[y * W + x];
-            resample(row, SH, tmp, H, k, -fy);
-            for (int y = 0; y < H; y++) {
-                int v = (int)(tmp[y] + 0.5f);
-                data[off + y * W + x] = (uint8_t)CLAMP(v, 0, 255);
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                int sum = 0;
+                for (int j = 0; j < 4; j++) {
+                    int sy = rows[y * 4 + j];
+                    if (sy < 0) continue;
+                    const uint8_t *row = bits + sy * s->w;
+                    for (int k = 0; k < 4; k++) { int sx = cols[x * 4 + k]; if (sx >= 0) sum += row[sx]; }
+                }
+                data[off + y * W + x] = (uint8_t)(sum >> 4);
             }
         }
-        off += W * H;
+        off += (uint32_t)(W * H);
     }
-    free(row); free(tmp); free(mid);
+    free(cols);
+    free(rows);
     f->name = "web";
-    f->height = (int)lroundf(m->height * k);
-    f->ascent = (int)lroundf(m->ascent * k);
+    f->height = (m->height * px + masterpx / 2) / masterpx;
+    f->ascent = (m->ascent * px + masterpx / 2) / masterpx;
     f->mono = 0;
     f->first = m->first;
     f->count = count;
