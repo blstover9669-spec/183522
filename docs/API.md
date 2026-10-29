@@ -553,6 +553,15 @@ void clipboard_set(const char *text); const char *clipboard_get(void);  /* syste
 first, the dialog closes silently without calling back (so it is safe to free
 your state in `EV_CLOSE`).
 
+**Every error plays the alert sound** (`sys_alert_sound()`, section 14), and
+the toolkit does it for you: message boxes with `MB_ICON_ERROR`, or with
+`MB_ICON_WARNING` and only an OK button (a report that something failed, not
+a question), notifications with `ICON_ERROR` (`notify(title, body,
+ICON_ERROR)` - the alert replaces the usual notification click), and the file
+dialog's own errors. So report errors with one of those; call
+`sys_alert_sound()` yourself only for an error you show some other way (an
+error text inside your window, an error page).
+
 ---
 
 ## 12. Theme
@@ -658,7 +667,10 @@ u32 ctime, u32 size, data}`. A self-test at boot round-trips the tree.
 * Sound (sound card, else PC speaker - see [22. Sound](#22-sound)):
   `sys_beep(freq, ms)` (non-blocking), `speaker_tone(freq)` / `speaker_off()`,
   `sys_play_notes(const note_t *notes, int count)` (non-blocking melody;
-  `note_t {uint16_t freq, ms;}`, freq 0 = rest), `sys_sound_enabled()` /
+  `note_t {uint16_t freq, ms;}`, freq 0 = rest), `sys_alert_sound()` (the
+  error sound: two short falling tones, non-blocking; error message boxes and
+  error notifications play it by themselves - see section 11; calls less than
+  300 ms apart play once), `sys_sound_enabled()` /
   `sys_set_sound_enabled()` (taskbar toggle). Polyphonic notes with
   instruments: `sound_note(freq, ms, volume, waveform)`; the output device:
   `sys_sound_device_name()`.
