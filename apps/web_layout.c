@@ -962,8 +962,9 @@ typedef struct litem {
     const char *text;
     int len;
     int first, last;         /* LI_BOX: display-list range; LI_SIMPLE: kind, ref */
-    int h, ml, mt;           /* LI_SIMPLE: box size, left / top margin   */
+    int h, ml, mt;           /* LI_SIMPLE: box size, left / top margin + border */
     int fs;
+    const web_style_t *bst;  /* LI_SIMPLE: style whose borders are drawn round the box */
 } litem_t;
 
 typedef struct ifc {
@@ -1104,6 +1105,11 @@ static void ifc_flush(ifc_t *f, int upto) {
         if (it->kind == LI_BOX) {
             shift_items(lc, it->first, it->last, x0 + it->x, top);
         } else if (it->kind == LI_SIMPLE && !it->hidden) {
+            if (it->bst) {
+                const web_style_t *bs = it->bst;
+                borders(lc, bs, x0 + it->x + it->ml - bs->bw[3], top + it->mt - bs->bw[0],
+                        it->len + bs->bw[3] + bs->bw[1], it->h + bs->bw[0] + bs->bw[2]);
+            }
             web_item_t *wi = item_add(lc, it->first);
             if (wi) {
                 wi->x = x0 + it->x + it->ml;
@@ -1416,7 +1422,9 @@ static void add_image(ifc_t *f, web_node_t *c) {
     bm_t b;
     box_metrics(st, f->cw, &b);
     int kind = (failed && alt && *alt) ? WI_IMGALT : WI_IMAGE;
-    push_simple(f, kind, c->img, w, h, b.ml, b.mr, b.mt, b.mb, -1, st, kind == WI_IMGALT ? alt : NULL, sfont(lc, st));
+    push_simple(f, kind, c->img, w, h, b.ml + b.bl, b.mr + b.br, b.mt + b.bt, b.mb + b.bb, -1, st,
+                kind == WI_IMGALT ? alt : NULL, sfont(lc, st));
+    if (f->n && (b.bl || b.br || b.bt || b.bb)) f->it[f->n - 1].bst = st;
 }
 
 static void add_ctrl(ifc_t *f, web_node_t *c) {

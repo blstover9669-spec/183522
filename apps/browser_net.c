@@ -618,6 +618,7 @@ static void decode_one(tab_t *t) {
         if (ms > 100) klog("browser: decoding %s took %u ms", im->url, (unsigned)ms);
         t->need_layout = true;
         t->layout_at = sys_uptime_ms() + 120;
+        browser_tab_changed(t);
         return;
     }
 }
