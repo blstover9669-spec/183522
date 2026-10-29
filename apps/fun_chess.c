@@ -2083,7 +2083,7 @@ static void ch_launch(const char *arg) {
     if (arg && *arg == '/') {
         uint32_t size = 0;
         fen = vfs_read_file(arg, &size);
-        if (!fen) ui_notify("Chess", "Could not read the position file");
+        if (!fen) notify("Chess", "Could not read the position file", ICON_ERROR);
     } else if (arg && *arg) {
         const char *fp = strstr(arg, "fen:");
         int n = fp ? (int)(fp - arg) : (int)strlen(arg);

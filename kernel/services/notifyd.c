@@ -202,14 +202,19 @@ int notify(const char *title, const char *body, int icon_kind) {
     history[hist_n % HISTORY] = n;
     hist_n++;
     log_info("notifyd", "%s%s%s", n.title, n.body[0] ? ": " : "", n.body);
-    if (!running || !screen_width()) return 0;
+    /* every error plays the alert sound (instead of the notification click) */
+    if (!running || !screen_width()) {
+        if (n.icon == ICON_ERROR) sys_alert_sound();
+        return 0;
+    }
     if (screensaver_active()) {
         if (npending == MAX_VISIBLE) { memmove(pending, pending + 1, sizeof pending[0] * (MAX_VISIBLE - 1)); npending--; }
         pending[npending++] = n;
         return n.id;
     }
     show_toast(&n);
-    sys_beep(1175, 30);
+    if (n.icon == ICON_ERROR) sys_alert_sound();
+    else sys_beep(1175, 30);
     return n.id;
 }
 
@@ -237,9 +242,14 @@ static void notifyd_stop(void) {
 
 static void notifyd_tick(void) {
     if (npending && !screensaver_active()) {
-        for (int i = 0; i < npending; i++) show_toast(&pending[i]);
+        bool error = false;
+        for (int i = 0; i < npending; i++) {
+            show_toast(&pending[i]);
+            if (pending[i].icon == ICON_ERROR) error = true;
+        }
         npending = 0;
-        sys_beep(1175, 30);
+        if (error) sys_alert_sound();
+        else sys_beep(1175, 30);
     }
 }
 

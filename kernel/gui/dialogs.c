@@ -1,6 +1,29 @@
 /* dialogs.c - asynchronous message boxes, input boxes, file dialogs and toast notifications. */
 #include "wm_internal.h"
 
+/* ---- the error sound ------------------------------------------------------------------ */
+/* Every error the system shows plays this: message boxes with MB_ICON_ERROR (or a
+   warning with only an OK button - a report that something failed, not a question),
+   notifications with ICON_ERROR, and the toolkit's own error messages. Two falling
+   tones on the beep channel (sound card, else PC speaker); the taskbar mute switch
+   silences it like every other sound. One error often shows twice (a message and a
+   notification): calls less than 300 ms apart play it once. */
+void sys_alert_sound(void) {
+    static uint32_t last;
+    static bool played;
+    uint32_t now = sys_uptime_ms();
+    if (played && now - last < 300) return;
+    played = true;
+    last = now;
+    static const note_t alert[] = { { 988, 90 }, { 0, 30 }, { 659, 170 } };
+    sys_play_notes(alert, ARRAY_SIZE(alert));
+    klog("ui: alert sound");
+}
+
+static bool msgbox_is_error(int type) {
+    return (type & 0xF0) == MB_ICON_ERROR || ((type & 0xF0) == MB_ICON_WARNING && (type & 0x0F) == MB_OK);
+}
+
 /* ---- message box ----------------------------------------------------------------- */
 typedef struct {
     ui_msgbox_cb cb;
@@ -115,7 +138,8 @@ window_t *ui_message_box(window_t *owner, const char *title, const char *text, i
         ui_set_tag(b, results[kind][i]);
         if (i == 0) { ui_button_set_default(b, true); ui_focus(b); }
     }
-    if (kind == 0 || (type & 0xF0) == MB_ICON_ERROR) sys_beep(880, 60);
+    if (msgbox_is_error(type)) sys_alert_sound();
+    else if (kind == 0) sys_beep(880, 60);
     win_show(w);
     return w;
 }
@@ -234,7 +258,11 @@ static void fd_accept(window_t *win, filedlg_t *d) {
     }
     const char *name = ui_get_text(d->name);
     if (!*name) return;
-    if (vfs_normalize(d->dir, name, path) != 0) return;
+    if (vfs_normalize(d->dir, name, path) != 0) {
+        ui_message_box(win, d->mode == UI_FILE_SAVE ? "Save" : "Open", "That is not a valid file name.",
+                       MB_OK | MB_ICON_ERROR, NULL, NULL);
+        return;
+    }
     if (vfs_is_dir(path)) {
         strlcpy(d->dir, path, sizeof d->dir);
         ui_set_text(d->name, "");
@@ -242,7 +270,7 @@ static void fd_accept(window_t *win, filedlg_t *d) {
         return;
     }
     if (d->mode == UI_FILE_OPEN && !vfs_exists(path)) {
-        ui_message_box(win, "Open", "That file does not exist.", MB_OK | MB_ICON_WARNING, NULL, NULL);
+        ui_message_box(win, "Open", "That file does not exist.", MB_OK | MB_ICON_ERROR, NULL, NULL);
         return;
     }
     fd_finish(win, path);
@@ -290,7 +318,12 @@ static void fd_newfolder_cb(const char *name, void *ctx) {
     if (!name || !*name) return;
     char p[VFS_PATH_MAX];
     vfs_join(d->dir, name, p);
-    vfs_mkdir(p);
+    int r = strchr(name, '/') ? VFS_EINVAL : vfs_mkdir(p);
+    if (r < 0) {
+        char msg[VFS_PATH_MAX + 64];
+        snprintf(msg, sizeof msg, "Could not create the folder \"%s\":\n%s.", name, vfs_strerror(r));
+        ui_message_box(ui_window(d->list), "New folder", msg, MB_OK | MB_ICON_ERROR, NULL, NULL);
+    }
     fd_refresh(d);
 }
 
