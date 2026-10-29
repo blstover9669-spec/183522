@@ -202,6 +202,39 @@ after the step: `--peaks 1.05 1.45` shows 261.6, 329.6 and 392 Hz at equal
 level), or hold the mouse on a key with `monitor:mouse_button 1` while
 `monitor:sendkey g 1200` plays another, then `monitor:mouse_button 0`.
 
+### Network (e1000, DHCP, DNS, HTTP, HTTPS)
+
+shot.py's QEMU has no network card unless you add one: `--extra -nic
+user,model=e1000` gives NovaOS the same Intel PRO/1000 that VirtualBox uses,
+behind QEMU's NAT (DHCP 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3). The host
+machine is reachable from the guest at **10.0.2.2** (QEMU forwards it to the
+host's 127.0.0.1), so a server started on the host can be fetched from
+NovaOS. The network commands (`net`, `dhcp`, `ping`, `nslookup`, `fetch`,
+`cookies` - docs/API.md section 23) log their results as `[net] ...` lines:
+
+```sh
+python3 -m http.server 8080 &                    # any directory
+openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 30 -subj /CN=10.0.2.2
+openssl s_server -accept 8443 -cert c.pem -key k.pem -www -quiet &    # add -tls1_2, -groups P-256 ...
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots-net ready \
+    "serial:DHCP: address" "type:fetch http://10.0.2.2:8080/\n" "serial:fetch: " \
+    "type:fetch -k https://10.0.2.2:8443/\n" "serial:TLS 10.0.2.2" wait:1 shot:net \
+    --extra -nic user,model=e1000
+grep '\[net\]' shots-net/serial.log
+```
+
+Markers: `[net] link up`, `[net] DHCP: address 10.0.2.15/24, gateway ...`,
+`[net] http: GET URL -> 200 OK, N bytes`, `[net] fetch: ... body sha256 HEX`
+(compare with `sha256sum` on the host), `[net] TLS HOST: TLS 1.3,
+AES_128_GCM_SHA256, X25519, certificate verified|NOT trusted`. A self-signed
+test certificate is refused (`fetch` without `-k` logs "The certificate is
+self-signed, so it is not trusted"), which is the expected result. Networks
+that intercept TLS make real sites fail the certificate check the same way;
+`fetch -k https://example.com/` still shows that the TLS connection itself
+works. `selftest=1` runs the cryptography and certificate self tests
+(`SELFTEST: crypto ...`, `SELFTEST: x509 chain verification`, `SELFTEST: tls
+root certificates`).
+
 ### Finding coordinates
 
 * Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about
