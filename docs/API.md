@@ -30,6 +30,7 @@ available after
 * [20. Opening files, file types, pins, recent items](#20-opening-files-file-types-pins-recent-items)
 * [21. System icons](#21-system-icons)
 * [22. Sound](#22-sound)
+* [23. Networking (HTTP, HTTPS, cookies, URLs)](#23-networking-http-https-cookies-urls)
 
 ---
 
@@ -730,7 +731,8 @@ a window timer. Disk layout: `kernel/disk/diskfmt.h`.
 In use by the kernel: IRQ0 (PIT), IRQ1 + IRQ12 (i8042 keyboard/mouse), COM1
 polled (no IRQ), IDE polled with device interrupts off (no IRQ), AC'97
 polled from the PIT tick (no IRQ), Sound Blaster 16 (only when it is the
-sound output: its IRQ, usually 5, and 16-bit ISA DMA channel, usually 5).
+sound output: its IRQ, usually 5, and 16-bit ISA DMA channel, usually 5),
+the e1000 network card polled from a 1 ms main-loop timer (no IRQ).
 Free: IRQ 3, 4, 5 (without SB16), 7, 9, 10, 11, 14, 15.
 Paging is off: physical addresses (MMIO BARs, ACPI tables) are directly
 accessible. The heap occupies the largest RAM region above the kernel; there
@@ -776,7 +778,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `wallpaper=N` | start with built-in wallpaper N |
 | `mousespeed=N` | mouse speed 1..10 |
 | `startmenu` | open the Start menu after boot |
-| `selftest=1` | run kernel self tests (libc, heap, VFS, time) and log `SELFTEST:` lines |
+| `selftest=1` | run kernel self tests (libc, heap, VFS, time, cryptography test vectors, certificate checks) and log `SELFTEST:` lines |
 | `crashtest=1` | trigger a divide error 1.5 s after boot (tests the panic screen) |
 | `fputest=1` | raise an x87 floating-point error 2 s after boot (tests that it is not fatal: `fpu: warning: ...` in the log) |
 | `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
@@ -1106,3 +1108,153 @@ file: `tools/shot.py ... --extra -audiodev wav,id=snd0,path=out.wav -device
 AC97,audiodev=snd0` (or `-device sb16,audiodev=snd0`; the PC speaker:
 `-machine pcspk-audiodev=snd0`). `tools/wavcheck.py out.wav` lists the
 notes it hears (start, length, frequency); see docs/TESTING.md.
+
+---
+
+## 23. Networking (HTTP, HTTPS, cookies, URLs)
+
+`#include <nova/net.h>` (not included by `nova.h`; the header documents every
+call). NovaOS has its own network stack, written for NovaOS like everything
+else: an Intel PRO/1000 (e1000) driver - VirtualBox's default *Intel PRO/1000
+MT Desktop* adapter and QEMU's `-nic user,model=e1000` - Ethernet, ARP, IPv4,
+ICMP, UDP, DHCP, DNS, TCP, TLS 1.2 / 1.3 and an HTTP/1.1 client. The card is
+found at boot and configured by DHCP; on VirtualBox NAT and QEMU user
+networking that is 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3.
+
+**Everything is asynchronous.** The stack runs in small slices from a 1 ms
+main-loop timer; `http_fetch` returns at once and your callback is called
+later from the main loop, exactly once (never from inside `http_fetch`).
+Never wait in a loop for a request - that freezes the OS and the request
+itself.
+
+**Network status.** `net_is_up()` (card found, cable connected, DHCP done),
+`net_status_text()` ("No network adapter", "Network cable unplugged",
+"Connecting...", "Connected (10.0.2.15)"), `net_get_info(&info)` (adapter
+name, MAC, link, IP / netmask / gateway / DNS in host byte order, lease,
+packet and byte counters), `net_generation()` (bumps on every link / DHCP
+change - poll it to refresh a UI), `net_ip_to_str(ip, buf16)`.
+
+**HTTP and HTTPS.**
+
+```c
+static void done(http_request_t *r, void *ctx) {
+    if (http_error(r) == HTTP_OK)                       /* a response arrived: any status */
+        klog("%d %s: %u bytes", http_status(r), http_url(r), http_body_len(r));
+    else
+        klog("failed: %s", http_error_text(r));         /* e.g. "Could not find the site x.org" */
+    http_free(r);                                       /* allowed inside the callback */
+}
+http_fetch("GET", "https://example.com/", NULL, 0, NULL, done, NULL);
+
+/* POST a form, with options */
+http_options_t o = { .body = "q=nova", .body_len = 6,
+                     .content_type = "application/x-www-form-urlencoded",
+                     .timeout_ms = 20000, .on_progress = progress };
+http_fetch_ex("https://example.com/search", &o, done, ctx);
+```
+
+* URLs: `http://` and `https://` (ports 80 / 443 unless given; no scheme =
+  `http://`), IPv4 only. Requests send `Host`, a NovaOS `User-Agent`,
+  `Accept`, `Accept-Language`, `Accept-Encoding: gzip, deflate`,
+  `Connection: close` and cookies; `opt.headers` adds or overrides headers
+  (`"Name: value\r\n"` lines).
+* Responses: redirects 301 / 302 / 303 / 307 / 308 are followed (10 at most;
+  a 303, or a 301 / 302 after a POST, becomes a GET); chunked transfer
+  encoding is decoded and gzip / deflate bodies are decompressed, so
+  `http_body()` is always the plain content (NUL-terminated, `http_body_len()`
+  bytes; `http_take_body()` hands the buffer over to you). 1xx interim
+  responses are skipped.
+* Results: `http_done`, `http_error` (`HTTP_OK`, `HTTP_PENDING` or an
+  `HTTP_ERR_*` code), `http_error_text` (a sentence for the user),
+  `http_strerror(code)`, `http_status`, `http_reason`, `http_url` (final URL),
+  `http_redirect_count`, `http_header(r, name)` / `http_header_count` /
+  `http_header_at`, `http_progress(r, &received, &total)` (bytes on the wire;
+  total 0 = unknown).
+* Errors map onto browser error pages: `HTTP_ERR_NO_NETWORK` (no internet),
+  `HTTP_ERR_DNS` (site not found), `HTTP_ERR_CONNECT` (refused / reset /
+  unreachable), `HTTP_ERR_TIMEOUT` (no progress for `timeout_ms`, default
+  30 s), `HTTP_ERR_TLS` / `HTTP_ERR_CERT` (secure connection failed / bad
+  certificate), `HTTP_ERR_PROTOCOL`, `HTTP_ERR_REDIRECTS`, `HTTP_ERR_BAD_URL`,
+  `HTTP_ERR_TOO_LARGE` (over `max_body`, default 64 MB), `HTTP_ERR_NO_MEMORY`,
+  `HTTP_ERR_CANCELLED`.
+* `opt.flags`: `HTTP_F_ALLOW_BAD_CERT` (continue when the certificate check
+  fails - for a "continue anyway" button; `http_cert_ok()` stays false),
+  `HTTP_F_NO_REDIRECT`, `HTTP_F_NO_COOKIES`, `HTTP_F_NO_DECODE` (keep gzip /
+  deflate bodies compressed). `opt.on_progress(r, ctx)` is called when the
+  headers arrive and as body bytes arrive.
+* `http_cancel(r)` stops a request (no callback); `http_free(r)` cancels and
+  frees (safe in callbacks). Up to 8 requests run at once, more are queued
+  in order.
+
+**HTTPS (TLS).** TLS 1.3 and TLS 1.2 with AES-128-GCM, AES-256-GCM and
+ChaCha20-Poly1305; key exchange X25519 (offered first), P-256 or P-384;
+server signatures RSA PKCS #1 v1.5 / PSS and ECDSA P-256 / P-384 with
+SHA-256/384/512; SNI, ALPN `http/1.1`, extended master secret and downgrade
+protection. The server's certificate chain is checked against 117 built-in
+root certificates (the Mozilla CA list, `kernel/net/roots.c`, generated by
+`tools/genroots.py`), its validity dates against the clock, CA constraints,
+and its names (subjectAltName, one-label `*.` wildcards) against the host.
+SHA-1 signed certificates are refused. There is no session resumption,
+renegotiation or client certificate (an empty one is sent when a server
+asks), and no revocation checking.
+
+* Padlock information: `http_is_https(r)`, `http_cert_ok(r)` (verified),
+  `http_cert_error(r)` (why not, e.g. "The certificate has expired", "The
+  certificate belongs to example.org, not www.example.com", "The certificate
+  is self-signed, so it is not trusted", "The certificate was issued by an
+  unknown authority (...)"), `http_cert_subject(r)` (the site name in the
+  certificate), `http_cert_issuer(r)` (e.g. "Let's Encrypt"),
+  `http_tls_info(r)` (e.g. "TLS 1.3, AES_128_GCM_SHA256, X25519").
+* The handshake's expensive steps (key generation, ECDH, each signature
+  check) run one per network tick, so the desktop keeps running while a
+  connection is set up.
+* This is a hobby TLS implementation that nobody has audited: it is fine for
+  reading the web, but don't type real passwords or bank details into
+  NovaOS. A network that intercepts TLS (a company proxy, some sandboxes)
+  makes every certificate fail the check, as it should.
+
+**Cookies** (RFC 6265) are kept per site (host-only and `Domain=` cookies,
+`Path`, `Secure`, `Expires` / `Max-Age`, at most 400 days), sent back with
+every `http_fetch` to a matching URL and stored from every `Set-Cookie`
+(unless `HTTP_F_NO_COOKIES`). Cookies with an expiry date are saved to
+`/home/user/.cookies` (a tab-separated text file, written 2 s after a change
+and at shut down) and so survive restarts on an installed system; session
+cookies live until shut down. `cookies_count()`, `cookies_clear()` (memory
+and file - the browser's *Clear cookies* button).
+
+**URL helpers.** `url_parse(s, &u)` splits an absolute URL into `url_t`
+`{scheme, host (lower case), port, path ("/" at least, with "?query", without
+"#fragment")}` - "example.com/x" is taken as http; false for other schemes.
+`url_resolve(base, ref, out, size)` resolves a link against the page's URL
+(RFC 3986: absolute, `//host/x`, `/x`, `x`, `../x`, `?q`, `#f`); it passes the
+RFC 3986 section 5.4 examples.
+
+**Decompression.** `inflate_buffer(in, len, INFLATE_RAW | INFLATE_ZLIB |
+INFLATE_GZIP | INFLATE_AUTO, &out, &out_len, max_out)` decodes DEFLATE, zlib
+(PNG image data) and gzip into a `malloc`'d, NUL-terminated buffer; 0, or -1
+corrupt, -2 larger than `max_out` (0 = 64 MB), -3 out of memory. It runs
+synchronously: keep inputs to a few MB per callback.
+
+**Terminal commands** (results of the asynchronous ones go to the system log:
+`logs net`, and to serial as `[net] ...`):
+
+| Command | |
+|---|---|
+| `net` | adapter, MAC, link, address, gateway, DNS, lease, packet counters, TCP connections |
+| `dhcp [renew]` | the DHCP lease, or ask for an address again |
+| `ping HOST [COUNT]` | ICMP echo requests |
+| `nslookup HOST` | DNS lookup |
+| `fetch [-k] [-v] [-n] [-d FORMDATA] URL [FILE]` | HTTP / HTTPS request: status, size, time, redirects, body SHA-256, TLS version / suite / certificate; `-k` accepts a bad certificate, `-v` logs the headers, `-n` does not follow redirects, `-d` POSTs a form, `FILE` saves the body |
+| `cookies [clear]` | count or delete cookies |
+
+**Inside the kernel.** `kernel/drivers/e1000.c` (card) -> `kernel/net/`
+`netcore.c` (Ethernet, ARP, IPv4, ICMP, UDP, the tick), `dhcp.c`, `dns.c`
+(cache honouring TTLs), `tcp.c` (client connections: 64 KiB receive window,
+retransmission with backoff), `tls.c` + `x509.c` + `roots.c`, `http.c`,
+`cookies.c`, `url.c`, `inflate.c`; `net_internal.h` has the internal
+interfaces. `kernel/crypto/` holds SHA-1/2, HMAC / HKDF / the TLS PRF,
+AES-GCM, ChaCha20-Poly1305, X25519, P-256 / P-384, RSA and the random number
+generator (RDSEED / RDRAND when present, plus TSC jitter and packet timing,
+hashed with SHA-256). `selftest=1` checks all of it against published test
+vectors (FIPS 180-4, RFC 4231, RFC 5869, FIPS 197, the GCM test cases, RFC
+8439, RFC 7748), a test certificate chain and the built-in roots.
