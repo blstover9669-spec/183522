@@ -390,8 +390,13 @@ static void eth_input(const uint8_t *f, uint32_t len) {
 /* ---- the tick ---------------------------------------------------------------------------------- */
 static void net_tick(void *ctx) {
     (void)ctx;
-    if (!ndev || in_tick) return;
+    if (in_tick) return;
     in_tick = true;
+    if (!ndev) {                     /* no card: only finish HTTP requests (with "no network") */
+        http_tick();
+        in_tick = false;
+        return;
+    }
     uint32_t now = net_now();
     if (now - last_link_check >= 500 || !last_link_check) {
         last_link_check = now ? now : 1;
@@ -415,11 +420,18 @@ static void net_tick(void *ctx) {
     in_tick = false;
 }
 
+/* The 1 ms tick runs once a card is registered, or once an HTTP request is made
+   without one (so its callback still reports HTTP_ERR_NO_NETWORK). */
+void net_start_tick(void) {
+    static int timer;
+    if (!timer) timer = timer_add(1, net_tick, NULL, true);
+}
+
 void net_register_device(netdev_t *d) {
     if (ndev) return;
     ndev = d;
     net_changed();
-    timer_add(1, net_tick, NULL, true);
+    net_start_tick();
 }
 
 /* Weak defaults so the stack links while layers are being added. */

@@ -656,6 +656,7 @@ http_request_t *http_fetch_ex(const char *url, const http_options_t *opt, http_c
         strcpy(r->errtext, "Out of memory");
         r->done_pending = true;
     }
+    net_start_tick();
     /* append (FIFO) */
     http_request_t **pp = &reqs;
     while (*pp) pp = &(*pp)->next;

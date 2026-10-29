@@ -43,6 +43,7 @@ typedef struct netdev {
 } netdev_t;
 
 void net_register_device(netdev_t *dev);
+void net_start_tick(void);      /* make sure the network tick runs (http.c) */
 
 /* ---- core (netcore.c) ------------------------------------------------------------- */
 #define ETH_MTU      1500
