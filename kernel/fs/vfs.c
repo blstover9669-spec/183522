@@ -676,7 +676,7 @@ void vfs_populate_defaults(void) {
              " * Drag windows by their title bar. Drag a window to the top edge to\n"
              "   maximize it, or to the left/right edge to snap it.\n"
              " * Alt+Tab switches windows, Alt+F4 closes the active window.\n"
-             " * PrintScreen saves a screenshot to ~/Pictures.\n\n"
+             " * PrintScreen (or Ctrl+Alt+S) saves a screenshot to ~/Pictures.\n\n"
              "Your files live in /home/user. Have fun!\n");
     put_text("/home/user/Documents/notes.txt",
              "Notes\n-----\n\n"

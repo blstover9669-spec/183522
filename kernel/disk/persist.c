@@ -276,8 +276,10 @@ static void report(int r, uint32_t len, uint32_t t0, const char *how) {
         klog("persist: save failed: %s", disk_strerror(r));
         if (!P.failed_notified) {
             P.failed_notified = true;
-            ui_notify("Files not saved", r == DISK_ENOSPC ? "The file storage on the disk is full."
-                                                          : "Could not write your files to the disk.");
+            /* an error: ICON_ERROR also plays the alert sound */
+            notify("Files not saved",
+                   r == DISK_ENOSPC ? "The file storage on the disk is full." : "Could not write your files to the disk.",
+                   ICON_ERROR);
         }
     }
 }
