@@ -5,9 +5,9 @@
 #include <nova.h>
 #include <nova/hw.h>
 
-#define NOVA_VERSION        "1.5"
+#define NOVA_VERSION        "2.5"
 #define NOVA_EDITION        "Developer Preview"
-#define NOVA_KERNEL_VERSION "1.5.0"
+#define NOVA_KERNEL_VERSION "2.5.0"
 
 /* ---- multiboot ------------------------------------------------------------ */
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002

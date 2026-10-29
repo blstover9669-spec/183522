@@ -136,12 +136,12 @@ $(ISO): $(KERNEL) $(BUILD)/cfgstamp-$(shell echo '$(CMDLINE)|$(GRUB_TIMEOUT)' | 
 	  'done' \
 	  'if [ -n "$$novadisk" ]; then set default=novadisk; fi' \
 	  '' \
-	  'menuentry "NovaOS 1.5 Developer Preview" {' \
+	  'menuentry "NovaOS 2.5 Developer Preview" {' \
 	  '  multiboot /boot/kernel.elf $(CMDLINE)' \
 	  '  set gfxpayload=1024x768x32,1024x768x24,800x600x32,800x600x24,auto' \
 	  '  boot' \
 	  '}' \
-	  'menuentry "NovaOS 1.5 Developer Preview (safe graphics 800x600)" {' \
+	  'menuentry "NovaOS 2.5 Developer Preview (safe graphics 800x600)" {' \
 	  '  multiboot /boot/kernel.elf res=800x600 $(CMDLINE)' \
 	  '  set gfxpayload=800x600x32,800x600x24,800x600,auto' \
 	  '  boot' \
