@@ -1,23 +1,27 @@
-/* text.c - anti-aliased bitmap text rendering and measurement. */
+/* text.c - anti-aliased bitmap text rendering and measurement. Every call draws and
+   measures with font_active(f): the font loaded from the drive when there is one. */
 #include "kernel.h"
 #include "font_internal.h"
 
-int font_height(const font_t *f) { return f->height; }
-int font_ascent(const font_t *f) { return f->ascent; }
-bool font_is_mono(const font_t *f) { return f->mono != 0; }
+int font_height(const font_t *f) { return font_active(f)->height; }
+int font_ascent(const font_t *f) { return font_active(f)->ascent; }
+bool font_is_mono(const font_t *f) { return font_active(f)->mono != 0; }
 
 int font_char_width(const font_t *f, unsigned char c) {
+    f = font_active(f);
     if (f->mono) return f->mono;
     return font_glyph(f, c)->adv;
 }
 
 int font_text_width_n(const font_t *f, const char *s, int n) {
+    f = font_active(f);
     int w = 0;
     for (int i = 0; i < n && s[i]; i++) w += font_char_width(f, (unsigned char)s[i]);
     return w;
 }
 
 int font_text_width(const font_t *f, const char *s) {
+    f = font_active(f);
     if (f->mono) return (int)strlen(s) * f->mono;
     int w = 0;
     for (; *s; s++) w += font_glyph(f, (unsigned char)*s)->adv;
@@ -25,6 +29,7 @@ int font_text_width(const font_t *f, const char *s) {
 }
 
 int font_hit_test(const font_t *f, const char *s, int px) {
+    f = font_active(f);
     int x = 0, i = 0;
     for (; s[i]; i++) {
         int cw = font_char_width(f, (unsigned char)s[i]);
@@ -35,6 +40,7 @@ int font_hit_test(const font_t *f, const char *s, int px) {
 }
 
 int gfx_char(surface_t *s, int x, int y, unsigned char ch, uint32_t c, const font_t *f) {
+    f = font_active(f);
     const glyph_t *g = font_glyph(f, ch);
     int adv = f->mono ? f->mono : g->adv;
     if (!g->w || !g->h || ch == ' ') return adv;
@@ -78,6 +84,7 @@ int gfx_char(surface_t *s, int x, int y, unsigned char ch, uint32_t c, const fon
 }
 
 int gfx_text_n(surface_t *s, int x, int y, const char *str, int n, uint32_t c, const font_t *f) {
+    f = font_active(f);
     int x0 = x;
     if (y >= s->clip.y + s->clip.h || y + f->height <= s->clip.y) return font_text_width_n(f, str, n);
     for (int i = 0; i < n && str[i]; i++) {
@@ -92,6 +99,7 @@ int gfx_text(surface_t *s, int x, int y, const char *str, uint32_t c, const font
 }
 
 int gfx_text_scaled(surface_t *s, int x, int y, const char *str, uint32_t c, const font_t *f, int scale) {
+    f = font_active(f);
     if (scale <= 1) return gfx_text(s, x, y, str, c, f);
     int x0 = x;
     for (; *str; str++) {
@@ -109,6 +117,7 @@ int gfx_text_scaled(surface_t *s, int x, int y, const char *str, uint32_t c, con
 }
 
 void gfx_text_aligned(surface_t *s, rect_t r, const char *str, uint32_t c, const font_t *f, int align) {
+    f = font_active(f);
     int tw = font_text_width(f, str);
     int x = r.x, y = r.y;
     if (align & ALIGN_CENTER) x = r.x + (r.w - tw) / 2;
@@ -122,6 +131,7 @@ void gfx_text_aligned(surface_t *s, rect_t r, const char *str, uint32_t c, const
 }
 
 int gfx_text_ellipsis(surface_t *s, int x, int y, int max_w, const char *str, uint32_t c, const font_t *f) {
+    f = font_active(f);
     int tw = font_text_width(f, str);
     if (tw <= max_w) return gfx_text(s, x, y, str, c, f);
     int dots = font_text_width(f, "...");
@@ -164,6 +174,7 @@ static int wrap_text(const font_t *f, const char *str, int width, line_fn fn, vo
 }
 
 int font_wrap_height(const font_t *f, const char *s, int w) {
+    f = font_active(f);
     return wrap_text(f, s, w, NULL, NULL) * f->height;
 }
 
@@ -175,6 +186,7 @@ static void draw_line(const char *line, int len, int idx, void *ctx) {
 }
 
 int gfx_text_wrapped(surface_t *s, rect_t r, const char *str, uint32_t c, const font_t *f) {
+    f = font_active(f);
     wrap_ctx_t ctx = { s, r, c, f };
     rect_t old = s->clip;
     surface_set_clip(s, rect_intersect(old, r));

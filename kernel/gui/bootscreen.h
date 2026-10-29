@@ -8,12 +8,13 @@
  *                system files in /system are gone)
  *   sysfiles.c   the system files in /system (kernel, boot files, UI files):
  *                seeding from the built-in copies, the list of required files
+ *                (kernel/fs/sysfiles.c)
  *   uifiles.c    loading the UI (fonts, wallpapers, themes, UI settings)
  *                from /system/ui at startup
  *
  * Boot order (kernel/core/kmain.c): splash background -> devices -> files
- * (installed drive: the saved files are restored) -> drive check -> INIT_FS
- * hooks -> splash animation -> [ISO: NovaOS Drive installation] ->
+ * (installed drive: the saved files are restored; ISO: the system files are
+ * written) -> drive check -> UI files loaded -> INIT_FS hooks -> splash animation -> [ISO: NovaOS Drive installation] ->
  * [installed: loading bar] apps, desktop -> desktop (-> ISO: save file screen).
  */
 #ifndef BOOTSCREEN_H
@@ -65,16 +66,27 @@ void nodrive_show(const char *why) NORETURN;
 /* Liberation Sans 30 px, ASCII (nodrive_font.c, tools/genfont.py --nodrive). */
 extern const font_t font_nodrive;
 
-/* ---- sysfiles.c ---------------------------------------------------------------------- */
+/* ---- sysfiles.c (kernel/fs) ------------------------------------------------------------- */
 /* Write the system files into /system from the built-in copies (ISO boot / first boot). */
 void sysfiles_seed(void);
-/* Bring the files that describe the running system up to date (if they exist). */
+/* Bring the files that describe the running system (boot.cfg) up to date. */
 void sysfiles_refresh(void);
-/* NULL if the drive is complete, else the first missing path. */
+/* NULL if the drive has all system files, else the first missing path. */
 const char *sysfiles_missing(void);
 
-/* ---- uifiles.c ----------------------------------------------------------------------- */
+/* ---- uifiles.c ---------------------------------------------------------------------------- */
+/* Write /system/ui (fonts, themes, wallpapers, UI settings) from the built-in copies. */
+void uifiles_seed(void);
 /* Load fonts, wallpapers, themes and UI settings from /system/ui. */
 void uifiles_load(void);
+/* The UI files the drive must have: uifiles_path(0 .. uifiles_count()-1, out). */
+int  uifiles_count(void);
+void uifiles_path(int i, char *out);
+/* theme.c: draw wallpaper `index` from its loaded recipe (false: none loaded) and
+   put the loaded theme's colours over the built-in ones. */
+bool uifiles_render_wallpaper(surface_t *s, int index);
+void uifiles_theme_override(theme_t *t);
+/* theme.c: the built-in colours of light / dark mode (the seed of the theme files). */
+void theme_builtin_colors(bool dark, theme_t *out);
 
 #endif

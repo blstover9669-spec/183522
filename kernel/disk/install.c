@@ -57,6 +57,21 @@ int install_size_default(int disk) {
 static uint32_t kernel_bytes(void) { return (uint32_t)(__data_end - __kernel_start); }
 static uint32_t stage2_bytes(void) { return (uint32_t)(bootblob_stage2_end - bootblob_stage2); }
 
+/* The kernel exactly as it is installed: [__kernel_start, __data_end) with the pristine .data. */
+static void copy_kernel_image(uint8_t *dst) {
+    uint32_t kb = kernel_bytes(), ro = (uint32_t)(__data_start - __kernel_start);
+    memcpy(dst, __kernel_start, ro);
+    memcpy(dst + ro, __data_snapshot, kb - ro);
+}
+
+uint8_t *install_kernel_image(uint32_t *len) {
+    uint8_t *k = kmalloc(kernel_bytes());
+    if (!k) return NULL;
+    copy_kernel_image(k);
+    *len = kernel_bytes();
+    return k;
+}
+
 uint32_t install_system_bytes(void) { return 1024 + ((stage2_bytes() + 511) & ~511u) + ((kernel_bytes() + 511) & ~511u); }
 
 typedef struct layout {
@@ -179,9 +194,7 @@ install_job_t *install_begin_sized(int disk, uint64_t size_bytes, bool copy_file
     uint32_t kb = kernel_bytes(), ksz = j->l.kernel_sectors * 512;
     j->kernel = kcalloc(1, ksz);
     if (!j->kernel) goto nomem;
-    uint32_t ro = (uint32_t)(__data_start - __kernel_start);
-    memcpy(j->kernel, __kernel_start, ro);
-    memcpy(j->kernel + ro, __data_snapshot, kb - ro);
+    copy_kernel_image(j->kernel);
 
     j->stage2_sectors = (stage2_bytes() + 511) / 512;
     if (j->stage2_sectors == 0 || j->stage2_sectors > DISK_STAGE2_MAX) {

@@ -1,5 +1,8 @@
-/* theme.c - global theme (colours, dark mode, accent) and procedural wallpapers. */
+/* theme.c - global theme (colours, dark mode, accent) and procedural wallpapers.
+   The colours and wallpapers below are the built-in copies: once NovaOS has loaded
+   /system/ui (kernel/gui/uifiles.c) the theme files and wallpaper recipes there are used. */
 #include "wm_internal.h"
+#include "bootscreen.h"
 
 static theme_t theme;
 surface_t *g_wallpaper;
@@ -22,8 +25,7 @@ int theme_accent_count(void) { return ARRAY_SIZE(accents); }
 uint32_t theme_accent_preset(int i) { return (i >= 0 && i < ARRAY_SIZE(accents)) ? accents[i].color : accents[0].color; }
 const char *theme_accent_name(int i) { return (i >= 0 && i < ARRAY_SIZE(accents)) ? accents[i].name : "?"; }
 
-static void derive(void) {
-    theme_t *t = &theme;
+static void derive_colors(theme_t *t) {
     uint32_t a = t->accent | 0xFF000000u;
     t->accent_hover = color_shade(a, t->dark ? 30 : -25);
     t->accent_text = color_luma(a) > 170 ? RGB(20, 20, 24) : COLOR_WHITE;
@@ -88,6 +90,18 @@ static void derive(void) {
         t->scrollbar_thumb = RGB(184, 190, 202);
     }
     t->desktop_text = COLOR_WHITE;
+}
+
+/* built-in colours, then the colours of the loaded theme file */
+static void derive(void) {
+    derive_colors(&theme);
+    uifiles_theme_override(&theme);
+}
+
+void theme_builtin_colors(bool dark, theme_t *out) {
+    *out = theme;
+    out->dark = dark;
+    derive_colors(out);
 }
 
 const theme_t *theme_get(void) { return &theme; }
@@ -171,6 +185,7 @@ static void ridge(surface_t *s, double base, double amp, double f1, double f2, d
 }
 
 void theme_render_wallpaper(surface_t *s, int idx) {
+    if (uifiles_render_wallpaper(s, idx)) return;      /* the recipe from /system/ui/wallpapers */
     double sc = (double)s->w / 1024.0;
     (void)sc;
     switch (idx) {

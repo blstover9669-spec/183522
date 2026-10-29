@@ -94,4 +94,10 @@ int  persist_boot_disk(void);                                       /* disk we b
 bool persist_restore(void);
 void persist_start(void);
 
+/* install.c: the kernel image as the installer writes it (kmalloc'd) - also the
+   /system/boot/kernel.bin file. The boot loader binaries (bootloader/, blobs.asm): */
+uint8_t *install_kernel_image(uint32_t *len);
+extern const uint8_t bootblob_mbr[], bootblob_mbr_end[];
+extern const uint8_t bootblob_stage2[], bootblob_stage2_end[];
+
 #endif

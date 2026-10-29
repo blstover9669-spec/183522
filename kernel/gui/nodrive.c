@@ -3,10 +3,11 @@
  *
  * The drive is the top folder that holds System, home and the rest (the root
  * of the file system). When it is gone - deleted by a virus, rm -r / ... - or
- * the system folder is missing, NovaOS shows a black screen with the Nova icon
- * in the middle and "No drive found" under it (Liberation Sans, rendered at
- * build time by tools/genfont.py --nodrive into nodrive_font.c) and stays
- * there; only resetting the computer gets out of it.
+ * the system folder or one of the system files in it (kernel/fs/sysfiles.c) is
+ * missing, NovaOS shows a black screen with the Nova icon in the middle and
+ * "No drive found" under it (Liberation Sans, rendered at build time by
+ * tools/genfont.py --nodrive into nodrive_font.c) and stays there; only
+ * resetting the computer gets out of it.
  *
  * It is checked at startup (after the saved files of an installed drive are
  * restored, before anything else uses them) and, while NovaOS runs, every time
@@ -29,7 +30,7 @@ static uint32_t watched_gen;
 static const char *drive_missing(void) {
     if (!vfs_is_dir("/system")) return "/system";
     if (!vfs_is_dir("/home")) return "/home";
-    return NULL;
+    return sysfiles_missing();
 }
 
 void nodrive_show(const char *why) {

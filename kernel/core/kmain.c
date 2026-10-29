@@ -96,12 +96,17 @@ void kmain(uint32_t magic, uint32_t mbi) {
     run_initcalls(INIT_DRIVER);
 
     /* Files before the animation: on an installed drive the saved files (and with
-       them /system/config/splash.cfg) replace the defaults first. Then the drive
-       check: without its System / home folders it is "No drive found". */
+       them /system/config/splash.cfg) replace the defaults first; an ISO start
+       writes the system files (kernel, boot files, UI files) into /system. Then
+       the drive check: without its System / home folders or a system file it is
+       "No drive found". NovaOS then loads its UI (fonts, themes, wallpapers, UI
+       settings) from /system/ui. */
     vfs_init();
     vfs_populate_defaults();
-    persist_restore();
+    if (!persist_restore()) sysfiles_seed();
     nodrive_check_startup();
+    sysfiles_refresh();
+    uifiles_load();
     persist_start();
     run_initcalls(INIT_FS);
 
