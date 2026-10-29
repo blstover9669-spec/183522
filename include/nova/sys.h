@@ -70,6 +70,9 @@ void speaker_off(void);
 /* Play a simple melody (non-blocking). Each note: frequency (0 = rest) and duration. */
 typedef struct note { uint16_t freq, ms; } note_t;
 void sys_play_notes(const note_t *notes, int count);
+/* The error sound: a short two-tone alert (non-blocking). Error message boxes and
+   error notifications play it by themselves; call it for errors shown any other way. */
+void sys_alert_sound(void);
 bool sys_sound_enabled(void);
 void sys_set_sound_enabled(bool on);
 
