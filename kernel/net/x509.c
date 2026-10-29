@@ -397,6 +397,7 @@ static bool same_name(const uint8_t *a, uint32_t al, const uint8_t *b, uint32_t 
 /* ---- chain verification ---------------------------------------------------------------------- */
 void x509_chain_start(x509_chain_t *v, const char *host, int64_t now) {
     load_roots();
+    v->extra_root = NULL;
     strlcpy(v->host, host, sizeof v->host);
     v->now = now;
     v->cur = 0;
@@ -454,18 +455,21 @@ int x509_chain_step(x509_chain_t *v) {
         if (v->depth > X509_MAX_CHAIN + 2) return finish(v, X509_EUNTRUSTED, "The certificate chain is too long");
         const x509_t *c = &v->certs[v->cur];
         /* the certificate is itself a trusted root (same name and key) */
-        for (int i = 0; i < nroots; i++)
-            if (same_name(roots[i].subject, roots[i].subject_len, c->subject, c->subject_len) &&
-                roots[i].spki_len == c->spki_len && !memcmp(roots[i].spki, c->spki, c->spki_len))
+        int ntrust = nroots + (v->extra_root ? 1 : 0);
+        for (int i = 0; i < ntrust; i++) {
+            const x509_t *r = i < nroots ? &roots[i] : v->extra_root;
+            if (same_name(r->subject, r->subject_len, c->subject, c->subject_len) &&
+                r->spki_len == c->spki_len && !memcmp(r->spki, c->spki, c->spki_len))
                 return final_checks(v);
+        }
         /* candidates: roots first, then the other certificates the server sent */
-        int total = nroots + v->n;
+        int total = ntrust + v->n;
         while (v->cand < total) {
             int k = v->cand++;
             const x509_t *iss;
-            if (k < nroots) iss = &roots[k];
+            if (k < ntrust) iss = k < nroots ? &roots[k] : v->extra_root;
             else {
-                int idx = k - nroots;
+                int idx = k - ntrust;
                 if (idx == v->cur || v->used[idx] || idx == 0) continue;
                 iss = &v->certs[idx];
                 if (!can_sign_certs(iss, v->depth)) continue;
@@ -478,8 +482,8 @@ int x509_chain_step(x509_chain_t *v) {
             }
             bool ok = x509_check_signature(c, iss);     /* the one expensive operation of this step */
             if (!ok) return X509_PENDING;                /* try the next candidate on the next step */
-            if (k < nroots) return final_checks(v);
-            int idx = k - nroots;
+            if (k < ntrust) return final_checks(v);
+            int idx = k - ntrust;
             v->used[idx] = 1;
             v->cur = idx;
             v->cand = 0;

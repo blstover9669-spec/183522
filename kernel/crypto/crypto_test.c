@@ -214,9 +214,12 @@ static bool t_rsa(void) {
     return ok;
 }
 
+bool x509_selftest(void);          /* kernel/net/net_test.c */
+bool tls_roots_selftest(void);
+
 int crypto_selftest(void (*report)(const char *name, bool ok)) {
     int failed = 0;
-    struct { const char *name; bool ok; } r[9];
+    struct { const char *name; bool ok; } r[12];
     int k = 0;
     uint32_t t0 = g_ticks;
     r[k].name = "crypto sha2";            r[k++].ok = t_sha2();
@@ -227,6 +230,8 @@ int crypto_selftest(void (*report)(const char *name, bool ok)) {
     r[k].name = "crypto p256";            r[k++].ok = t_ec(EC_P256, P256_D, P256_PUB, P256_PEER, P256_SHARED, P256_SIG, &HASH_SHA256);
     r[k].name = "crypto p384";            r[k++].ok = t_ec(EC_P384, P384_D, P384_PUB, P384_PEER, P384_SHARED, P384_SIG, &HASH_SHA384);
     r[k].name = "crypto rsa";             r[k++].ok = t_rsa();
+    r[k].name = "x509 chain verification"; r[k++].ok = x509_selftest();
+    r[k].name = "tls root certificates";  r[k++].ok = tls_roots_selftest();
     for (int i = 0; i < k; i++) {
         report(r[i].name, r[i].ok);
         if (!r[i].ok) failed++;

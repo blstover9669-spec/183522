@@ -172,6 +172,7 @@ typedef struct x509_chain {
     x509_t   certs[X509_MAX_CHAIN];          /* as sent by the server, certs[0] = the site's */
     int      n;
     /* verifier state */
+    const x509_t *extra_root;                /* an additional trust anchor (self tests), or NULL */
     char     host[256];
     int64_t  now;
     int      cur, cand, depth, result;
