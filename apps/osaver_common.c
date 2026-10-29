@@ -251,7 +251,8 @@ void osv_wallpaper_target(int index, char *out, int cap) {
             char base[VFS_NAME_MAX], type[VFS_NAME_MAX], sq[VFS_NAME_MAX];
             osv_split_name(ents[i].name, base, sizeof base, type, sizeof type);
             squash(base, sq, sizeof sq);
-            if (!strcmp(sq, want)) {
+            size_t ql = strlen(sq);       /* "solid.wallpaper" is "Solid colour" */
+            if (!strcmp(sq, want) || (ql >= 4 && !strncmp(sq, want, ql))) {
                 vfs_join(dirs[d], ents[i].name, out);
                 free(ents);
                 return;
