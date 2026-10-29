@@ -177,13 +177,29 @@ bool osv_default_dir(const char *path) {
     return f && f->is_dir;
 }
 
+/* Files apps create the same way on every fresh system the first time they run
+   (Image Viewer's sample pictures). Matched by path, size and CRC-32, so a changed
+   file is always saved. */
+static const struct { const char *path; uint32_t size, crc; } generated[] = {
+    { "/home/user/Pictures/Plasma.bmp",     460854, 0x318d79fau },
+    { "/home/user/Pictures/Glass orbs.bmp", 614522, 0xae5bf954u },
+};
+
 bool osv_default_file(const char *path, uint32_t size) {
     const fp_t *f = fp_find(path);
-    if (!f || f->is_dir || f->size != size) return false;
+    uint32_t want = 0;
+    if (f && !f->is_dir && f->size == size) want = f->dcrc;
+    else {
+        size_t i = 0;
+        for (; i < sizeof generated / sizeof generated[0]; i++)
+            if (generated[i].size == size && !strcmp(generated[i].path, path)) break;
+        if (i == sizeof generated / sizeof generated[0]) return false;
+        want = generated[i].crc;
+    }
     uint32_t got = 0;
     void *d = vfs_read_file(path, &got);
     if (!d) return false;
-    bool same = got == size && osc_crc32(0, d, got) == f->dcrc;
+    bool same = got == size && osc_crc32(0, d, got) == want;
     free(d);
     return same;
 }

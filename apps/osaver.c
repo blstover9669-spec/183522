@@ -260,6 +260,13 @@ static void gen_scan(gen_t *g) {
     klog("osaver: saving %d files, %d folders, %u bytes of data (code up to %u bytes)%s",
          g->nf, g->ndkept, (uint32_t)g->databytes, (uint32_t)MIN(b, 0xFFFFFFFFull),
          g->placeholder ? " - nothing saved yet: placeholder" : "");
+    if (osv_test("log"))
+        for (int i = 0; i < g->nf; i++) {
+            uint32_t sz = 0;
+            void *d = vfs_read_file(g->files[i].path, &sz);
+            klog("osaver:   file %s (%u bytes, crc %08x)", g->files[i].path, g->files[i].size, d ? osc_crc32(0, d, sz) : 0);
+            free(d);
+        }
     if (b > OSAVER_MAX_CODE) { gen_fail(g, "The code would be bigger than 256 MB, so it can't be made."); return; }
 
     /* the code file: drop the old one, reserve the space in one go */
