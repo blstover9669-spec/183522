@@ -142,8 +142,14 @@ static void draw_speaker(surface_t *s, int x, int y, uint32_t c, bool on) {
     }
 }
 
+/* "Developer version 2.5" on developer editions (NOVA_EDITION "Developer Preview"), else NULL */
+static const char *developer_label(void) {
+    return strstr(NOVA_EDITION, "Developer") ? "Developer version " NOVA_VERSION : NULL;
+}
+
 static void taskbar_paint(window_t *win, const event_t *ev) {
     (void)ev;
+    const char *dev_label = developer_label();
     surface_t *s = win_surface(win);
     const theme_t *t = theme_get();
     if (tb_bg) gfx_blit(s, 0, 0, tb_bg);
@@ -200,13 +206,22 @@ static void taskbar_paint(window_t *win, const event_t *ev) {
     snprintf(tbuf, sizeof tbuf, "%02d:%02d", dt.hour, dt.minute);
     snprintf(dbuf, sizeof dbuf, "%d %.3s %d", dt.day, sys_month_name(dt.month), dt.year);
     int fh = font_height(FONT_UI);
-    gfx_text_aligned(s, rect_make(cr.x, cr.y + cr.h / 2 - fh + 1, cr.w - 8, fh), tbuf, t->taskbar_text, FONT_UI_BOLD, ALIGN_RIGHT);
-    gfx_text_aligned(s, rect_make(cr.x, cr.y + cr.h / 2 + 1, cr.w - 8, fh), dbuf, color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 60), FONT_UI, ALIGN_RIGHT);
+    /* with the developer label below them, time and date move up a little */
+    int ty = dev_label ? 1 : cr.y + cr.h / 2 - fh + 1, dy = dev_label ? 15 : cr.y + cr.h / 2 + 1;
+    gfx_text_aligned(s, rect_make(cr.x, ty, cr.w - 8, fh), tbuf, t->taskbar_text, FONT_UI_BOLD, ALIGN_RIGHT);
+    gfx_text_aligned(s, rect_make(cr.x, dy, cr.w - 8, fh), dbuf, color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 60), FONT_UI, ALIGN_RIGHT);
 
     /* show desktop sliver */
     rect_t sd = showdesk_rect();
     gfx_vline(s, sd.x, 10, wm_taskbar_h - 20, color_alpha(t->taskbar_text, 60));
     if (hover_btn == -5) gfx_fill_rect(s, sd.x + 1, 0, sd.w - 1, sd.h, t->taskbar_hover);
+
+    /* developer editions: "Developer version 2.5" at the bottom right, drawn last so
+       it is always in front (also over the clock); black, white in dark mode */
+    if (dev_label) {
+        int lw = font_text_width(FONT_UI, dev_label), lh = font_height(FONT_UI);
+        gfx_text(s, sd.x - 12 - lw, wm_taskbar_h - lh, dev_label, t->dark ? COLOR_WHITE : COLOR_BLACK, FONT_UI);
+    }
 }
 
 static int hit(int x, int y) {
