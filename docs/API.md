@@ -1244,7 +1244,7 @@ synchronously: keep inputs to a few MB per callback.
 | `dhcp [renew]` | the DHCP lease, or ask for an address again |
 | `ping HOST [COUNT]` | ICMP echo requests |
 | `nslookup HOST` | DNS lookup |
-| `fetch [-k] [-v] [-n] [-d FORMDATA] URL [FILE]` | HTTP / HTTPS request: status, size, time, redirects, body SHA-256, TLS version / suite / certificate; `-k` accepts a bad certificate, `-v` logs the headers, `-n` does not follow redirects, `-d` POSTs a form, `FILE` saves the body |
+| `fetch [-k] [-v] [-n] [-r N] [-d FORMDATA] URL [FILE]` | HTTP / HTTPS request: status, size, time, redirects, body SHA-256, TLS version / suite / certificate; `-k` accepts a bad certificate, `-v` logs the headers, `-n` does not follow redirects, `-r N` starts N copies at once, `-d` POSTs a form, `FILE` saves the body |
 | `cookies [clear]` | count or delete cookies |
 
 **Inside the kernel.** `kernel/drivers/e1000.c` (card) -> `kernel/net/`

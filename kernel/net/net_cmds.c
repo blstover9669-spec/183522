@@ -192,6 +192,7 @@ static void fetch_done(http_request_t *r, void *ctx) {
 
 static int cmd_fetch(int argc, char **argv, cmd_writer_t *out) {
     const char *url = NULL, *file = NULL;
+    int copies = 1;
     http_options_t o = { 0 };
     fetch_job_t *j = kcalloc(1, sizeof *j);
     if (!j) return 1;
@@ -199,25 +200,32 @@ static int cmd_fetch(int argc, char **argv, cmd_writer_t *out) {
         if (!strcmp(argv[i], "-k")) o.flags |= HTTP_F_ALLOW_BAD_CERT;
         else if (!strcmp(argv[i], "-v")) j->verbose = true;
         else if (!strcmp(argv[i], "-n")) o.flags |= HTTP_F_NO_REDIRECT;
+        else if (!strcmp(argv[i], "-r") && i + 1 < argc) { int v = atoi(argv[++i]); copies = CLAMP(v, 1, 32); }
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) { o.body = argv[++i]; o.body_len = (uint32_t)strlen(argv[i]);
                                                            o.content_type = "application/x-www-form-urlencoded"; }
         else if (!url) url = argv[i];
         else if (!file) file = argv[i];
     }
     if (!url) {
-        cmd_puts(out, "usage: fetch [-k] [-v] [-n] [-d FORMDATA] URL [FILE]\n"
+        cmd_puts(out, "usage: fetch [-k] [-v] [-n] [-r N] [-d FORMDATA] URL [FILE]\n"
                       "  -k accept a bad certificate, -v log the headers, -n don't follow redirects,\n"
-                      "  -d send a POST body; FILE saves the body\n");
+                      "  -r start N copies at once, -d send a POST body; FILE saves the body\n");
         kfree(j);
         return 2;
     }
     if (file) cmd_resolve_path(out, file, j->path);
     j->start = net_now();
+    for (int k = 1; k < copies; k++) {
+        fetch_job_t *c = kmalloc(sizeof *c);
+        if (!c) break;
+        *c = *j;
+        if (!http_fetch_ex(url, &o, fetch_done, c)) { kfree(c); break; }
+    }
     if (!http_fetch_ex(url, &o, fetch_done, j)) { kfree(j); cmd_puts(out, "fetch: out of memory\n"); return 1; }
-    cmd_printf(out, "Fetching %s - the result goes to the system log (logs net)\n", url);
+    cmd_printf(out, "Fetching %s%s - the result goes to the system log (logs net)\n", url, copies > 1 ? " (several times)" : "");
     return 0;
 }
-REGISTER_COMMAND("fetch", "fetch [-k] [-v] URL [FILE] - download a web page (result: logs net)", cmd_fetch);
+REGISTER_COMMAND("fetch", "fetch [-k] [-v] [-r N] URL [FILE] - download a web page (result: logs net)", cmd_fetch);
 
 /* ---- cookies ------------------------------------------------------------------------------ */
 static int cmd_cookies(int argc, char **argv, cmd_writer_t *out) {
