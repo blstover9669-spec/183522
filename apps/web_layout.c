@@ -1133,6 +1133,12 @@ static void ifc_flush(ifc_t *f, int upto) {
             i = j;
             continue;
         }
+        if (it->kind == LI_SPACE) {
+            if (it->bg && it->font && !it->hidden)
+                rect_item(lc, x0 + it->x, base - font_ascent(it->font), it->w, font_height(it->font), it->bg);
+            i++;
+            continue;
+        }
         int a = it->asc, hh = it->asc + it->desc, top;
         switch (it->valign) {
         case VA_TOP: top = f->y; break;
@@ -1573,14 +1579,20 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
         f->pend = f->pend_brk = false;
         ifc_make_room(f, lpad, &spw, &nsp, glued, st->ws != WS_NOWRAP);
         litem_t *it = ifc_push(f);
-        if (it) { it->kind = LI_SPACE; it->glued = glued; it->x = f->used + spw; it->spw = spw; it->w = lpad; f->used = it->x + lpad; }
+        if (it) {
+            it->kind = LI_SPACE; it->glued = glued; it->x = f->used + spw; it->spw = spw; it->w = lpad; f->used = it->x + lpad;
+            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden;
+        }
     }
     lc->depth++;
     inline_children(f, c);
     lc->depth--;
     if (rpad > 0) {
         litem_t *it = ifc_push(f);
-        if (it) { it->kind = LI_SPACE; it->glued = true; it->x = f->used; it->w = rpad; f->used += rpad; }
+        if (it) {
+            it->kind = LI_SPACE; it->glued = true; it->x = f->used; it->w = rpad; f->used += rpad;
+            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden;
+        }
     }
     lc->link = saved_link;
     lc->ibg = saved_bg;
@@ -2054,7 +2066,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     if (n->id) anchor_add(lc, n->id, y);
     if (st->display == D_LIST_ITEM) {
         if (lc->mk.on) emit_marker(lc, cy + font_ascent(lc->mk.font));
-        lc->mk.on = true;
+        lc->mk.on = !st->visibility_hidden;
         lc->mk.type = st->list;
         lc->mk.num = listnum;
         lc->mk.font = sfont(lc, st);

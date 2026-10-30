@@ -2007,21 +2007,15 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         if (inherit) st->bw[i] = ps->bw[i];
         else if (initial) st->bw[i] = 0;
         else st->bw[i] = (int16_t)bwidth(cx, st, ps, v);
-        /* width counts only when a style is set: kept in the sign bit until the end */
         break;
     }
     case P_BTS: case P_BRS: case P_BBS: case P_BLS: {
+        /* a border width only counts when the side has a style: remembered in
+           the top bits of `spacing` until the style is complete */
         int i = p - P_BTS;
-        uint32_t bit = 1u << i;
-        /* deco_color's top byte is free: store "border style present" bits in bc alpha? use a side mask */
-        if (v->t == CV_KW) {
-            if (v->kw == K_NONE || v->kw == K_HIDDEN) st->bc[i] &= ~0x01000000u, st->bw[i] = st->bw[i];
-            (void)bit;
-            if (v->kw == K_NONE || v->kw == K_HIDDEN) n->mgen |= 0;   /* no-op */
-        }
-        /* remember style: high bit of the border width */
         if (v->t == CV_KW && v->kw != K_NONE && v->kw != K_HIDDEN) st->spacing |= (int16_t)(0x1000 << i);
         else if (v->t == CV_KW || initial) st->spacing &= (int16_t)~(0x1000 << i);
+        else if (inherit) st->spacing = (int16_t)((st->spacing & ~(0x1000 << i)) | (ps->spacing & (0x1000 << i)));
         break;
     }
     case P_BTC: case P_BRC: case P_BBC: case P_BLC: {
