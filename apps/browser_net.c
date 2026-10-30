@@ -695,7 +695,8 @@ static void show_html(tab_t *t, const char *url, char *body, uint32_t len, const
     t->src = body;          /* kept for "View page source" */
     t->srclen = len;
     int cs = internal ? WEB_CS_1252 : web_detect_charset(body, len, ctype);
-    t->pg.doc = web_parse_html(body, len, cs);
+    /* a gigantic document would take far too long to lay out: show its start */
+    t->pg.doc = web_parse_html(body, len > (8u << 20) ? (8u << 20) : len, cs);
     t->pg.zoom = t->zoom;
     if (!t->pg.doc) {
         t->title[0] = 0;

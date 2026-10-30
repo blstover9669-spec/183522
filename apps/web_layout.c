@@ -56,6 +56,15 @@ typedef struct bres { int h, w, mb; } bres_t;
 
 static uint32_t g_gen;
 
+/* The kernel stack is shared by everything (256 KiB): deeply nested pages stop
+   being laid out long before it runs out. */
+static uintptr_t stack_base;
+#define LAYOUT_STACK_MAX (120 * 1024)
+static bool stack_low(void) {
+    char here;
+    return stack_base - (uintptr_t)&here > LAYOUT_STACK_MAX;
+}
+
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum);
 static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, bool ctop, bool cbot, int *trailing);
 static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx);
@@ -490,7 +499,7 @@ static void meas_children(lctx_t *lc, meas_t *m, web_node_t *n, int depth);
 
 static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *pst, int depth) {
     if (c->type == WN_TEXT) { meas_text(lc, m, c, pst); return; }
-    if (!displayed(c) || depth > MAX_DEPTH) return;
+    if (!displayed(c) || depth > MAX_DEPTH || stack_low()) return;
     const web_style_t *st = c->st;
     if (c->tag == T_BR) { meas_flush(m); return; }
     if (c->tag == T_IMG) {
@@ -611,8 +620,8 @@ static bool tbl_build(lctx_t *lc, tbl_t *t, web_node_t *n, int cbw) {
     tbl_gather(t, n, 0);
     t->sp = n->st->spacing;
     if (!t->nrow) return true;
-    int occ[MAXCOLS];
-    memset(occ, 0, sizeof occ);
+    int *occ = calloc(MAXCOLS, sizeof(int));
+    if (!occ) return false;
     for (int r = 0; r < t->nrow; r++) {
         int col = 0;
         for (web_node_t *c = t->row[r]->first; c; c = c->next) {
@@ -625,7 +634,7 @@ static bool tbl_build(lctx_t *lc, tbl_t *t, web_node_t *n, int cbw) {
             if (t->ncell >= t->ccap) {
                 int nc = t->ccap ? t->ccap * 2 : 64;
                 tcell_t *ncl = realloc(t->cell, sizeof *ncl * nc);
-                if (!ncl) return false;
+                if (!ncl) { free(occ); return false; }
                 t->cell = ncl;
                 t->ccap = nc;
             }
@@ -638,6 +647,7 @@ static bool tbl_build(lctx_t *lc, tbl_t *t, web_node_t *n, int cbw) {
         }
         for (int k = 0; k < MAXCOLS; k++) if (occ[k] > 0) occ[k]--;
     }
+    free(occ);
     if (!t->ncol) return true;
     t->cmin = calloc(t->ncol, sizeof(int));
     t->cmax = calloc(t->ncol, sizeof(int));
@@ -765,6 +775,7 @@ static void table_intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
 /* Lay out a table whose border box top is at y. */
 static int layout_table(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *res) {
     const web_style_t *st = n->st;
+    if (stack_low()) { res->h = res->w = res->mb = 0; return 0; }
     bm_t b;
     box_metrics(st, cbw, &b);
     int tb = b.bl + b.br + b.pl + b.pr;
@@ -813,7 +824,8 @@ static int layout_table(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw
     int *rbg = t.nrow ? calloc(t.nrow, sizeof(int)) : NULL;
     if (t.nrow && (!rh || !ry || !rbg)) { free(rh); free(ry); free(rbg); tbl_free(&t); res->h = res->w = res->mb = 0; return 0; }
     /* column x positions */
-    int colx[MAXCOLS + 1];
+    int *colx = malloc(sizeof(int) * (size_t)(t.ncol + 1));
+    if (!colx) { free(rh); free(ry); free(rbg); tbl_free(&t); res->h = res->w = res->mb = 0; return 0; }
     int px = cx + t.sp;
     for (int k = 0; k < t.ncol; k++) { colx[k] = px; px += t.cw[k] + t.sp; }
     colx[t.ncol] = px;
@@ -896,7 +908,7 @@ static int layout_table(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw
     int bh = b.bt + b.pt + ch + b.pb + b.bb;
     fill_bg(lc, bgi, bx, y, bw, bh);
     borders(lc, st, bx, y, bw, bh);
-    free(rh); free(ry); free(rbg);
+    free(rh); free(ry); free(rbg); free(colx);
     tbl_free(&t);
     res->h = bh;
     res->w = bw;
@@ -907,6 +919,7 @@ static int layout_table(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw
 /* ---- intrinsic widths ---------------------------------------------------------------- */
 static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
     if (n->mgen == lc->gen) { *mn = n->minw; *mx = n->maxw; return; }
+    if (stack_low()) { *mn = *mx = 0; return; }
     const web_style_t *st = n->st;
     bm_t b;
     box_metrics(st, 0, &b);
@@ -1516,7 +1529,7 @@ static void inline_children(ifc_t *f, web_node_t *n) {
 static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
     lctx_t *lc = f->lc;
     if (c->type == WN_TEXT) { if (pst) add_text(f, c, pst); return; }
-    if (!displayed(c) || lc->depth > MAX_DEPTH) return;
+    if (!displayed(c) || lc->depth > MAX_DEPTH || stack_low()) return;
     const web_style_t *st = c->st;
     if (is_float(c)) {
         if (f->n == 0) { place_float(lc, c, f->cx, f->cw, f->y); ifc_bounds(f); }
@@ -1772,7 +1785,7 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum) {
     const web_style_t *st = n->st;
     memset(r, 0, sizeof *r);
-    if (lc->depth > MAX_DEPTH) return 0;
+    if (lc->depth > MAX_DEPTH || stack_low()) return 0;
     if (st->display == D_TABLE || st->display == D_INLINE_TABLE) return layout_table(lc, n, x, y, cbw, fw, r);
     bm_t b;
     box_metrics(st, cbw, &b);
@@ -1879,6 +1892,7 @@ void web_layout(web_page_t *pg, int width, int height) {
     if (!d || !d->html || !d->html->st || d->html->st->display == D_NONE) { L->width = width; L->height = height; return; }
     lctx_t lc;
     memset(&lc, 0, sizeof lc);
+    stack_base = (uintptr_t)&lc;
     lc.pg = pg;
     lc.L = L;
     lc.vw = width;

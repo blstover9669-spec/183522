@@ -295,9 +295,13 @@ char *bpage_error(const char *title, const char *text, const char *detail, const
     return b;
 }
 
+#define SHOW_MAX (2u << 20)   /* text shown in a text / source view */
+
 char *bpage_source(const char *url, const char *src, uint32_t len) {
     char *b = NULL;
     size_t bl = 0, cap = 0;
+    bool cut = len > SHOW_MAX;
+    if (cut) len = SHOW_MAX;
     bhtml_add(&b, &bl, &cap, "<!doctype html><html><head><title>Source of ");
     bhtml_escape(&b, &bl, &cap, url, strlen(url));
     bhtml_add(&b, &bl, &cap, "</title></head><body style=\"margin:8px;background:white\">"
@@ -305,18 +309,24 @@ char *bpage_source(const char *url, const char *src, uint32_t len) {
     size_t tl = 0;
     char *t = web_to_1252(src ? src : "", len, WEB_CS_AUTO, &tl);
     if (t) { bhtml_escape(&b, &bl, &cap, t, tl); free(t); }
-    bhtml_add(&b, &bl, &cap, "</pre></body></html>");
+    bhtml_add(&b, &bl, &cap, "</pre>");
+    if (cut) bhtml_add(&b, &bl, &cap, "<p><i>The source is too long to show all of it: only the first 2 MB are shown.</i></p>");
+    bhtml_add(&b, &bl, &cap, "</body></html>");
     return b;
 }
 
 char *bpage_text(const char *src, uint32_t len) {
     char *b = NULL;
     size_t bl = 0, cap = 0;
+    bool cut = len > SHOW_MAX;
+    if (cut) len = SHOW_MAX;
     bhtml_add(&b, &bl, &cap, "<!doctype html><html><body style=\"margin:8px\"><pre style=\"white-space:pre-wrap;margin:0\">");
     size_t tl = 0;
     char *t = web_to_1252(src ? src : "", len, WEB_CS_AUTO, &tl);
     if (t) { bhtml_escape(&b, &bl, &cap, t, tl); free(t); }
-    bhtml_add(&b, &bl, &cap, "</pre></body></html>");
+    bhtml_add(&b, &bl, &cap, "</pre>");
+    if (cut) bhtml_add(&b, &bl, &cap, "<p><i>The file is too long to show all of it: only the first 2 MB are shown.</i></p>");
+    bhtml_add(&b, &bl, &cap, "</body></html>");
     return b;
 }
 
