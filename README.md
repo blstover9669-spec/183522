@@ -167,8 +167,9 @@ You need [VirtualBox](https://www.virtualbox.org/) 6.1 or 7.x and
    appears).
 2. **Memory: 256 MB** (64 MB is the minimum). One CPU is enough.
 3. **Hard disk:** *Create a virtual hard disk now*, type **VDI**, dynamically
-   allocated, size **64 MB** or more (24 MB is the minimum). You only need it
-   if you want to install NovaOS, but it costs nothing to add it now.
+   allocated, size **1 GB** or more (100 MB is the minimum: the smallest NovaOS
+   drive). You only need it if you want to install NovaOS, but it costs
+   nothing to add it now.
 4. Click **Finish**.
 
 ### 2. Settings
@@ -197,41 +198,52 @@ Select the VM and click **Settings**:
 
 ### 3. Start NovaOS from the ISO
 
-1. Click **Start**. The GRUB menu boots **NovaOS 1.5 Developer Preview**
-   after 2 seconds, a splash screen appears, then the desktop and the
-   Welcome tour.
+1. Click **Start**. The GRUB menu boots **NovaOS 2.5 Developer Preview**
+   after 2 seconds and the splash screen plays.
 2. **Click inside the VM window** to capture the mouse. Press **Right Ctrl**
    (VirtualBox's host key) to release it again. NovaOS has no VirtualBox
    Guest Additions, so the mouse is not shared automatically.
-3. Everything works now, but running from the CD keeps your files in memory
-   only: they are gone after a restart. Install NovaOS to keep them.
+3. The **NovaOS Drive installation** screen follows: the hard disk in the
+   middle, the storage sizes on the left (sizes bigger than the disk are
+   greyed out), **Install** and **Continue ISO**.
+   * **Continue ISO** runs NovaOS from the CD: everything works, but files
+     stay in memory only and are gone after a restart. The save file screen
+     (*Do you have a save file?*) comes first - see OSaver.
+   * **Install** - go on with step 4.
 
 ### 4. Install NovaOS on the hard disk
 
-1. Double-click **Installer** on the desktop (or Start menu -> System ->
-   Installer).
-2. Click **Next**, select the hard disk (model and size are shown), click
-   **Next**, check the summary and click **Install**. All data on that disk is
-   erased. Keep *Copy my current files to the new system* ticked to take the
-   files you have already made along. Installing takes a few seconds.
-3. On the last page click **Shut down** (or Start menu -> power button ->
-   Shut down). VirtualBox powers the VM off.
+1. On the NovaOS Drive installation screen pick a storage size and click
+   **Install**. All data on the disk is erased; only the chosen size of it is
+   used. (Files live in memory while NovaOS runs, so the space you can really
+   fill is limited by the VM's memory whatever size you pick.)
+2. A progress bar shows the installation; then *Your drive has been installed
+   and ready to have files savable* and the VM restarts **straight into the
+   installed NovaOS** - the CD's boot menu finds the installed drive and boots
+   it by itself, so you can leave the ISO attached.
 
-### 5. Remove the ISO and boot from the disk
+You can also install from a running system: **Installer** on the desktop (or
+Start menu -> System -> Installer) - choose the hard disk, the drive size and
+click **Install**; *Copy my current files to the new system* takes the files
+you have already made along.
 
-1. **Settings -> Storage**, click the optical drive with `NovaOS.iso`, click
-   the disk icon on the right -> **Remove Disk from Virtual Drive**, **OK**.
-   (While the VM runs you can also use *Devices -> Optical Drives -> Remove
-   disk from virtual drive*.)
-2. Click **Start**. The BIOS boots the hard disk: you briefly see
-   `NovaOS loader / Loading NovaOS .... ok`, then the desktop.
-3. Your files are now saved to the disk automatically: a few seconds after a
+### 5. Boot from the disk
+
+1. With the ISO attached, the GRUB menu picks **Boot from the first hard disk
+   (installed NovaOS)** by itself after 2 seconds (choose the NovaOS 2.5 entry
+   to get the NovaOS Drive installation again). Without the ISO the BIOS boots
+   the hard disk directly. You briefly see `NovaOS loader / Loading NovaOS
+   .... ok`, then the splash screen with a loading bar and the desktop.
+2. Your files are now saved to the disk automatically: a few seconds after a
    change, at least every 60 seconds while there are unsaved changes, and
    before every restart or shut down. Shut down from the Start menu, or with
    VirtualBox's *Machine -> ACPI Shutdown*.
-
-If you leave the ISO attached, the CD boots first: pick **Boot from the first
-hard disk (installed NovaOS)** in the GRUB menu, or remove the ISO.
+3. The drive also holds NovaOS itself: `/system/boot` (kernel, boot loader,
+   boot settings) and `/system/ui` (fonts, themes, wallpapers, UI settings,
+   loaded at every start). If the drive's folders or these files are deleted
+   (for example `rm -r /` in the Terminal) NovaOS shows **No drive found** and
+   stays there - also after a restart. Reinstall from the ISO (pick the NovaOS
+   2.5 entry in the GRUB menu, then Install).
 
 ### Troubleshooting
 
@@ -240,8 +252,10 @@ hard disk (installed NovaOS)** in the GRUB menu, or remove the ISO.
   this entry makes the installed system use 800x600 too.
 * **The pointer does not move:** the pointing device must be *PS/2 Mouse*,
   and you have to click into the VM window first.
-* **The Installer finds no disk:** the disk is on a SATA, NVMe or SCSI
-  controller - move it to the IDE controller (see step 2.3).
+* **No hard disk found / the Installer finds no disk:** the disk is on a SATA,
+  NVMe or SCSI controller - move it to the IDE controller (see step 2.3).
+* **All storage sizes are greyed out:** the virtual disk is smaller than
+  100 MB. Give the VM a bigger disk.
 * **No sound:** the audio controller must be *ICH AC97* or *SoundBlaster 16*
   with audio output enabled. `sound` in the Terminal shows which output
   NovaOS uses.
@@ -264,23 +278,21 @@ VBoxManage modifyvm NovaOS --memory 256 --vram 32 --graphicscontroller vboxvga \
 VBoxManage modifyvm NovaOS --audio-driver default --audio-controller ac97 \
     --audio-enabled on --audio-out on      # VirtualBox 6.1: --audio default --audiocontroller ac97 --audioout on
 VBoxManage storagectl NovaOS --name IDE --add ide --controller PIIX4
-VBoxManage createmedium disk --filename "$HOME/NovaOS-disk.vdi" --size 64 --format VDI
+VBoxManage createmedium disk --filename "$HOME/NovaOS-disk.vdi" --size 1024 --format VDI
 VBoxManage storageattach NovaOS --storagectl IDE --port 0 --device 0 \
     --type hdd --medium "$HOME/NovaOS-disk.vdi"
 VBoxManage storageattach NovaOS --storagectl IDE --port 1 --device 0 \
     --type dvddrive --medium "$PWD/NovaOS.iso"
-VBoxManage startvm NovaOS            # run the Installer, then shut down
-VBoxManage storageattach NovaOS --storagectl IDE --port 1 --device 0 \
-    --type dvddrive --medium emptydrive
-VBoxManage startvm NovaOS            # boots from the hard disk
+VBoxManage startvm NovaOS            # NovaOS Drive installation: pick a size, Install
+                                     # (it restarts into the installed system by itself)
 ```
 
 ## Running in QEMU
 
 ```sh
 qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso                      # live CD
-truncate -s 64M disk.img
-qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso -hda disk.img -boot d  # install
+truncate -s 1G disk.img
+qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso -hda disk.img -boot d  # install (then it boots the disk)
 qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                    # installed system
 ```
 
@@ -385,8 +397,9 @@ NovaOS 1.5 is a **Developer Preview**. Things that are not there (yet):
   rebuilding.
 * **Files:** the file system lives in memory. Live CD: files are lost at
   shut down. Installed system: the whole file system is saved as a snapshot
-  to the disk (on a 64 MB disk about 30 MB of files fit; a bigger disk gives
-  more room); pulling the plug loses the last few seconds of changes. No
+  to the drive (each of its two save slots takes half of the chosen drive
+  size, at most 2 GB; what you can really fill is limited by memory); pulling
+  the plug loses the last few seconds of changes. No
   access to other file systems (FAT, NTFS, ext) or CDs from inside NovaOS.
 * **Pictures:** BMP only (Image Viewer also opens PPM); no PNG or JPEG.
 * **Keyboard:** US layout only. No multi-user accounts or permissions.
@@ -418,8 +431,10 @@ What the installer writes to the disk (see `kernel/disk/diskfmt.h`): an MBR
 with NovaOS's stage 1 boot code and a partition table, an install header,
 the stage 2 loader (`bootloader/`: INT 13h extensions, A20, E820 memory map,
 VBE linear framebuffer, protected mode, Multiboot-compatible hand-off with
-`boot=disk` on the command line), the kernel at 1 MiB, and two save slots for
-your files.
+`boot=disk` on the command line), the drive signature in sector 2047 (the
+ISO's GRUB menu boots disks that have it by default), the kernel at 1 MiB, and
+two save slots for your files - all within the drive size chosen on the NovaOS
+Drive installation screen or in the Installer.
 
 ## Built with Claude
 
