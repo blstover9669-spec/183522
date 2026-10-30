@@ -36,7 +36,7 @@ tools/shot.py (--iso ISO | --kernel ELF [--boot iso] | --disk disk.img) [--cmdli
 * `--iso NovaOS.iso` boots an ISO as built (add `testmouse=1` to its
   `CMDLINE` if you need accurate mouse clicks).
 * `--hda disk.img` attaches a raw disk as IDE primary master (installer /
-  persistence tests). Create one with `truncate -s 64M disk.img`.
+  persistence tests). Create one with `truncate -s 128M disk.img`.
 * `--disk disk.img` boots an *installed* disk on its own (no CD, no
   `-kernel`, BIOS boots the hard disk). The kernel command line is the one
   the installer wrote (`boot=disk diskid=...`, plus `testmouse=1` if the
@@ -90,14 +90,16 @@ tools/shot.py --kernel build/kernel.elf --cmdline "selftest=1 nosplash" \
 ### Installer and persistence
 
 `autorun=Installer:auto` installs to the first suitable disk without
-clicking and logs `INSTALL: done in N ms` (or `INSTALL: failed: reason`).
+clicking (the largest drive size that fits, or the whole disk when it is
+smaller than 100 MB) and logs `INSTALL: done in N ms` (or `INSTALL: failed:
+reason`).
 The installed system logs `persist: restored N bytes from slot A|B` at boot
 and `persist: saved N bytes to slot ... (save #N, background|sync)` on every
 save (background = a few seconds after a change or the 60 s timer, sync =
 before reboot / shut down).
 
 ```sh
-truncate -s 64M disk.img
+truncate -s 128M disk.img
 # install (or drive the wizard with clicks: Next/Install are at about (753, 569))
 tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \
     --out shots-inst ready "serial:INSTALL: done"
@@ -114,6 +116,35 @@ first `ready` already matched), so wait with `serial:` for a later message,
 and prefer the keyboard (`key:meta_l` opens the Start menu): the pointer
 starts again at the top-left corner but shot.py still remembers the old
 position.
+
+### NovaOS Drive installation (ISO boots) and No drive found
+
+ISO boots show the NovaOS Drive installation screen after the splash, but
+automated starts (`autorun=`, `testmouse=` - so every `--kernel` run) skip
+it; `setup=1` brings it back. Test it through the real GRUB path, with an ISO
+whose command line has `testmouse=1 setup=1` (accurate clicks) and a disk:
+`bootsetup: ready` means it waits for input. At 1024x768 the size rows are at
+x = 300, y = 424 + 28 * i (100 MB ... 10 GB), Install at (660, 494), Continue
+ISO at (660, 554). Install restarts the VM; the ISO's GRUB menu then boots the
+disk by itself (`boot: loader "NovaOS disk loader"` in the log).
+
+```sh
+make BUILD=build-setup CMDLINE="testmouse=1 setup=1" GRUB_TIMEOUT=1
+truncate -s 512M disk.img
+tools/shot.py --iso build-setup/NovaOS.iso --hda disk.img --out shots-setup \
+    "serial:bootsetup: ready" shot:setup click:300,508 click:660,494 wait:0.3 shot:progress \
+    "serial:bootsetup: drive installed" shot:done "serial:NovaOS disk loader" ready shot:installed
+# Continue ISO: the save file screen (OSaver) comes next
+tools/shot.py --iso build-setup/NovaOS.iso --out shots-iso "serial:bootsetup: ready" \
+    click:660,554 ready wait:1 shot:save-file-screen
+```
+
+The system files are logged at startup (`sysfiles: wrote the system files ...`
+on ISO boots, `ui: loaded 8 fonts, 2 themes, 6 wallpapers ...`). Deleting the
+drive or a system file shows "No drive found" and logs `nodrive: No drive
+found (PATH is missing)`, e.g. `"type:rm -r /system\n" "serial:nodrive:"`
+in a Terminal (on an installed drive it stays like that after a restart, so
+use a scratch disk).
 
 ### Power button, keyboard LEDs, empty IDE channels
 
