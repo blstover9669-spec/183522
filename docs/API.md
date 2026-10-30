@@ -31,6 +31,7 @@ available after
 * [21. System icons](#21-system-icons)
 * [22. Sound](#22-sound)
 * [23. Networking (HTTP, HTTPS, cookies, URLs)](#23-networking-http-https-cookies-urls)
+* [24. OSaver (save codes)](#24-osaver-save-codes)
 
 ---
 
@@ -820,6 +821,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `fputest=1` | raise an x87 floating-point error 2 s after boot (tests that it is not fatal: `fpu: warning: ...` in the log) |
 | `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
 | `safetyshield_test=N` | SafetyShield test rule: flags `/tmp/safetyshield-test.txt` with risk level N (1 Risky .. 6 Severe) and runs the first automatic scan after 5 s - tests the threat log, list and notification |
+| `osaver_test=log,promptN,restorefileN` | OSaver test hooks: `log` writes codes up to 8 KB (and the saved files) to serial as `OSAVER-CODE: ...` lines; `promptN` opens "Do you have a save file?" N seconds after boot; `restorefileN` loads `~/Documents/OSaver code.txt` after N seconds |
 | `sound=ac97\|sb16\|speaker` | sound output: only probe that card, or use the PC speaker (default: AC'97, else SB16, else speaker) |
 | `volume=N` | master volume 0..100 at boot (default 80) |
 
@@ -1297,3 +1299,63 @@ generator (RDSEED / RDRAND when present, plus TSC jitter and packet timing,
 hashed with SHA-256). `selftest=1` checks all of it against published test
 vectors (FIPS 180-4, RFC 4231, RFC 5869, FIPS 197, the GCM test cases, RFC
 8439, RFC 7748), a test certificate chain and the built-in roots.
+
+---
+
+## 24. OSaver (save codes)
+
+`nova/osaver.h`. **OSaver** saves what differs from a fresh NovaOS - settings
+and browser settings (`/system/config`), app data and hidden files, documents,
+folders, the wallpaper - as one *number code*, and loads such a code back. On
+ISO boots, where nothing is saved, the NovaOS Drive installation shows
+*Do you have a save file?* after *Continue ISO*.
+
+```
+13224:2.5                 version   (vers = 132, ion = 24)
+4351991:((5))             files     number of files in the code (hidden and system files too)
+91235422:                 wallpaper (empty; the pretty print shows "Custom" or the file target)
+3332198:((B..-W..-D..-F..-E..))   SystemData (System = 333, Data = 2198)
+```
+
+Keys are words written with a prefix-free chunk table (no chunk number starts
+another, so a copied code splits one way only); on the device a hidden
+separator (`0x1F`) sits between the chunks of a key and Copy removes it. A
+single newline only wraps a raw line; an empty line is a new line. SystemData
+holds records separated by `-`: `B` boot record (boot ID, save time, ISO /
+drive, counts), `W` wallpaper (built-in index, or a custom picture stored
+whole), `D` folders (file location IDs), `F` files (name, type, size,
+contents in base 62), `E` a CRC-32 check number. Nothing saved yet gives the
+placeholder `13224:0.0` / `4351991:((-0))` / `91235422:` / `3332198:(())`. The
+format and its host-side tests: `kernel/osaver/codec.h`,
+`tools/osaver_codec_test.c` (`gcc -O2 -Ikernel -o t tools/osaver_codec_test.c
+kernel/osaver/codec.c && ./t`).
+
+| Function | |
+|---|---|
+| `osaver_boot_prompt(done, ctx)` | the *Do you have a save file?* screen: No closes it; Yes shows a text box, the code is checked after every paste / keystroke and restored as soon as it is valid; `done(ctx)` once the screen is closed |
+| `osaver_restore_file(path, done, ctx)` | load the code in a file (read in pieces); 0 if it started |
+| `osaver_check_code(text, len)` | the instant checker (complete validation up to 4 MB, a structural check above) |
+| `osaver_start_choice()` / `osaver_set_start_choice(n)` | the Start button colour: 0 blue, 1.. a theme accent preset (`/system/config/osaver`) |
+
+What is saved: everything except `/tmp`, the system files in `/system`
+(kernel, boot files, UI files, logs - only `/system/config` is saved) and
+files that are byte-for-byte the same as on a fresh system (fingerprinted at
+the first ISO start, kept in `/system/config/osaver.defaults`). Making a code
+runs in slices of a few ms, streamed into `/tmp/OSaver/OSaver code.txt`; codes
+over 256 MB are refused, and Copy writes codes over 16 MB to
+`~/Documents/OSaver code.txt` instead of the clipboard.
+
+Loading is a soft restart: a splash-style screen with the Nova icon and a
+loading bar covers the desktop, the whole code is checked first (a bad code
+changes nothing), the open apps are closed, then for each file: create ->
+rename to the exact name -> set the type (extension) -> write the contents
+(same-name files are replaced). Nothing is written outside the places a code
+may hold, so the kernel, boot and UI files are never touched. Afterwards the
+restored settings, wallpaper, pins and file types are applied (the boot-time
+init functions `settings_boot`, `shell_late_init` and `assoc_late_init` run
+again). Serial: `osaver: code made: ...`, `osaver: soft restart: ...`,
+`osaver: restore done: N files, M folders, K skipped`.
+
+Notepad opens big files (over 2 MB, lines over 16 KB, or OSaver codes) in a
+read-only viewer that only loads the rows on screen, so a multi-megabyte
+single-line code opens at once and scrolls smoothly.

@@ -266,6 +266,30 @@ works. `selftest=1` runs the cryptography and certificate self tests
 (`SELFTEST: crypto ...`, `SELFTEST: x509 chain verification`, `SELFTEST: tls
 root certificates`).
 
+### OSaver (save codes)
+
+`osaver_test=log` logs small codes as `OSAVER-CODE:` lines, so a code made in
+one boot can be typed into a fresh boot (`osaver_test=prompt` opens *Do you
+have a save file?*; Yes is at about (440, 315), the text box below it). The
+whole round trip, from a fresh ISO-like start each time:
+
+```sh
+# boot 1: change something, open OSaver, Start (Enter), log the code
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal osaver_test=log" --out s1 ready \
+    wait:1.5 "type:echo hi > Documents/test.txt\n" key:meta_l wait:0.5 type:osaver key:ret wait:1.5 \
+    key:ret wait:2
+grep OSAVER-CODE: s1/serial.log | sed 's/.*OSAVER-CODE: //' | tr -d '\n' > code.txt
+# boot 2: Yes, type the code - the restore starts by itself
+tools/shot.py --kernel build/kernel.elf --cmdline "osaver_test=prompt" --out s2 ready wait:1.5 \
+    click:440,315 wait:0.5 "type:$(cat code.txt)" "serial:osaver: restore done" shot:restored
+```
+
+On the warning, Copy / View source with pretty print / View source with no
+pretty print are at about (279, 372), (454, 372) and (687, 372). With
+`setup=1` the real path runs: *Continue ISO* at about (659, 553), then the
+prompt (`osaver: Do you have a save file?`). An invalid paste plays the alert
+sound (record it with the AC'97 `--extra` above).
+
 ### Finding coordinates
 
 * Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about
