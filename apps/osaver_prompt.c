@@ -149,13 +149,18 @@ static void prompt_paint(prompt_t *p, surface_t *s) {
 }
 
 /* ---- the instant checker ------------------------------------------------------------ */
-static int classify(const char *t, uint32_t n) {
+/* While typing, a code counts only once it is complete (so "13224:2" is not taken
+   for version 2 before the ".5" is typed); a paste or Enter takes it as it is. */
+static int classify(const char *t, uint32_t n, int mode) {
     if (n > OSAVER_MAX_CODE) return CHK_INVALID;
     if (n > BIG_TEXT) return osaver_check_code(t, n) ? CHK_VALID : CHK_INVALID;
     static osc_parser_t ps;
     osc_parser_init(&ps, NULL);
     if (osc_parser_feed(&ps, t, n)) return CHK_INVALID;
-    if (!osc_parser_complete(&ps)) return CHK_INCOMPLETE;
+    if (!osc_parser_complete(&ps)) {
+        if (mode != M_TYPE && osc_parser_finish(&ps) == 0) return CHK_VALID;
+        return CHK_INCOMPLETE;
+    }
     return osc_parser_finish(&ps) == 0 ? CHK_VALID : CHK_INVALID;
 }
 
@@ -192,7 +197,7 @@ static void check(prompt_t *p, int mode) {
         if (mode != M_TYPE) show_error(p, true);
         return;
     }
-    int st = classify(p->buf, p->len);
+    int st = classify(p->buf, p->len, mode);
     if (st == CHK_VALID) {
         klog("osaver: save code accepted (%u characters), restoring", p->len);
         p->error = false;
