@@ -1033,7 +1033,9 @@ void tls_step(tls_conn_t *t) {
     if (!t || t->state == TLSS_ERROR) return;
     t->budget = READ_BUDGET;
     int ts = tcp_state(t->tcp);
-    if (ts == TCPS_ERROR) { fail(t, TLS_ETCP, -1, "the connection failed"); return; }
+    /* a reset after the handshake: still decrypt what was received (tls_state reports
+       the end once it is read) */
+    if (ts == TCPS_ERROR && t->state != TLSS_OPEN) { fail(t, TLS_ETCP, -1, "the connection failed"); return; }
     if (t->hs == H_CONNECT) {
         if (ts == TCPS_CONNECTING) return;
         if (ts != TCPS_OPEN) { fail(t, TLS_ETCP, -1, "the server closed the connection"); return; }
