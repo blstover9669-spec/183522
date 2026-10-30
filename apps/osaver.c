@@ -597,13 +597,15 @@ static void warn_event(window_t *win, const event_t *ev) {
         gen_t *g = wn->gen;
         if (!g) break;
         if (g->state == G_COPYFILE) { copy_file_step(wn); if (!win_is_valid(win)) return; win_invalidate(win); break; }
-        if (g->state == G_DONE || g->state == G_FAILED) break;
-        gen_run(g);
-        win_invalidate_rect(win, 60, 66, WARN_W - 60, 24);
-        if (g->state == G_DONE) {
-            warn_buttons(wn);
-            win_invalidate(win);
-        } else if (g->state == G_FAILED) {
+        if (g->state != G_DONE && g->state != G_FAILED) {
+            gen_run(g);
+            win_invalidate_rect(win, 60, 66, WARN_W - 60, 24);
+            if (g->state == G_DONE) {
+                warn_buttons(wn);
+                win_invalidate(win);
+            }
+        }
+        if (g->state == G_FAILED) {     /* (also when it failed right in open_warning) */
             char msg[240];
             strlcpy(msg, g->err, sizeof msg);
             window_t *owner = wn->app ? wn->app->win : NULL;
