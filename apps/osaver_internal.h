@@ -51,8 +51,8 @@ uint32_t osv_boot_id(void);
 uint32_t osv_boot_kind(void);
 /* The system alert sound (sys_alert_sound when NovaOS has it, else a beep). */
 void     osv_alert(void);
-/* Start button colour: choice 0 = blue, 1..n = theme accent preset n-1, -1 = follow the
-   theme's accent colour. Saved in OSV_CFG_FILE. */
+/* Start button colour: choice 0 = blue, 1..n = theme accent preset n-1. Saved in
+   OSV_CFG_FILE. */
 int      osv_start_choice(void);
 void     osv_set_start_choice(int choice);
 uint32_t osv_start_color(void);

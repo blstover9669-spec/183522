@@ -290,13 +290,13 @@ int osv_start_choice(void) {
             if (p) g_choice = (int)strtol(p + 11, NULL, 10);
             free(t);
         }
-        if (g_choice < -1 || g_choice > theme_accent_count()) g_choice = 0;
+        if (g_choice < 0 || g_choice > theme_accent_count()) g_choice = 0;
     }
     return g_choice;
 }
 
 void osv_set_start_choice(int choice) {
-    if (choice < -1 || choice > theme_accent_count()) choice = 0;
+    if (choice < 0 || choice > theme_accent_count()) choice = 0;
     g_choice = choice;
     g_choice_loaded = true;
     char buf[48];
@@ -305,9 +305,11 @@ void osv_set_start_choice(int choice) {
     vfs_write_file(OSV_CFG_FILE, buf, (uint32_t)n);
 }
 
+int  osaver_start_choice(void) { return osv_start_choice(); }
+void osaver_set_start_choice(int choice) { osv_set_start_choice(choice); }
+
 uint32_t osv_start_color(void) {
     int c = osv_start_choice();
-    if (c < 0) return theme_get()->accent | 0xFF000000u;
     if (c == 0) return OSV_BLUE;
     return theme_accent_preset(c - 1) | 0xFF000000u;
 }

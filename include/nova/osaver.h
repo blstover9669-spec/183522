@@ -41,4 +41,10 @@ int  osaver_restore_file(const char *path, void (*done)(void *ctx), void *ctx);
    (( )). */
 bool osaver_check_code(const char *text, uint32_t len);
 
+/* The Start button's colour on the OSaver welcome screen (a Settings page may offer
+   it too): 0 = blue (default), 1..theme_accent_count() = theme accent preset n-1.
+   Kept in /system/config/osaver ("startcolor=N"). */
+int  osaver_start_choice(void);
+void osaver_set_start_choice(int choice);
+
 #endif

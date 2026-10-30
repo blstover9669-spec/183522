@@ -162,6 +162,20 @@ static bool add_file(gen_t *g, const char *path, int dir, uint32_t size) {
     return true;
 }
 
+/* The recent-items list that only says "OSaver was opened" is not something to save
+   (otherwise opening OSaver on a fresh system would never give the placeholder). */
+static bool only_osaver_recent(const char *path) {
+    if (strcmp(path, "/system/config/recent")) return false;
+    char *t = vfs_read_file(path, NULL);
+    if (!t) return false;
+    bool only = true;
+    char *save = NULL;
+    for (char *line = strtok_r(t, "\r\n", &save); line && only; line = strtok_r(NULL, "\r\n", &save))
+        if (*line && *line != '#' && strcmp(line, "app:OSaver")) only = false;
+    free(t);
+    return only;
+}
+
 static void scan(gen_t *g, const char *dir, int parent, int depth) {
     if (depth > 64) return;
     int n = vfs_list(dir, NULL, 0);
@@ -174,9 +188,12 @@ static void scan(gen_t *g, const char *dir, int parent, int depth) {
         vfs_join(dir, ents[i].name, path);
         if (strlen(path) >= VFS_PATH_MAX - 1 || !osv_path_saved(path, ents[i].is_dir)) continue;
         if (ents[i].is_dir) {
-            int idx = add_dir(g, path, parent, !osv_default_dir(path));
+            /* folders the user made (even empty ones) are saved; system folders only
+               when they hold saved files */
+            bool sys = !strncmp(path, "/system", 7) && (path[7] == 0 || path[7] == '/');
+            int idx = add_dir(g, path, parent, !sys && !osv_default_dir(path));
             if (idx >= 0) scan(g, path, idx, depth + 1);
-        } else if (!osv_default_file(path, ents[i].size)) {
+        } else if (!osv_default_file(path, ents[i].size) && !only_osaver_recent(path)) {
             add_file(g, path, parent, ents[i].size);
         }
     }

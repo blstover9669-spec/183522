@@ -369,9 +369,19 @@ void osaver_boot_prompt(void (*done)(void *ctx), void *ctx) {
 
 /* osaver_test=prompt (or promptN: after N seconds): open the screen after boot (tests). */
 static void test_prompt(void *ctx) { (void)ctx; osaver_boot_prompt(NULL, NULL); }
+/* osaver_test=restorefileN: after N seconds load the code in OSV_COPY_FILE
+   (osaver_restore_file, the code read from a file in pieces). */
+static void test_restore_done(void *ctx) { (void)ctx; klog("osaver: test restore from file finished"); }
+static void test_restore(void *ctx) {
+    (void)ctx;
+    int r = osaver_restore_file(OSV_COPY_FILE, test_restore_done, NULL);
+    klog("osaver: test restore from %s: %d", OSV_COPY_FILE, r);
+}
 static void prompt_test_init(void) {
     const char *t = sys_cmdline_get("osaver_test");
     const char *p = t ? strstr(t, "prompt") : NULL;
     if (p) timer_add(400 + 1000 * (uint32_t)atoi(p + 6), test_prompt, NULL, false);
+    p = t ? strstr(t, "restorefile") : NULL;
+    if (p) timer_add(400 + 1000 * (uint32_t)atoi(p + 11), test_restore, NULL, false);
 }
 REGISTER_INIT(INIT_LATE, prompt_test_init);
