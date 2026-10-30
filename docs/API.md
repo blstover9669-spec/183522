@@ -417,7 +417,10 @@ States: `UI_STATE_HOVER | PRESSED | FOCUSED | DISABLED | DEFAULT | CHECKED`.
 ## 9. Text and fonts
 
 Anti-aliased bitmap fonts generated from Inter (UI) and DejaVu Sans Mono
-(monospace) by `tools/genfont.py`:
+(monospace) by `tools/genfont.py`. The tables are built into the kernel and
+written to the drive as `/system/ui/fonts/*.font`; at startup NovaOS loads the
+fonts from there and every text call uses the loaded font (`FONT_*` stay the
+same handles):
 
 | Font | Size | Use |
 |---|---|---|
@@ -584,7 +587,10 @@ void theme_refresh(void);
 ```
 
 Built-in wallpapers: Nova, Aurora, Sunset, Ocean, Midnight, Solid colour.
-Setters repaint every window and send `EV_THEME`.
+Setters repaint every window and send `EV_THEME`. The colours of light and dark
+mode, the wallpapers (as recipes: gradient, glowing blobs, stars, ridges) and
+the default settings are loaded at startup from `/system/ui/themes/*.theme`,
+`/system/ui/wallpapers/*.wallpaper` and `/system/ui/ui.cfg` (see section 13).
 
 ---
 
@@ -619,6 +625,28 @@ Default tree at boot: `/home/user/{Desktop,Documents,Pictures,Music,Downloads}`,
 `Pictures`, `/home/user/Desktop/Welcome.txt`, `/system/version.txt`,
 `/system/motd.txt`, `/tmp`. Files in `/home/user/Desktop` appear as desktop
 icons (double-click opens them via `app_open_file`).
+
+**System files (the drive holds NovaOS itself).** `/system/boot/kernel.bin`
+(the kernel image as the installer writes it), `/system/boot/mbr.bin` and
+`stage2.bin` (the boot loader), `/system/boot/boot.cfg` (boot settings:
+loader, command line, display - rewritten at every start),
+`/system/ui/ui.cfg` (UI settings: `dark`, `accent`, `wallpaper`, `wallcolor`,
+`shadows`; the command line and Settings win over them),
+`/system/ui/fonts/*.font`, `/system/ui/themes/light.theme` / `dark.theme`
+(`key=RRGGBB` or `AARRGGBB`, the theme_t colour names) and
+`/system/ui/wallpapers/*.wallpaper`. The kernel and fonts are packed (NVLZ:
+`"NVLZ"`, u32 size, u32 CRC32, an LZ4-format stream - `kernel/fs/lz.h`). An ISO
+start writes them from built-in copies; an installed drive keeps them. NovaOS
+loads its UI from `/system/ui` at startup (a damaged file falls back to the
+built-in copy).
+
+**No drive found.** If `/system` or `/home` or any of the system files above
+is missing - at startup or while NovaOS runs (checked whenever the files
+change) - NovaOS shows a black screen with the Nova icon and "No drive found"
+and stays there until the computer is reset. On an installed drive the change
+is saved first, so it is still gone after a restart. Do not delete or rename
+these paths from an app; the Terminal's `rm -r /` (or `/system`, `/home`)
+does it on purpose.
 
 **Boot splash setting:** `/system/config/splash.cfg`, a text file with one
 `key=value` per line. `noanimation=1`: the splash shows the Nova icon in the
@@ -690,14 +718,14 @@ initialisation from its own file - no kernel edits:
 ```c
 static void ata_init(void) { /* probe the controller, klog what you find */ }
 REGISTER_INIT(INIT_DRIVER, ata_init);
-static void persist_load(void) { /* read the saved VFS image, vfs_deserialize(...) */ }
-REGISTER_INIT(INIT_FS, persist_load);
+static void my_files(void) { /* the files are there: read your config */ }
+REGISTER_INIT(INIT_FS, my_files);
 ```
 
 | Stage | Runs |
 |---|---|
 | `INIT_DRIVER` | after PCI enumeration, timers, keyboard/mouse; before the filesystem exists |
-| `INIT_FS` | right after the default VFS tree is created, before apps and desktop (load persisted files here; desktop icons will reflect them) |
+| `INIT_FS` | after the default VFS tree is created and - on an installed drive - the saved files are restored, the drive is checked and the UI files are loaded; before apps and desktop (apply saved settings here; desktop icons will reflect your files) |
 | `INIT_LATE` | after the desktop is up, just before `autorun` apps start |
 
 The splash screen is showing during the first two stages; keep them short
@@ -724,9 +752,17 @@ sectors inside an app callback), `disk_flush`, `disk_rescan`,
 the command line) the VFS is saved to the disk automatically;
 `persist_active()`, `persist_get_info(&info)` (dirty, saving, last save,
 capacity), `persist_save()` (synchronous - the Terminal's `sync` command uses it)
-and `persist_save_async()`. The installer back end (`install_begin /
-install_step / install_progress ...`) is what `apps/installer.c` drives from
-a window timer. Disk layout: `kernel/disk/diskfmt.h`.
+and `persist_save_async()`. The installer back end (`install_begin_sized /
+install_step / install_progress ...`) is what `apps/installer.c` and the
+NovaOS Drive installation screen of ISO boots (`kernel/gui/bootsetup.c`)
+drive: `install_begin_sized(disk, bytes, copy_files, err, n)` uses only the
+first `bytes` of the disk (0 = all of it); the drive sizes offered to users are
+`install_size_count() / install_size_bytes(i) / install_size_label(i)` (100 MB,
+150 MB, 200 MB, 250 MB, 500 MB, 700 MB, 1 GB, 5 GB, 10 GB),
+`install_size_fits(disk, bytes)` and `install_size_default(disk)` (the largest
+that fits). Disk layout: `kernel/disk/diskfmt.h` (sector 2047 holds the drive
+signature the ISO's GRUB menu looks for to boot an installed drive by
+default).
 
 In use by the kernel: IRQ0 (PIT), IRQ1 + IRQ12 (i8042 keyboard/mouse), COM1
 polled (no IRQ), IDE polled with device interrupts off (no IRQ), AC'97
@@ -773,6 +809,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `autorun=App1,App2` | launch apps after the desktop appears (`_` or `+` for spaces; `App:arg` passes an argument) |
 | `testmouse=1` | 1:1 mouse motion without acceleration and pointer starts at (0,0) - used by `tools/shot.py` |
 | `nosplash` | skip the boot splash |
+| `setup=1` / `setup=0` | show / skip the NovaOS Drive installation screen (by default ISO boots show it, except automated ones with `autorun=` or `testmouse=`; installed drives never do) |
 | `res=WxH` | resolution via BGA when available (e.g. `res=1280x720`) |
 | `dark=1` | start in dark mode |
 | `wallpaper=N` | start with built-in wallpaper N |
@@ -787,7 +824,9 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `volume=N` | master volume 0..100 at boot (default 80) |
 
 Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
-`SELFTEST: done, N passed, M failed`, `*** KERNEL PANIC ***`.
+`SELFTEST: done, N passed, M failed`, `*** KERNEL PANIC ***`, `bootsetup: ready`
+(the NovaOS Drive installation screen waits for input), `bootsetup: drive
+installed`, `nodrive: No drive found (PATH is missing)`.
 
 ---
 
