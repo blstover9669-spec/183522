@@ -803,6 +803,11 @@ static void error_page(tab_t *t, http_request_t *r, int err) {
     commit(t, url);
     clear_security(t);
     if (html) show_html(t, url, html, (uint32_t)strlen(html), NULL, true);
+    if (cert) {   /* the warning page shows the red "not secure" padlock */
+        t->https = true;
+        t->cert_ok = false;
+        strlcpy(t->cert_error, detail, sizeof t->cert_error);
+    }
 }
 
 /* a response for the tab arrived */

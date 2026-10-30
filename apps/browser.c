@@ -313,16 +313,11 @@ static void star_points(point_t *p, double cx, double cy, double ro, double ri) 
     }
 }
 
-static void draw_padlock(surface_t *s, int x, int y, uint32_t c, bool open) {
-    gfx_fill_rounded_rect(s, x, y + 7, 12, 9, 2, c);
-    if (open) {
-        arc(s, x + 9.5, y + 5, 3.2, M_PI, 2 * M_PI, c);
-        stroke(s, x + 12.7, y + 5, x + 12.7, y + 7, c);
-    } else {
-        arc(s, x + 6, y + 5, 3.4, M_PI, 2 * M_PI, c);
-        stroke(s, x + 2.6, y + 5, x + 2.6, y + 7.5, c);
-        stroke(s, x + 9.4, y + 5, x + 9.4, y + 7.5, c);
-    }
+static void draw_padlock(surface_t *s, int x, int y, uint32_t c) {
+    arc(s, x + 6, y + 6, 3.6, M_PI, 2 * M_PI, c);
+    stroke(s, x + 2.4, y + 6, x + 2.4, y + 8.5, c);
+    stroke(s, x + 9.6, y + 6, x + 9.6, y + 8.5, c);
+    gfx_fill_rounded_rect(s, x, y + 8, 12, 9, 2, c);
 }
 
 static void draw_button(browser_t *b, surface_t *s, int hs, bool enabled) {
@@ -374,11 +369,13 @@ static void draw_button(browser_t *b, surface_t *s, int hs, bool enabled) {
         for (int i = -1; i <= 1; i++) stroke(s, cx - 7, cy + i * 5, cx + 7, cy + i * 5, c);
         break;
     case HS_LOCK:
-        if (t && t->https && !t->internal) {
-            if (t->cert_ok) draw_padlock(s, r.x + 5, r.y + 3, th->dark ? RGB(150, 210, 160) : RGB(40, 120, 60), false);
+        if (t && t->https && (!t->internal || !t->cert_ok)) {
+            if (t->cert_ok) draw_padlock(s, r.x + 5, r.y + 3, th->dark ? RGB(150, 210, 160) : RGB(40, 120, 60));
             else {
-                draw_padlock(s, r.x + 5, r.y + 3, RGB(210, 40, 40), true);
-                stroke(s, r.x + 3, r.y + 21, r.x + 19, r.y + 3, RGB(210, 40, 40));
+                uint32_t red = RGB(214, 40, 40);
+                draw_padlock(s, r.x + 5, r.y + 3, red);
+                gfx_thick_line(s, r.x + 2, r.y + 21, r.x + 20, r.y + 3, 4, th->window_bg);
+                stroke(s, r.x + 2.5, r.y + 20.5, r.x + 19.5, r.y + 3.5, red);
             }
         } else if (t && !strncasecmp(t->url, "http://", 7)) {
             ui_draw_glyph(s, UI_GLYPH_INFO, r.x + 3, r.y + 4, 16, th->disabled_text);
@@ -1037,7 +1034,7 @@ static void lock_info(browser_t *b) {
     tab_t *t = cur(b);
     if (!t) return;
     char msg[700];
-    if (t->https && !t->internal) {
+    if (t->https && (!t->internal || !t->cert_ok)) {
         if (t->cert_ok)
             snprintf(msg, sizeof msg, "This site uses a secure connection (HTTPS).\n\nCertificate issued to: %s\nIssued by: %s\n%s\n\n" NOTE_TEXT,
                      t->cert_subject[0] ? t->cert_subject : "?", t->cert_issuer[0] ? t->cert_issuer : "?", t->tls_info);
