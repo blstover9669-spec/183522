@@ -54,7 +54,8 @@ bool bootsetup_wanted(void);
 /* Run the NovaOS Drive installation. Returns after "Continue ISO"; "Install"
    restarts the computer into the installed system. */
 void bootsetup_run(void);
-/* After the desktop is up: the save file screen (OSaver), if there is one. */
+/* After Continue ISO, once the desktop exists (before it fades in): the save file
+   screen (OSaver's osaver_boot_prompt, if it is part of the build). */
 void bootsetup_after_desktop(void);
 
 /* ---- nodrive.c ----------------------------------------------------------------------- */

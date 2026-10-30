@@ -125,12 +125,12 @@ void kmain(uint32_t magic, uint32_t mbi) {
     if (bar) splash_progress(75, NULL);
     desktop_init();
     taskbar_init();
+    if (setup) bootsetup_after_desktop();      /* after Continue ISO: the save file screen */
     splash_finish();
     if (sys_cmdline_get("selftest")) selftest_run();
     if (sys_cmdline_get("crashtest")) timer_add(1500, crash_cb, NULL, false);
     run_initcalls(INIT_LATE);
     shell_autorun();
-    if (setup) bootsetup_after_desktop();      /* after Continue ISO: the save file screen */
     klog("NOVA: desktop ready (%dx%d, %u MiB RAM, %d apps)", screen_width(), screen_height(),
          sys_mem_total() >> 20, app_count());
     wm_run();

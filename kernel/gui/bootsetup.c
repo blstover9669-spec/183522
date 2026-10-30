@@ -14,8 +14,9 @@
  *                 drive signature (kernel/disk/diskfmt.h) and boots the
  *                 installed NovaOS by default, so the restart goes straight
  *                 into it. Only the chosen size of the disk is used.
- *   Continue ISO  NovaOS keeps running from the ISO (nothing is saved); when
- *                 the desktop is up the save file screen (OSaver) follows.
+ *   Continue ISO  NovaOS keeps running from the ISO (nothing is saved); the save
+ *                 file screen (OSaver, osaver_boot_prompt) follows, and the
+ *                 desktop when that closes.
  *
  * Without a hard disk the screen says so; Continue ISO still works.
  *
@@ -616,22 +617,24 @@ void bootsetup_run(void) {
     B.base = B.scene = B.drive_img = NULL;
 }
 
-/* ---- after the desktop: the save file screen (OSaver, item 14) ---------------------------------------- */
+/* ---- the save file screen (OSaver, item 14) ------------------------------------------------------------ */
 static void prompt_done(void *ctx) {
     (void)ctx;
     klog("bootsetup: save file screen closed");
 }
 
-static void prompt_start(void *ctx) {
-    (void)ctx;
-    if (osaver_boot_prompt) {
-        klog("bootsetup: save file screen");
-        osaver_boot_prompt(prompt_done, NULL);
-    } else {
-        klog("bootsetup: no save file screen in this build");
-    }
-}
-
+/* Called when the desktop exists but before it fades in: after Continue ISO the save
+   file screen is the next thing on screen (the fade goes straight from this screen to
+   it), and the desktop shows when it closes. */
 void bootsetup_after_desktop(void) {
-    if (B.continued) timer_add(250, prompt_start, NULL, false);
+    if (!B.continued) return;
+    if (!osaver_boot_prompt) {
+        klog("bootsetup: no save file screen in this build");
+        return;
+    }
+    klog("bootsetup: save file screen");
+    osaver_boot_prompt(prompt_done, NULL);
+    /* it is faded in together with the desktop, not on its own afterwards */
+    for (window_t *w = wm_bottom; w; w = w->above)
+        if (w->opacity < 255) w->opacity = 255;
 }
