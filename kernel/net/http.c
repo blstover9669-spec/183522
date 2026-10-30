@@ -484,7 +484,7 @@ static void step(http_request_t *r) {
         if (!r->tcp) { fail(r, HTTP_ERR_NO_NETWORK, "No internet connection (%s)", net_status_text()); return; }
         if (r->https) {
             r->tls = tls_open(r->tcp, r->u->host, (r->flags & HTTP_F_ALLOW_BAD_CERT) ? TLS_F_ALLOW_BAD_CERT : 0);
-            if (!r->tls) { fail(r, HTTP_ERR_NO_MEMORY, "Out of memory"); return; }
+            if (!r->tls) { r->tcp = NULL; fail(r, HTTP_ERR_NO_MEMORY, "Out of memory"); return; }   /* tls_open closed it */
         }
         r->phase = P_CONNECT;
         r->last_progress = now;
