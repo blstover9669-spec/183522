@@ -63,9 +63,11 @@ uint32_t bn_m0inv(uint32_t m0) {
     return 0u - inv;
 }
 
-/* r = a * b * R^-1 mod m (R = 2^(32n)); a, b < m; r may alias a or b */
-void bn_mont_mul(uint32_t *r, const uint32_t *a, const uint32_t *b, const uint32_t *m, uint32_t m0inv, int n) {
-    uint32_t t[BN_MAX_LIMBS + 2];
+/* r = a * b * R^-1 mod m (R = 2^(32n)); a, b < m; r may alias a or b. Inlined with a
+   constant n for the curve sizes (8 and 12 limbs) so the compiler can unroll it. */
+static inline __attribute__((always_inline)) void mont_mul(uint32_t *r, const uint32_t *a, const uint32_t *b,
+                                                           const uint32_t *m, uint32_t m0inv, const int n,
+                                                           uint32_t *t) {
     memset(t, 0, sizeof(uint32_t) * (size_t)(n + 2));
     for (int i = 0; i < n; i++) {
         uint64_t c = 0;
@@ -92,6 +94,13 @@ void bn_mont_mul(uint32_t *r, const uint32_t *a, const uint32_t *b, const uint32
     }
     if (t[n] || bn_cmp(t, m, n) >= 0) bn_sub(t, t, m, n);
     memcpy(r, t, sizeof(uint32_t) * (size_t)n);
+}
+
+void bn_mont_mul(uint32_t *r, const uint32_t *a, const uint32_t *b, const uint32_t *m, uint32_t m0inv, int n) {
+    uint32_t t[BN_MAX_LIMBS + 2];
+    if (n == 8) mont_mul(r, a, b, m, m0inv, 8, t);
+    else if (n == 12) mont_mul(r, a, b, m, m0inv, 12, t);
+    else mont_mul(r, a, b, m, m0inv, n, t);
 }
 
 /* r = R^2 mod m (m odd, m > 1) */
