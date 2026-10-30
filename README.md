@@ -129,6 +129,7 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
 | System | **Services** | Start, stop and configure background services, read their logs |
 | System | **Task Manager** | Open windows, installed apps, memory and CPU graphs |
 | System | **Installer** | Install NovaOS on a hard disk |
+| System | **OSaver** | Save your data (settings, app data, files, wallpaper) as a number code and load it back - on ISO boots *Do you have a save file?* asks for one |
 | System | **Hex Viewer** | Inspect the raw bytes of any file |
 | System | **About** | About NovaOS and this computer |
 | System | **Welcome** | A seven-page tour of NovaOS (opens at first start) |
