@@ -976,12 +976,14 @@ static void view_source(browser_t *b) {
     if (t->src) {
         /* show the copy we have instead of loading the page again */
         char *html = bpage_source(t->url, t->src, t->srclen);
+        n->req_mode = NAV_REPLACE;     /* replaces the new tab's start page */
         tab_show_internal(n, url, html);
         n->internal = true;
         snprintf(n->title, sizeof n->title, "Source of %s", t->url);
         browser_set_address(b, url);
         browser_tab_changed(n);
     } else tab_go(n, url, NAV_REPLACE);
+    ui_focus(b->content);
 }
 
 static void toggle_bookmark(browser_t *b) {

@@ -907,6 +907,7 @@ static void doc_progress(http_request_t *r, void *ctx) {
             t->req = NULL;
             t->req_ctx = NULL;
             t->loading = false;
+            if (browser_is_current(t)) browser_set_address(t->b, NULL);   /* the page stays */
             klog("browser: downloading %s as %s", http_url(r), d->name);
         }
     }
