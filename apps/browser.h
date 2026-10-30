@@ -41,6 +41,7 @@ typedef struct hent {
 typedef struct css_ent {
     char *url;               /* NULL for <style> blocks                  */
     char *text;              /* <style> text (until parsed)              */
+    char *media;             /* media attribute ("(prefers-color-scheme: dark)") or NULL */
     web_sheet_t *sheet;
     int state;               /* 0 waiting, 1 loading, 2 done             */
     int depth;               /* @import nesting                          */

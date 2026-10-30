@@ -26,11 +26,13 @@ enum {
     P_WIDTH, P_HEIGHT, P_MAX_WIDTH, P_MIN_WIDTH, P_POSITION, P_LEFT, P_TOP, P_FLOAT,
     P_BOX_SIZING, P_OVERFLOW, P_TEXT_INDENT, P_BORDER_COLLAPSE, P_BORDER_SPACING,
     P_FLEX_DIRECTION, P_FLEX_WRAP, P_CLIP, P_OPACITY, P_CLEAR,
+    P_FLEX_GROW, P_FLEX_SHRINK, P_FLEX_BASIS, P_ORDER, P_JUSTIFY_CONTENT, P_ALIGN_ITEMS, P_COLUMN_GAP, P_ROW_GAP,
+    P_TRANSFORM,
     P_LONGHAND_COUNT,
     /* shorthands (only used while parsing / for var()) */
     P_MARGIN, P_PADDING, P_BORDER, P_BORDER_TOP, P_BORDER_RIGHT, P_BORDER_BOTTOM, P_BORDER_LEFT,
     P_BORDER_WIDTH, P_BORDER_STYLE, P_BORDER_COLOR, P_BACKGROUND, P_FONT, P_LIST_STYLE,
-    P_TEXT_DECORATION, P_FLEX_FLOW, P_OVERFLOW_X, P_OVERFLOW_Y, P_INSET, P_CUSTOM,
+    P_TEXT_DECORATION, P_FLEX_FLOW, P_OVERFLOW_X, P_OVERFLOW_Y, P_INSET, P_CUSTOM, P_FLEX, P_GAP,
 };
 
 static const struct { const char *name; int id; } prop_names[] = {
@@ -52,6 +54,11 @@ static const struct { const char *name; int id; } prop_names[] = {
     {"border-collapse", P_BORDER_COLLAPSE}, {"border-spacing", P_BORDER_SPACING},
     {"flex-direction", P_FLEX_DIRECTION}, {"flex-wrap", P_FLEX_WRAP}, {"clip", P_CLIP},
     {"opacity", P_OPACITY}, {"clear", P_CLEAR},
+    {"flex-grow", P_FLEX_GROW}, {"flex-shrink", P_FLEX_SHRINK}, {"flex-basis", P_FLEX_BASIS}, {"order", P_ORDER},
+    {"justify-content", P_JUSTIFY_CONTENT}, {"align-items", P_ALIGN_ITEMS}, {"column-gap", P_COLUMN_GAP},
+    {"flex", P_FLEX}, {"gap", P_GAP}, {"grid-column-gap", P_COLUMN_GAP}, {"grid-gap", P_GAP},
+    {"row-gap", P_ROW_GAP}, {"grid-row-gap", P_ROW_GAP}, {"transform", P_TRANSFORM},
+    {"inset-inline-start", P_LEFT}, {"inset-block-start", P_TOP},
     {"margin", P_MARGIN}, {"padding", P_PADDING}, {"border", P_BORDER}, {"border-top", P_BORDER_TOP},
     {"border-right", P_BORDER_RIGHT}, {"border-bottom", P_BORDER_BOTTOM}, {"border-left", P_BORDER_LEFT},
     {"border-width", P_BORDER_WIDTH}, {"border-style", P_BORDER_STYLE}, {"border-color", P_BORDER_COLOR},
@@ -93,6 +100,7 @@ enum {
     K_THIN, K_MEDIUM, K_THICK, K_XX_SMALL, K_X_SMALL, K_SMALL, K_LARGE, K_X_LARGE, K_XX_LARGE,
     K_XXX_LARGE, K_SMALLER, K_LARGER, K_TRANSPARENT, K_CURRENTCOLOR, K_BOTH, K_SMALL_CAPS,
     K_WEBKIT_CENTER, K_MATCH_PARENT, K_MAX_CONTENT, K_MIN_CONTENT, K_FIT_CONTENT,
+    K_SPACE_BETWEEN, K_SPACE_AROUND, K_SPACE_EVENLY, K_FLEX_START, K_FLEX_END, K_STRETCH,
 };
 static const char *const kw_names[] = {
     "", "none", "auto", "normal", "bold", "bolder", "lighter", "italic", "oblique", "block", "inline",
@@ -111,6 +119,7 @@ static const char *const kw_names[] = {
     "thin", "medium", "thick", "xx-small", "x-small", "small", "large", "x-large", "xx-large",
     "xxx-large", "smaller", "larger", "transparent", "currentcolor", "both", "small-caps",
     "-webkit-center", "match-parent", "max-content", "min-content", "fit-content",
+    "space-between", "space-around", "space-evenly", "flex-start", "flex-end", "stretch",
 };
 
 static int kw_lookup(const char *s, size_t n) {
@@ -628,6 +637,73 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
         const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
         int c = split_components(s, n, cs, cl, false);
         if (c >= 1 && parse_component(cs[0], cl[0], &v)) out_add(o, P_BORDER_SPACING, &v, imp);
+        return;
+    }
+    case P_FLEX: {
+        /* flex: none | auto | <grow> [<shrink>] [<basis>] | <basis> */
+        const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
+        int c = split_components(s, n, cs, cl, false);
+        cval_t g = { .t = CV_NUM, .f = 0 }, sh = { .t = CV_NUM, .f = 1 }, b = { .t = CV_KW, .kw = K_AUTO };
+        if (c == 1 && parse_component(cs[0], cl[0], &v) && v.t == CV_KW) {
+            if (v.kw == K_AUTO) g.f = 1;
+            else if (v.kw == K_NONE) sh.f = 0;
+        } else if (c == 1 && (v.t == CV_INHERIT || v.t == CV_INITIAL)) {
+            g = sh = b = v;
+        } else {
+            int nums = 0;
+            bool basis = false;
+            for (int i = 0; i < c && i < 3; i++) {
+                bool plain = cl[i] > 0;
+                for (size_t k = 0; k < cl[i]; k++)
+                    if (!isdigit((unsigned char)cs[i][k]) && cs[i][k] != '.' && cs[i][k] != '-' && cs[i][k] != '+') plain = false;
+                if (plain && nums < 2) {
+                    float f = (float)strtod(cs[i], NULL);
+                    if (nums++ == 0) g.f = f; else sh.f = f;
+                } else if (parse_component(cs[i], cl[i], &v)) {
+                    b = v;
+                    basis = true;
+                }
+            }
+            if (nums && !basis) b = (cval_t){ .t = CV_LEN, .unit = UN_PX, .f = 0 };
+            if (!nums && basis) g.f = 1;
+        }
+        out_add(o, P_FLEX_GROW, &g, imp);
+        out_add(o, P_FLEX_SHRINK, &sh, imp);
+        out_add(o, P_FLEX_BASIS, &b, imp);
+        return;
+    }
+    case P_TRANSFORM: {
+        /* only one thing matters: is the element slid out of view (off-canvas menus)? */
+        char buf[160];
+        size_t k = 0;
+        for (size_t i = 0; i < n && k < sizeof buf - 1; i++) if (!web_isspace((unsigned char)s[i])) buf[k++] = (char)tolower((unsigned char)s[i]);
+        buf[k] = 0;
+        bool off = false;
+        const char *t = strstr(buf, "translate");
+        if (t) {
+            const char *a = strchr(t, '(');
+            if (a) {
+                a++;
+                if (!strncmp(a, "calc(", 5)) a += 5;
+                if (*a == '-') {
+                    float f = (float)strtod(a + 1, NULL);
+                    const char *u = a + 1;
+                    while (*u && (isdigit((unsigned char)*u) || *u == '.')) u++;
+                    if (*u == '%' && f >= 100) off = true;
+                    else if (!strncmp(u, "px", 2) && f >= 500) off = true;
+                    else if (!strncmp(u, "vw", 2) && f >= 100) off = true;
+                }
+            }
+        }
+        cval_t cv = { .t = CV_NUM, .f = off ? 1.0f : 0.0f };
+        out_add(o, P_TRANSFORM, &cv, imp);
+        return;
+    }
+    case P_GAP: {
+        const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
+        int c = split_components(s, n, cs, cl, false);
+        if (c >= 1 && parse_component(cs[0], cl[0], &v)) out_add(o, P_ROW_GAP, &v, imp);
+        if (c >= 1 && parse_component(cs[c >= 2 ? 1 : 0], cl[c >= 2 ? 1 : 0], &v)) out_add(o, P_COLUMN_GAP, &v, imp);
         return;
     }
     case P_CLIP: {
@@ -1333,12 +1409,23 @@ static bool media_one(const char *q, const web_cascade_t *c) {
 }
 
 static bool media_match(const char *q, const web_cascade_t *c) {
-    char buf[256];
+    char buf[512];
     strlcpy(buf, q, sizeof buf);
+    for (char *p = buf; *p; p++) if (web_isspace((unsigned char)*p)) *p = ' ';   /* newlines in media="" */
     char *save = NULL;
     for (char *t = strtok_r(buf, ",", &save); t; t = strtok_r(NULL, ",", &save))
         if (media_one(t, c)) return true;
     return false;
+}
+
+bool web_css_media(const char *query, int vw, int vh) {
+    if (!query || !*query) return true;
+    web_cascade_t c;
+    memset(&c, 0, sizeof c);
+    c.vw = vw;
+    c.vh = vh;
+    c.zoom = 100;
+    return media_match(query, &c);
 }
 
 /* ---- matching ----------------------------------------------------------------------------------- */
@@ -1988,7 +2075,58 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         if (v->t == CV_KW) st->flex_column = v->kw == K_COLUMN || v->kw == K_COLUMN_REVERSE;
         break;
     case P_FLEX_WRAP:
+        if (v->t == CV_KW) st->flex_wrap = v->kw == K_WRAP || v->kw == K_WRAP_REVERSE;
         break;
+    case P_TRANSFORM:
+        if (v->t == CV_NUM) st->offscreen = v->f > 0;
+        else if (initial || (v->t == CV_KW && v->kw == K_NONE)) st->offscreen = 0;
+        break;
+    case P_FLEX_GROW:
+        if (v->t == CV_NUM || v->t == CV_LEN) st->grow = (uint16_t)CLAMP((int)(v->f * 100 + 0.5f), 0, 60000);
+        else if (initial) st->grow = 0;
+        break;
+    case P_FLEX_SHRINK:
+        if (v->t == CV_NUM || v->t == CV_LEN) st->shrink = (uint16_t)CLAMP((int)(v->f * 100 + 0.5f), 0, 60000);
+        else if (initial) st->shrink = 100;
+        break;
+    case P_FLEX_BASIS:
+        if (v->t == CV_KW && v->kw == K_CONTENT_BOX) st->basis.u = U_AUTO;
+        else st->basis = initial ? (web_len_t){ 0, U_AUTO } : to_len(cx, st, ps, v, true);
+        if (st->basis.u == U_NONE) st->basis.u = U_AUTO;
+        break;
+    case P_ORDER:
+        if (v->t == CV_NUM || v->t == CV_LEN) st->order = (int16_t)CLAMP((int)v->f, -1000, 1000);
+        else if (initial) st->order = 0;
+        break;
+    case P_JUSTIFY_CONTENT:
+        if (v->t == CV_KW) {
+            switch (v->kw) {
+            case K_CENTER: st->justify = JC_CENTER; break;
+            case K_FLEX_END: case K_END: case K_RIGHT: st->justify = JC_END; break;
+            case K_SPACE_BETWEEN: st->justify = JC_BETWEEN; break;
+            case K_SPACE_AROUND: st->justify = JC_AROUND; break;
+            case K_SPACE_EVENLY: st->justify = JC_EVENLY; break;
+            default: st->justify = JC_START; break;
+            }
+        } else if (initial) st->justify = JC_START;
+        break;
+    case P_ALIGN_ITEMS:
+        if (v->t == CV_KW) {
+            switch (v->kw) {
+            case K_CENTER: st->align_items = AI_CENTER; break;
+            case K_FLEX_START: case K_START: case K_TOP: st->align_items = AI_START; break;
+            case K_FLEX_END: case K_END: case K_BOTTOM: st->align_items = AI_END; break;
+            case K_BASELINE: st->align_items = AI_BASELINE; break;
+            default: st->align_items = AI_STRETCH; break;
+            }
+        } else if (initial) st->align_items = AI_STRETCH;
+        break;
+    case P_COLUMN_GAP: case P_ROW_GAP: {
+        int16_t *g = p == P_COLUMN_GAP ? &st->gap : &st->rgap;
+        if (v->t == CV_LEN && v->unit != UN_PCT) *g = (int16_t)CLAMP(to_px(cx, st, ps, v, 0, false), 0, 2000);
+        else if (initial || (v->t == CV_KW && v->kw == K_NORMAL)) *g = 0;
+        break;
+    }
     case P_CLIP:
         if (v->t == CV_NUM && v->f > 0) st->visibility_hidden = 2;   /* clipped away (screen-reader text) */
         break;
@@ -2246,6 +2384,8 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
         st->bc[i] = 0x00000001;   /* current colour */
         st->margin[i] = st->padding[i] = (web_len_t){ 0, U_PX };
     }
+    st->shrink = 100;
+    st->basis.u = U_AUTO;
 
     /* collect matching declarations */
     cx->nm = 0;
@@ -2302,6 +2442,11 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
                                        st->height.u == U_PX && st->height.v <= 1))
         st->display = D_NONE;
     if (st->visibility_hidden == 3 && (st->position == POS_ABSOLUTE || st->position == POS_FIXED)) st->display = D_NONE;
+    /* out-of-flow boxes that are hidden or slid out of view (dropdowns, off-canvas menus) take no room */
+    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
+        (st->offscreen || st->visibility_hidden == 1 ||
+         (st->left.u == U_PCT && st->left.v <= -1000) || (st->top.u == U_PCT && st->top.v <= -1000)))
+        st->display = D_NONE;
     if (st->visibility_hidden > 1) st->visibility_hidden = 0;
     if (n->tag == T_INPUT) {
         const char *ty = web_attr(n, "type");

@@ -152,6 +152,8 @@ enum { LS_DISC = 0, LS_CIRCLE, LS_SQUARE, LS_DECIMAL, LS_LOWER_ALPHA, LS_UPPER_A
        LS_LOWER_ROMAN, LS_UPPER_ROMAN, LS_NONE };
 enum { TT_NONE = 0, TT_UPPER, TT_LOWER, TT_CAPITALIZE };
 enum { POS_STATIC = 0, POS_RELATIVE, POS_ABSOLUTE, POS_FIXED, POS_STICKY };
+enum { JC_START = 0, JC_CENTER, JC_END, JC_BETWEEN, JC_AROUND, JC_EVENLY };
+enum { AI_STRETCH = 0, AI_START, AI_CENTER, AI_END, AI_BASELINE };
 #define DECO_UNDERLINE 1
 #define DECO_STRIKE    2
 #define DECO_OVERLINE  4
@@ -164,7 +166,13 @@ typedef struct web_var { const char *name, *value; const struct web_var *next; }
 typedef struct web_style {
     uint8_t  display, visibility_hidden, ws, align, valign, list, transform, position;
     uint8_t  bold, italic, mono, deco, floating, border_box, overflow_hidden, align_legacy;
-    uint8_t  collapse, flex_column, nowrap_flex, list_inside, clear;   /* clear: 1 left, 2 right, 3 both */
+    uint8_t  collapse, flex_column, flex_wrap, list_inside, clear;   /* clear: 1 left, 2 right, 3 both */
+    uint8_t  justify, align_items;     /* flex containers: JC_* / AI_*      */
+    int16_t  order;                    /* flex items                        */
+    uint16_t grow, shrink;             /* flex items, x100                  */
+    web_len_t basis;                   /* flex-basis (U_AUTO = auto)        */
+    int16_t  gap, rgap;                /* flex containers: column / row gap, px */
+    uint8_t  offscreen;                /* transform moves it out of view    */
     int16_t  fsize;          /* px (zoomed)                     */
     int16_t  lh;             /* line height px, 0 = normal      */
     int16_t  indent;         /* text-indent px                  */
@@ -188,6 +196,8 @@ typedef struct web_cascade {
 
 /* Compute n->st for every element of the document. */
 void web_style_doc(web_doc_t *d, const web_cascade_t *c);
+/* Does a media query list ("screen and (min-width: 600px)", "print") apply? */
+bool web_css_media(const char *query, int vw, int vh);
 /* Parse a CSS colour ("red", "#abc", "rgb(..)"). false if not a colour. */
 bool web_css_color(const char *s, uint32_t *out);
 

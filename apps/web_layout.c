@@ -68,6 +68,9 @@ static bool stack_low(void) {
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum);
 static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, bool ctop, bool cbot, int *trailing);
 static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx);
+static int run_ifc(lctx_t *lc, web_node_t *container, web_node_t *from, web_node_t *to, int cx, int y, int cw, bool *any);
+static void flex_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx);
+static bool is_flex_row(const web_style_t *st);
 
 /* ---- helpers --------------------------------------------------------------------- */
 static int rlen(web_len_t l, int base) {
@@ -933,6 +936,10 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
         return;
     } else if (st->width.u == U_PX) {
         *mn = *mx = st->width.v + (st->border_box ? 0 : mbp);
+    } else if (is_flex_row(st)) {
+        flex_intrinsic(lc, n, mn, mx);
+        *mn += mbp;
+        *mx += mbp;
     } else {
         meas_t m = { 0, 0, 0, 0, false, false };
         meas_children(lc, &m, n, 0);
@@ -1638,6 +1645,7 @@ static void place_float(lctx_t *lc, web_node_t *c, int cx, int cw, int y) {
     lc->link = saved_link;
     lc->flbase = base;
     lc->mk = mk;
+    /* the margin box: negative margins let a float overlap (the "margin-left:-100%" sidebar) */
     int ow = b.ml + r.w + b.mr, oh = b.mt + r.h + (r.mb > 0 ? r.mb : 0);
     if (ow > cw) ow = cw;
     int fy = y;
@@ -1683,23 +1691,241 @@ static int leading_margin(web_node_t *n, int cbw, int depth) {
     return collapse(mt, leading_margin(c, cbw, depth + 1));
 }
 
-static int flex_row(lctx_t *lc, web_node_t *n, int cx, int cy, int cw) {
-    ifc_t f;
-    ifc_init(&f, lc, n->st, cx, cy, cw);
-    f.align = TA_LEFT;
-    for (web_node_t *c = n->first; c; c = c->next) {
-        if (c->type == WN_TEXT) { add_text(&f, c, n->st); continue; }
-        if (!displayed(c)) continue;
-        if (c->tag == T_IMG) { add_image(&f, c); continue; }
-        if (c->ctl >= 0) { add_ctrl(&f, c); continue; }
-        if (c->tag == T_BR) continue;
-        int saved = lc->link;
-        if (c->link >= 0) lc->link = c->link;
-        add_box(&f, c, true);
-        lc->link = saved;
+/* ---- flex rows ------------------------------------------------------------------------ */
+typedef struct fitem {
+    web_node_t *n;              /* the item, or NULL for a run of text            */
+    web_node_t *from, *to;      /* text run                                       */
+    int order, idx;
+    int base, minw, w;          /* margin-box widths                              */
+    int grow, shrink;
+    int ml, mr, mt, mb, hp;
+    int first, last, h;
+} fitem_t;
+
+static bool is_flex_row(const web_style_t *st) {
+    return (st->display == D_FLEX || st->display == D_INLINE_FLEX) && !st->flex_column;
+}
+
+static int fitem_cmp(const fitem_t *a, const fitem_t *b) {
+    return a->order != b->order ? (a->order < b->order ? -1 : 1) : (a->idx < b->idx ? -1 : a->idx > b->idx);
+}
+
+/* the items of a flex container, in display order; *n returns the count */
+static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count) {
+    fitem_t *it = NULL;
+    int n = 0, cap = 0;
+    for (web_node_t *c = box->first; c;) {
+        web_node_t *from = NULL, *to = NULL;
+        if (c->type == WN_TEXT) {
+            from = c;
+            bool content = false;
+            while (c && c->type == WN_TEXT) { if (!ws_only(c)) content = true; c = c->next; }
+            to = c;
+            if (!content) continue;
+        } else if (!displayed(c)) { c = c->next; continue; }
+        if (n >= cap) {
+            int nc = cap ? cap * 2 : 16;
+            fitem_t *ni = realloc(it, sizeof *ni * nc);
+            if (!ni) break;
+            it = ni;
+            cap = nc;
+        }
+        fitem_t *f = &it[n];
+        memset(f, 0, sizeof *f);
+        f->idx = n;
+        if (from) {
+            f->from = from;
+            f->to = to;
+            meas_t m = { 0, 0, 0, 0, false, false };
+            for (web_node_t *x = from; x != to; x = x->next) meas_node(lc, &m, x, box->st, 0);
+            meas_flush(&m);
+            f->base = m.max;
+            f->minw = m.min;
+            f->shrink = 100;
+        } else {
+            const web_style_t *st = c->st;
+            bm_t b;
+            box_metrics(st, cw, &b);
+            f->n = c;
+            f->order = st->order;
+            f->grow = st->grow;
+            f->shrink = st->shrink;
+            f->ml = b.ml; f->mr = b.mr; f->mt = b.mt; f->mb = b.mb;
+            f->hp = b.pl + b.pr + b.bl + b.br;
+            int mn, mx;
+            intrinsic(lc, c, &mn, &mx);
+            web_len_t size = st->basis.u == U_PX || st->basis.u == U_PCT ? st->basis : st->width;
+            if (size.u == U_PX || size.u == U_PCT) {
+                int content = rlen(size, cw) - (st->border_box ? f->hp : 0);
+                if (content < 0) content = 0;
+                f->base = f->ml + f->hp + content + f->mr;
+            } else {
+                f->base = mx;
+            }
+            f->minw = st->overflow_hidden ? f->ml + f->hp + f->mr : MIN(mn, f->base);
+            if (st->width.u == U_PX) f->minw = MIN(f->minw, f->base);
+            if (st->minw.u == U_PX || st->minw.u == U_PCT) {
+                int lo = f->ml + f->hp + f->mr + rlen(st->minw, cw) - (st->border_box ? f->hp : 0);
+                if (lo > f->minw) f->minw = lo;
+                if (lo > f->base) f->base = lo;
+            }
+            if (st->maxw.u == U_PX || st->maxw.u == U_PCT) {
+                int hi = f->ml + f->hp + f->mr + rlen(st->maxw, cw) - (st->border_box ? f->hp : 0);
+                if (f->base > hi) f->base = hi;
+                if (f->minw > hi) f->minw = hi;
+            }
+        }
+        n++;
+        if (!from) c = c->next;
     }
-    ifc_finish(&f);
-    return f.y - cy;
+    /* stable sort by `order` */
+    for (int i = 1; i < n; i++) {
+        fitem_t x = it[i];
+        int j = i - 1;
+        while (j >= 0 && fitem_cmp(&it[j], &x) > 0) { it[j + 1] = it[j]; j--; }
+        it[j + 1] = x;
+    }
+    *count = n;
+    return it;
+}
+
+static void flex_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx) {
+    int n;
+    fitem_t *it = flex_items(lc, box, lc->vw, &n);
+    int gap = box->st->gap, smin = 0, smax = 0;
+    for (int i = 0; i < n; i++) {
+        smax += it[i].base + (i ? gap : 0);
+        if (box->st->flex_wrap) smin = MAX(smin, it[i].minw);
+        else smin += it[i].minw + (i ? gap : 0);
+    }
+    free(it);
+    *mn = smin;
+    *mx = smax;
+}
+
+/* grow a laid-out box (border box bx,by,bw,bh) by `room` pixels: its background
+   gets taller and its bottom / side borders move with it */
+static void stretch_box(lctx_t *lc, int first, int last, int bx, int by, int bw, int bh, int room) {
+    for (int i = first; i < last; i++) {
+        web_item_t *it = &lc->L->items[i];
+        if (it->kind != WI_RECT) continue;
+        if (it->x == bx && it->y == by && it->w == bw && it->h == bh) it->h += room;                 /* background */
+        else if (it->y + it->h == by + bh && it->y > by && it->w == bw && it->x == bx) it->y += room;  /* bottom border */
+        else if ((it->x == bx || it->x + it->w == bx + bw) && it->y >= by && it->y + it->h <= by + bh &&
+                 it->w < bw && it->y + it->h >= by + bh - 8) it->h += room;                          /* side borders */
+    }
+}
+
+static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fixed_h) {
+    const web_style_t *cs = box->st;
+    int n;
+    fitem_t *it = flex_items(lc, box, cw, &n);
+    if (!it) return 0;
+    int gap = cs->gap, y = cy;
+    for (int a = 0; a < n;) {
+        /* one line of items */
+        int b = a, sum = 0;
+        while (b < n) {
+            int add = it[b].base + (b > a ? gap : 0);
+            if (cs->flex_wrap && b > a && sum + add > cw) break;
+            sum += add;
+            b++;
+        }
+        int free_w = cw - sum;
+        for (int i = a; i < b; i++) it[i].w = it[i].base;
+        if (free_w > 0) {
+            int64_t g = 0;
+            for (int i = a; i < b; i++) g += it[i].grow;
+            if (g > 0) {
+                int given = 0;
+                for (int i = a; i < b; i++) { int d = (int)((int64_t)free_w * it[i].grow / g); it[i].w += d; given += d; }
+                for (int i = b - 1; i >= a && given < free_w; i--) if (it[i].grow) { it[i].w += free_w - given; given = free_w; }
+                free_w = 0;
+            }
+        } else if (free_w < 0) {
+            /* shrink in proportion to shrink factor x base size, never below the minimum */
+            for (int pass = 0; pass < 3 && free_w < 0; pass++) {
+                int64_t sw = 0;
+                for (int i = a; i < b; i++) if (it[i].w > it[i].minw) sw += (int64_t)it[i].shrink * it[i].base;
+                if (sw <= 0) break;
+                int need = -free_w, taken = 0;
+                for (int i = a; i < b; i++) {
+                    if (it[i].w <= it[i].minw) continue;
+                    int d = (int)((int64_t)need * it[i].shrink * it[i].base / sw);
+                    if (it[i].w - d < it[i].minw) d = it[i].w - it[i].minw;
+                    it[i].w -= d;
+                    taken += d;
+                }
+                free_w += taken;
+                if (!taken) break;
+            }
+        }
+        /* justify-content */
+        int cnt = b - a, x = cx, spacing = gap;
+        if (free_w > 0) {
+            switch (cs->justify) {
+            case JC_CENTER: x += free_w / 2; break;
+            case JC_END: x += free_w; break;
+            case JC_BETWEEN: if (cnt > 1) spacing += free_w / (cnt - 1); break;
+            case JC_AROUND: spacing += free_w / cnt; x += free_w / cnt / 2; break;
+            case JC_EVENLY: spacing += free_w / (cnt + 1); x += free_w / (cnt + 1); break;
+            default: break;
+            }
+        }
+        /* lay the items out */
+        int lineh = 0;
+        for (int i = a; i < b; i++) {
+            fitem_t *f = &it[i];
+            f->first = lc->L->nitems;
+            if (f->n) {
+                int content = f->w - f->ml - f->mr - f->hp;
+                if (content < 0) content = 0;
+                int saved = lc->link;
+                if (f->n->link >= 0) lc->link = f->n->link;
+                bres_t r;
+                layout_box(lc, f->n, x, y + f->mt, cw, content, &r, 0);
+                lc->link = saved;
+                f->h = f->mt + r.h + f->mb;
+            } else {
+                bool any;
+                f->h = run_ifc(lc, box, f->from, f->to, x, y, MAX(f->w, 1), &any);
+            }
+            f->last = lc->L->nitems;
+            if (f->h > lineh) lineh = f->h;
+            x += f->w + spacing;
+        }
+        if (a == 0 && b == n && fixed_h > lineh) lineh = fixed_h;
+        /* align-items */
+        for (int i = a; i < b; i++) {
+            fitem_t *f = &it[i];
+            int room = lineh - f->h;
+            if (room <= 0) continue;
+            if (cs->align_items == AI_CENTER) shift_items(lc, f->first, f->last, 0, room / 2);
+            else if (cs->align_items == AI_END) shift_items(lc, f->first, f->last, 0, room);
+            else if (cs->align_items == AI_STRETCH && f->n && f->n->st->height.u == U_AUTO && f->last > f->first) {
+                web_item_t *bg = &lc->L->items[f->first];
+                /* the box's border box: the first item is its background when it has one */
+                int bwid = f->w - f->ml - f->mr, bh = f->h - f->mt - f->mb;
+                int bxx = bg->kind == WI_RECT && bg->w == bwid ? bg->x : INT_MIN;
+                if (bxx != INT_MIN) stretch_box(lc, f->first, f->last, bxx, y + f->mt, bwid, bh, room);
+                else {
+                    /* no background: find the left border to locate the box */
+                    for (int k = f->first; k < f->last; k++) {
+                        web_item_t *r = &lc->L->items[k];
+                        if (r->kind == WI_RECT && r->y == y + f->mt && r->w == bwid) {
+                            stretch_box(lc, f->first, f->last, r->x, y + f->mt, bwid, bh, room);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        y += lineh;
+        a = b;
+        if (a < n) y += cs->rgap;
+    }
+    free(it);
+    return y - cy;
 }
 
 static int run_ifc(lctx_t *lc, web_node_t *container, web_node_t *from, web_node_t *to, int cx, int y, int cw, bool *any) {
@@ -1838,12 +2064,12 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     }
     int fmark = lc->nfl;
     bool root = n->parent && n->parent->type == WN_DOC;
-    bool bfc = st->overflow_hidden || fw >= 0 || st->display == D_FLEX;
+    bool bfc = st->overflow_hidden || fw >= 0 || st->display == D_FLEX || st->display == D_INLINE_FLEX;
     bool ctop = !root && !bfc && b.pt == 0 && b.bt == 0;
     bool cbot = !root && !bfc && b.pb == 0 && b.bb == 0 && st->height.u == U_AUTO;
     int trailing = 0, ch;
     lc->depth++;
-    if (st->display == D_FLEX && !st->flex_column) ch = flex_row(lc, n, cx, cy, w);
+    if (is_flex_row(st)) ch = flex_row(lc, n, cx, cy, w, st->height.u == U_PX ? st->height.v - (st->border_box ? b.pt + b.pb + b.bt + b.bb : 0) : -1);
     else ch = block_children(lc, n, cx, cy, w, ctop, cbot, &trailing);
     lc->depth--;
     if (st->display == D_LIST_ITEM && lc->mk.on && lc->mk.x == cx) emit_marker(lc, cy + font_ascent(lc->mk.font));

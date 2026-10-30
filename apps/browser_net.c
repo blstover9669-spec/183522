@@ -323,6 +323,7 @@ static void page_clear(tab_t *t) {
     for (int i = 0; i < t->ncss; i++) {
         free(t->css[i].url);
         free(t->css[i].text);
+        free(t->css[i].media);
         web_css_free(t->css[i].sheet);
     }
     free(t->css);
@@ -345,7 +346,7 @@ static void page_clear(tab_t *t) {
 }
 
 /* order keys: 4 x 16 bits, an @import sorts right before the sheet that imports it */
-static int css_add(tab_t *t, const char *url, const char *text, int depth) {
+static int css_add(tab_t *t, const char *url, const char *text, int depth, const char *media) {
     if (t->ncss >= 96) return -1;
     if (t->ncss >= t->csscap) {
         int nc = t->csscap ? t->csscap * 2 : 16;
@@ -358,6 +359,7 @@ static int css_add(tab_t *t, const char *url, const char *text, int depth) {
     memset(e, 0, sizeof *e);
     e->url = url ? dupstr(url) : NULL;
     e->text = text ? dupstr(text) : NULL;
+    e->media = media && *media ? dupstr(media) : NULL;
     e->depth = depth;
     return t->ncss++;
 }
@@ -372,7 +374,7 @@ static void css_parsed(tab_t *t, int i, const char *text, size_t len, const char
         char abs[B_URL_MAX];
         if (!url_resolve(base, web_css_import(e->sheet, k), abs, sizeof abs)) continue;
         int depth = t->css[i].depth + 1;
-        int j = css_add(t, abs, NULL, depth);
+        int j = css_add(t, abs, NULL, depth, t->css[i].media);
         if (j < 0) break;
         /* key: the parent's key with level `depth` (0xFFFF there) replaced by k */
         int shift = 48 - 16 * depth;
@@ -387,7 +389,7 @@ static void css_gather(tab_t *t, web_node_t *n, int depth) {
         if (c->type != WN_ELEM) continue;
         if (c->tag == T_STYLE) {
             const char *media = web_attr(c, "media");
-            if (media && strcasestr(media, "print") && !strcasestr(media, "screen") && !strcasestr(media, "all")) continue;
+            if (media && !web_css_media(media, 1024, 768) && !strcasestr(media, "width") && !strcasestr(media, "height")) continue;
             size_t len = 0;
             for (web_node_t *x = c->first; x; x = x->next) if (x->type == WN_TEXT) len += (size_t)x->len;
             char *text = malloc(len + 1);
@@ -395,7 +397,7 @@ static void css_gather(tab_t *t, web_node_t *n, int depth) {
             size_t o = 0;
             for (web_node_t *x = c->first; x; x = x->next) if (x->type == WN_TEXT) { memcpy(text + o, x->text, (size_t)x->len); o += (size_t)x->len; }
             text[o] = 0;
-            int i = css_add(t, NULL, NULL, 0);
+            int i = css_add(t, NULL, NULL, 0, media);
             if (i >= 0) {
                 t->css[i].key = ((uint64_t)i << 48) | 0xFFFFFFFFFFFFull;
                 css_parsed(t, i, text, o, t->pg.base);
@@ -415,10 +417,12 @@ static void css_gather(tab_t *t, web_node_t *n, int depth) {
                 if (p - s == 9 && !strncasecmp(s, "alternate", 9)) { sheet = false; break; }
             }
             if (!sheet) continue;
-            if (media && strcasestr(media, "print") && !strcasestr(media, "screen") && !strcasestr(media, "all")) continue;
+            /* sheets for other media (print, dark mode) are not even loaded; size-dependent
+               ones are loaded and checked against the window size at every restyle */
+            if (media && !web_css_media(media, 1024, 768) && !strcasestr(media, "width") && !strcasestr(media, "height")) continue;
             char abs[B_URL_MAX];
             if (!url_resolve(t->pg.base, href, abs, sizeof abs)) continue;
-            int i = css_add(t, abs, NULL, 0);
+            int i = css_add(t, abs, NULL, 0, media);
             if (i >= 0) t->css[i].key = ((uint64_t)i << 48) | 0xFFFFFFFFFFFFull;
             continue;
         }
@@ -547,7 +551,9 @@ static int key_cmp_idx(const void *a, const void *b) {
 void tab_restyle(tab_t *t) {
     if (!t->pg.doc) return;
     int order[96], n = 0;
-    for (int i = 0; i < t->ncss && n < 96; i++) if (t->css[i].sheet) order[n++] = i;
+    rect_t vv = browser_view(t->b);
+    for (int i = 0; i < t->ncss && n < 96; i++)
+        if (t->css[i].sheet && web_css_media(t->css[i].media, vv.w, vv.h)) order[n++] = i;
     sort_css = t->css;
     if (n > 1) qsort(order, (size_t)n, sizeof(int), key_cmp_idx);
     web_sheet_t *sheets[96];
