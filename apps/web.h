@@ -119,6 +119,7 @@ typedef struct web_doc {
     char     base[1024];     /* <base href> (raw) or ""                     */
     char     refresh[1024];  /* <meta http-equiv=refresh> URL or ""         */
     int      nelems;
+    bool     quirks;         /* no / a legacy doctype: quirks mode          */
     char    *text;           /* the 1252 source the nodes point into        */
     size_t   textlen;
 } web_doc_t;

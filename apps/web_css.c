@@ -1496,7 +1496,12 @@ static const char ua_css[] =
     "button,input,select,textarea{display:inline-block;font-size:13px}"
     "noscript{display:block}";
 
-static web_sheet_t *ua_sheet;
+/* quirks mode (no or a legacy doctype): tables do not inherit text properties */
+static const char ua_quirks_css[] =
+    "table{font-size:initial;font-weight:initial;font-style:initial;line-height:initial;"
+    "white-space:initial;text-align:initial}";
+
+static web_sheet_t *ua_sheet, *ua_quirks;
 
 /* ---- the cascade --------------------------------------------------------------------------------- */
 typedef struct mdecl { const decl_t *d; uint64_t key; } mdecl_t;
@@ -1987,9 +1992,9 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
     case P_CLIP:
         if (v->t == CV_NUM && v->f > 0) st->visibility_hidden = 2;   /* clipped away (screen-reader text) */
         break;
-    case P_OPACITY:
-        if (v->t == CV_NUM && v->f <= 0.01f) st->visibility_hidden = 3;
-        else if (v->t == CV_NUM) { if (st->visibility_hidden == 3) st->visibility_hidden = 0; }
+    case P_OPACITY:   /* "0" parses as a length */
+        if ((v->t == CV_NUM || v->t == CV_LEN) && v->f <= 0.01f) st->visibility_hidden = 3;
+        else if (v->t == CV_NUM || v->t == CV_LEN) { if (st->visibility_hidden == 3) st->visibility_hidden = 0; }
         break;
     default:
         break;
@@ -2245,6 +2250,7 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     /* collect matching declarations */
     cx->nm = 0;
     match_sheet(cx, ua_sheet, 0, 0, n, NULL);
+    if (cx->doc->quirks) match_sheet(cx, ua_quirks, 0, 0, n, NULL);
     for (int i = 0; i < cx->c->nsheets && i < 63; i++)
         match_sheet(cx, cx->c->sheets[i], 2, i + 1, n, cx->media_ok[i]);
     web_sheet_t *inl = NULL;
@@ -2317,6 +2323,7 @@ static void style_rec(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
 void web_style_doc(web_doc_t *d, const web_cascade_t *c) {
     if (!d || !d->root) return;
     if (!ua_sheet) ua_sheet = web_css_parse(ua_css, strlen(ua_css), 0);
+    if (!ua_quirks) ua_quirks = web_css_parse(ua_quirks_css, strlen(ua_quirks_css), 0);
     cctx_t cx;
     memset(&cx, 0, sizeof cx);
     cx.c = c;

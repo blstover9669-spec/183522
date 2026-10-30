@@ -403,18 +403,42 @@ static void ctrl_box(lctx_t *lc, web_ctrl_t *c, const web_style_t *st, int cbw, 
 }
 
 /* ---- measuring (min / max content widths) ---------------------------------------------- */
-typedef struct meas { int min, max, line; bool pend; } meas_t;
+typedef struct meas {
+    int min, max, line;
+    int run;                 /* width since the last break opportunity */
+    bool pend;               /* a space is pending                     */
+    bool brk;                /* ... and it is a break opportunity       */
+} meas_t;
 
 static void meas_flush(meas_t *m) {
     if (m->line > m->max) m->max = m->line;
     m->line = 0;
-    m->pend = false;
+    m->run = 0;
+    m->pend = m->brk = false;
 }
 
 static void meas_add(meas_t *m, int w, int minw) {
     m->line += w;
     if (minw > m->min) m->min = minw;
     if (m->line > m->max) m->max = m->line;
+}
+
+/* unbreakable content of width w; sp = the pending space's width */
+static void meas_glue(meas_t *m, int w, int sp) {
+    if (m->pend && m->brk) m->run = 0;
+    else m->run += sp;
+    m->run += w;
+    if (m->run > m->min) m->min = m->run;
+    m->line += sp + w;
+    if (m->line > m->max) m->max = m->line;
+    m->pend = m->brk = false;
+}
+
+/* an atomic box (image, inline-block): break opportunities around it */
+static void meas_atom(meas_t *m, int w, int minw) {
+    m->run = 0;
+    m->pend = m->brk = false;
+    meas_add(m, w, minw);
 }
 
 static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_style_t *st) {
@@ -448,7 +472,7 @@ static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_styl
     while (i < n) {
         if (web_isspace((unsigned char)s[i])) {
             if (ws == WS_PRE_LINE && s[i] == '\n') meas_flush(m);
-            else m->pend = true;
+            else { m->pend = true; if (ws != WS_NOWRAP) m->brk = true; }
             i++;
             continue;
         }
@@ -457,8 +481,7 @@ static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_styl
         int w = font_text_width_n(f, s + i, j - i);
         if (st->transform == TT_UPPER) w = w * 115 / 100;
         int sp = (m->pend && m->line) ? spw : 0;
-        m->pend = false;
-        meas_add(m, sp + w, ws == WS_NOWRAP ? m->line + sp + w : w);
+        meas_glue(m, w, sp);
         i = j;
     }
 }
@@ -477,8 +500,7 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
         bm_t b;
         box_metrics(st, 0, &b);
         w += b.ml + b.mr;
-        m->pend = false;
-        meas_add(m, w, w);
+        meas_atom(m, w, w);
         return;
     }
     if (c->ctl >= 0 && c->tag != T_BUTTON) {
@@ -487,22 +509,20 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
         int w, h;
         ctrl_box(lc, ct, st, 0, &w, &h);
         if (st->width.u == U_PCT) w = 40;
-        m->pend = false;
-        meas_add(m, w + 4, w + 4);
+        meas_atom(m, w + 4, w + 4);
         return;
     }
     if (c->ctl >= 0 && c->tag == T_BUTTON) {
         web_ctrl_t *ct = &lc->pg->ctrls[c->ctl];
         int w, h;
         ctrl_box(lc, ct, st, 0, &w, &h);
-        m->pend = false;
-        meas_add(m, w + 4, w + 4);
+        meas_atom(m, w + 4, w + 4);
         return;
     }
     if (block_level(c) || is_float(c)) {
         int mn, mx;
         intrinsic(lc, c, &mn, &mx);
-        if (is_float(c)) { m->pend = false; meas_add(m, mx, mn); return; }
+        if (is_float(c)) { meas_atom(m, mx, mn); return; }
         meas_flush(m);
         if (mn > m->min) m->min = mn;
         if (mx > m->max) m->max = mx;
@@ -512,17 +532,16 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
     if (d == D_INLINE_BLOCK || d == D_INLINE_TABLE || d == D_INLINE_FLEX) {
         int mn, mx;
         intrinsic(lc, c, &mn, &mx);
-        m->pend = false;
-        meas_add(m, mx, mn);
+        meas_atom(m, mx, mn);
         return;
     }
     /* inline */
     bm_t b;
     box_metrics(st, 0, &b);
     int lpad = b.ml + b.bl + b.pl, rpad = b.mr + b.br + b.pr;
-    if (lpad > 0) meas_add(m, lpad, 0);
+    if (lpad > 0) meas_glue(m, lpad, (m->pend && m->line) ? font_char_width(sfont(lc, st), ' ') : 0);
     meas_children(lc, m, c, depth + 1);
-    if (rpad > 0) meas_add(m, rpad, 0);
+    if (rpad > 0) meas_glue(m, rpad, 0);
 }
 
 static void meas_children(lctx_t *lc, meas_t *m, web_node_t *n, int depth) {
@@ -902,7 +921,7 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
     } else if (st->width.u == U_PX) {
         *mn = *mx = st->width.v + (st->border_box ? 0 : mbp);
     } else {
-        meas_t m = { 0, 0, 0, false };
+        meas_t m = { 0, 0, 0, 0, false, false };
         meas_children(lc, &m, n, 0);
         meas_flush(&m);
         *mn = m.min + mbp;
@@ -973,6 +992,7 @@ typedef struct ifc {
     int lx, aw, used;
     int align, indent;
     bool first_line, pend, wrapped;
+    bool pend_brk;           /* the pending space is a break opportunity */
     int col;                 /* characters on the line (tab stops)        */
     litem_t *it;
     int n, cap;
@@ -1163,7 +1183,7 @@ static void ifc_break(ifc_t *f) {
         f->first_line = false;
         ifc_bounds(f);
     }
-    f->pend = false;
+    f->pend = f->pend_brk = false;
     f->wrapped = false;
     f->col = 0;
 }
@@ -1235,10 +1255,12 @@ static void add_word(ifc_t *f, const char *s, int len, const web_style_t *st, co
     int spw = 0;
     uint16_t nsp = 0;
     if (f->pend && f->n > 0) { spw = font_char_width(font, ' '); nsp = 1; }
-    bool glued = !f->pend && f->n > 0 && (f->it[f->n - 1].kind == LI_TEXT || f->it[f->n - 1].kind == LI_SPACE);
-    f->pend = false;
+    /* a break may come before this word only after a space that allows one */
+    bool glued = !(f->pend && f->pend_brk) && f->n > 0 &&
+                 (f->it[f->n - 1].kind == LI_TEXT || f->it[f->n - 1].kind == LI_SPACE);
+    f->pend = f->pend_brk = false;
     int w = font_text_width_n(font, s, len);
-    ifc_make_room(f, w, &spw, &nsp, glued, wrap);
+    ifc_make_room(f, w, &spw, &nsp, glued, true);
     /* a word longer than the whole line: break it */
     while (wrap && f->n == 0 && w > f->aw && len > 1 && f->aw > 0) {
         int k = 0, acc = 0;
@@ -1334,12 +1356,12 @@ static void add_text(ifc_t *f, const web_node_t *t, const web_style_t *st) {
                 it->fs = st->fsize;
                 f->used += sw;
                 f->col += wl;
-                f->pend = false;
+                f->pend = f->pend_brk = false;
                 i = j;
                 /* the next word may start a new line */
                 continue;
             }
-            f->pend = false;
+            f->pend = f->pend_brk = false;
             bool prev_space = f->n > 0 && f->it[f->n - 1].kind == LI_TEXT && f->it[f->n - 1].text[0] == ' ' && ws == WS_PRE_WRAP;
             int before = f->n;
             add_word(f, w, wl, st, font, asc, desc, ws == WS_PRE_WRAP);
@@ -1355,7 +1377,7 @@ static void add_text(ifc_t *f, const web_node_t *t, const web_style_t *st) {
         unsigned char ch = (unsigned char)s[i];
         if (web_isspace(ch)) {
             if (ws == WS_PRE_LINE && ch == '\n') ifc_break(f);
-            else f->pend = true;
+            else { f->pend = true; if (wrap) f->pend_brk = true; }
             i++;
             continue;
         }
@@ -1373,7 +1395,7 @@ static void push_simple(ifc_t *f, int kind, int ref, int w, int h, int ml, int m
     int spw = 0;
     uint16_t nsp = 0;
     if (f->pend && f->n > 0) { spw = font_char_width(sfont(lc, st), ' '); nsp = 1; }
-    f->pend = false;
+    f->pend = f->pend_brk = false;
     ifc_make_room(f, ow, &spw, &nsp, false, st->ws != WS_NOWRAP && st->ws != WS_PRE);
     litem_t *it = ifc_push(f);
     if (!it) return;
@@ -1467,7 +1489,7 @@ static void add_box(ifc_t *f, web_node_t *c, bool flex_item) {
     int spw = 0;
     uint16_t nsp = 0;
     if (f->pend && f->n > 0) { spw = font_char_width(sfont(lc, st), ' '); nsp = 1; }
-    f->pend = false;
+    f->pend = f->pend_brk = false;
     ifc_make_room(f, ow, &spw, &nsp, false, true);
     litem_t *it = ifc_push(f);
     if (!it) return;
@@ -1527,8 +1549,8 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
         int spw = 0;
         uint16_t nsp = 0;
         if (f->pend && f->n > 0) { spw = font_char_width(sfont(lc, st), ' '); nsp = 1; }
-        bool glued = !f->pend && f->n > 0 && f->it[f->n - 1].kind != LI_BOX && f->it[f->n - 1].kind != LI_SIMPLE;
-        f->pend = false;
+        bool glued = !(f->pend && f->pend_brk) && f->n > 0 && f->it[f->n - 1].kind != LI_BOX && f->it[f->n - 1].kind != LI_SIMPLE;
+        f->pend = f->pend_brk = false;
         ifc_make_room(f, lpad, &spw, &nsp, glued, st->ws != WS_NOWRAP);
         litem_t *it = ifc_push(f);
         if (it) { it->kind = LI_SPACE; it->glued = glued; it->x = f->used + spw; it->spw = spw; it->w = lpad; f->used = it->x + lpad; }
@@ -1570,7 +1592,7 @@ static void ifc_finish(ifc_t *f) {
 static void block_in_inline(ifc_t *f, web_node_t *c) {
     lctx_t *lc = f->lc;
     if (f->n) ifc_flush(f, f->n);
-    f->pend = false;
+    f->pend = f->pend_brk = false;
     bm_t b;
     box_metrics(c->st, f->cw, &b);
     if (c->st->clear) f->y = fl_clear_y(lc, f->y, c->st->clear);

@@ -967,6 +967,40 @@ static void end_tag(parser_t *p, tag_tok_t *t) {
     }
 }
 
+/* Quirks mode as browsers decide it: no doctype, or an old HTML one. */
+static bool quirks_mode(const char *s, size_t n) {
+    size_t i = 0;
+    for (;;) {
+        while (i < n && web_isspace((unsigned char)s[i])) i++;
+        if (i + 4 <= n && !strncmp(s + i, "<!--", 4)) {
+            const char *e = NULL;
+            for (size_t k = i + 4; k + 2 < n; k++) if (s[k] == '-' && s[k + 1] == '-' && s[k + 2] == '>') { e = s + k + 3; break; }
+            if (!e) return true;
+            i = (size_t)(e - s);
+            continue;
+        }
+        if (i + 2 <= n && s[i] == '<' && s[i + 1] == '?') {   /* <?xml ...?> */
+            while (i < n && s[i] != '>') i++;
+            i++;
+            continue;
+        }
+        break;
+    }
+    if (i + 9 > n || strncasecmp(s + i, "<!doctype", 9)) return true;
+    char dt[256];
+    size_t k = 0;
+    for (size_t j = i + 9; j < n && s[j] != '>' && k < sizeof dt - 1; j++) dt[k++] = (char)tolower((unsigned char)s[j]);
+    dt[k] = 0;
+    if (!strstr(dt, "html")) return true;
+    if (!strstr(dt, "public")) return false;
+    bool sys = strstr(dt, "http://") || strstr(dt, "https://");
+    if ((strstr(dt, "html 4.01 transitional") || strstr(dt, "html 4.01 frameset")) && !sys) return true;
+    static const char *legacy[] = { "html 2", "html 3", "//ietf//", "html 4.0 transitional", "html 4.0 frameset",
+                                    "-//w3o//", "-//netscape", "-//microsoft", "-//softquad", "-//sun microsystems" };
+    for (int q = 0; q < ARRAY_SIZE(legacy); q++) if (strstr(dt, legacy[q])) return true;
+    return false;
+}
+
 web_doc_t *web_parse_html(const char *src, size_t len, int charset) {
     web_doc_t *d = calloc(1, sizeof *d);
     if (!d) return NULL;
@@ -983,6 +1017,7 @@ web_doc_t *web_parse_html(const char *src, size_t len, int charset) {
     if (!d->root) { free(p); free(t); free(text); free(d); return NULL; }
     p->stack[0] = d->root;
     p->sp = 1;
+    d->quirks = quirks_mode(text, tl);
     ensure_head(p);
 
     size_t text_start = 0;
