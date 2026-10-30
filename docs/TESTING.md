@@ -290,6 +290,40 @@ pretty print are at about (279, 372), (454, 372) and (687, 372). With
 prompt (`osaver: Do you have a save file?`). An invalid paste plays the alert
 sound (record it with the AC'97 `--extra` above).
 
+### Web Browser
+
+`autorun=Web_Browser:URL` opens a page at start (a path like
+`/home/user/Desktop/x.html` opens as `file://`). Serve test pages from the
+host as in the network section and open them at `http://10.0.2.2:PORT/...`;
+the browser waits (up to 15 s) for DHCP before it shows *No internet*.
+Every page logs `browser: STATUS URL (N bytes, type)` and, once laid out,
+`browser: URL: N elements, M stylesheets, style X ms, layout Y ms, Z items,
+heap K KB used` (watch the heap figure to spot leaks when you load pages
+again and again); downloads log `browser: download NAME -> PATH`.
+
+```sh
+python3 -m http.server 8080 &          # in a directory with test pages
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Web_Browser:http://10.0.2.2:8080/page.html" \
+    --out shots-web ready wait:4 shot:page key:pgdn wait:0.5 shot:down \
+    key:ctrl-l "type:http://10.0.2.2:8080/other.html\n" wait:3 shot:other --extra -nic user,model=e1000
+```
+
+* In the 980x640 browser window at the default position the client area
+  starts at screen (22, 55): Back / Forward / Reload / Home are at about
+  (44, 108), (78, 108), (112, 108), (146, 108), the padlock at (179, 108),
+  the address bar from x = 192, the star at (938, 108), the menu at
+  (976, 108); the page starts at y = 157. On a certificate warning, *Continue
+  anyway (not safe)* is at about (392, 407).
+* Keys: Ctrl+L (address bar), Ctrl+T / Ctrl+W (tabs), Ctrl+F (find), Ctrl+=
+  / Ctrl+- / Ctrl+0 (zoom), Ctrl+U (source), Ctrl+H (history), Ctrl+D
+  (bookmark), Alt+Left / Alt+Right, F5, PgUp / PgDn / Space.
+* `scroll:N` with a positive N scrolls **up** (QEMU sends wheel-up), so use
+  `scroll:-5` to scroll a page down.
+* Real sites: mirror a page with its stylesheets and pictures on the host
+  (`wget -p -k -E -U "Mozilla/5.0 (NovaOS 2.5; i686) NovaBrowser/2.5" URL`)
+  and serve the copy, or browse the live site when the test machine has
+  internet (a network that intercepts TLS gets the certificate warning first).
+
 ### Finding coordinates
 
 * Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about

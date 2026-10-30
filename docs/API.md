@@ -982,8 +982,8 @@ REGISTER_FILETYPE("*", "Hex Viewer", NULL, 0);                          /* offer
 `ext` has no dot; `"folder"` means directories, `"*"` any file (offered in
 Open With, never the automatic default). Registrations for apps that are not
 installed are ignored. Built in: `.txt .md .log .cfg .c .h .asm` -> Notepad,
-`.bmp .ppm` -> Image Viewer (alternative Paint), `.note` -> Sticky Notes, any
-file -> Hex Viewer, folders -> Files.
+`.bmp .ppm` -> Image Viewer (alternative Paint), `.note` -> Sticky Notes,
+`.html .htm` -> Web Browser, any file -> Hex Viewer, folders -> Files.
 
 | Function | |
 |---|---|
