@@ -365,16 +365,16 @@ static int css_add(tab_t *t, const char *url, const char *text, int depth, const
 }
 
 static void css_parsed(tab_t *t, int i, const char *text, size_t len, const char *base) {
-    css_ent_t *e = &t->css[i];
-    e->sheet = web_css_parse(text, len, 1);
-    e->state = 2;
-    if (!e->sheet || e->depth >= 3) return;
-    int n = web_css_import_count(e->sheet);
+    web_sheet_t *sh = web_css_parse(text, len, 1);
+    t->css[i].sheet = sh;
+    t->css[i].state = 2;
+    if (!sh || t->css[i].depth >= 3) return;
+    int n = web_css_import_count(sh);
     for (int k = 0; k < n && k < 16; k++) {
         char abs[B_URL_MAX];
-        if (!url_resolve(base, web_css_import(e->sheet, k), abs, sizeof abs)) continue;
+        if (!url_resolve(base, web_css_import(sh, k), abs, sizeof abs)) continue;
         int depth = t->css[i].depth + 1;
-        int j = css_add(t, abs, NULL, depth, t->css[i].media);
+        int j = css_add(t, abs, NULL, depth, t->css[i].media);   /* may move t->css */
         if (j < 0) break;
         /* key: the parent's key with level `depth` (0xFFFF there) replaced by k */
         int shift = 48 - 16 * depth;
@@ -660,7 +660,10 @@ static void hist_free_from(tab_t *t, int from) {
     if (from < t->nhist) t->nhist = from;
 }
 
-static void commit(tab_t *t, const char *url) {
+static void commit(tab_t *t, const char *url_in) {
+    /* url_in may be one of the history entries' own strings: copy it first */
+    char *url = dupstr(url_in);
+    if (!url) return;
     int mode = t->req_mode;
     if (mode == NAV_NEW || t->nhist == 0) {
         hist_free_from(t, t->hpos + 1);
@@ -670,7 +673,7 @@ static void commit(tab_t *t, const char *url) {
             t->nhist--;
         }
         hent_t *nh = realloc(t->hist, sizeof *nh * (size_t)(t->nhist + 1));
-        if (!nh) return;
+        if (!nh) { free(url); return; }
         t->hist = nh;
         hent_t *e = &t->hist[t->nhist++];
         memset(e, 0, sizeof *e);
@@ -691,6 +694,7 @@ static void commit(tab_t *t, const char *url) {
     strlcpy(t->url, url, sizeof t->url);
     const char *h = strchr(url, '#');
     if (h && mode != NAV_HIST && mode != NAV_RELOAD) strlcpy(t->frag, h + 1, sizeof t->frag);
+    free(url);
     browser_set_address(t->b, NULL);
 }
 
@@ -1013,7 +1017,10 @@ static void about_page(tab_t *t, const char *url) {
     browser_tab_changed(t);
 }
 
-static void start(tab_t *t, const char *url, int mode, const char *post, uint32_t postlen, bool source) {
+static void start(tab_t *t, const char *url_in, int mode, const char *post, uint32_t postlen, bool source) {
+    /* url_in may point into the history, which committing a page changes */
+    char url[B_URL_MAX];
+    strlcpy(url, url_in, sizeof url);
     tab_stop(t);
     if (t->nhist && t->hpos < t->nhist && mode != NAV_HIST) { t->hist[t->hpos].sx = t->sx; t->hist[t->hpos].sy = t->sy; }
     t->req_mode = mode;
