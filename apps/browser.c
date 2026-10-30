@@ -1446,40 +1446,60 @@ static void browser_launch(const char *arg) {
     browser_new_tab(b, start, true);
 }
 
-/* ---- icon: a blue globe with an orbit ------------------------------------------------------- */
+/* ---- icon: a blue globe with an orbit ---------------------------------------------------- */
+static void aa_stroke(surface_t *s, double x0, double y0, double x1, double y1, double th, uint32_t c) {
+    double dx = x1 - x0, dy = y1 - y0, len = sqrt(dx * dx + dy * dy);
+    if (len < 0.01) return;
+    double nx = -dy / len, ny = dx / len;
+    int n = (int)ceil(th * 1.5);
+    if (n < 1) n = 1;
+    for (int i = 0; i < n; i++) {
+        double o = -th / 2 + th * (i + 0.5) / n;
+        gfx_line_aa(s, x0 + nx * o, y0 + ny * o, x1 + nx * o, y1 + ny * o, c);
+    }
+}
+
+/* the orbit: an ellipse tilted by `tilt`; front = the half nearer the viewer */
+static void orbit(surface_t *s, double cx, double cy, double rx, double ry, double tilt, double th, uint32_t c, bool front) {
+    int steps = 64;
+    for (int i = 0; i < steps; i++) {
+        double a0 = i * 2 * M_PI / steps, a1 = a0 + 2 * M_PI / steps;
+        bool f = sin((a0 + a1) / 2) > 0;
+        if (f != front) continue;
+        double x0 = rx * cos(a0), y0 = ry * sin(a0), x1 = rx * cos(a1), y1 = ry * sin(a1);
+        aa_stroke(s, cx + x0 * cos(tilt) - y0 * sin(tilt), cy + x0 * sin(tilt) + y0 * cos(tilt),
+                  cx + x1 * cos(tilt) - y1 * sin(tilt), cy + x1 * sin(tilt) + y1 * cos(tilt), th, c);
+    }
+}
+
 static void browser_icon(surface_t *s, int x, int y, int size) {
-    double S = size, cx = x + S / 2, cy = y + S / 2, r = S * 0.40;
+    double S = size, cx = x + S / 2, cy = y + S / 2, r = S * 0.38;
+    double rx = S * 0.48, ry = S * 0.15, tilt = -0.42, oth = MAX(1.2, S / 20.0);
+    /* the far half of the orbit, behind the globe */
+    orbit(s, cx, cy, rx, ry, tilt, oth * 0.8, RGBA(230, 160, 40, 200), false);
     gfx_fill_circle_aa(s, cx, cy + S * 0.025, r, RGBA(0, 0, 0, 55));
     gfx_fill_circle_aa(s, cx, cy, r, RGB(26, 100, 214));
     gfx_fill_circle_aa(s, cx - r * 0.12, cy - r * 0.14, r * 0.86, RGB(44, 130, 240));
     gfx_fill_circle_aa(s, cx - r * 0.30, cy - r * 0.34, r * 0.46, RGBA(150, 205, 255, 90));
-    uint32_t ln = RGBA(225, 242, 255, 225);
-    double th = MAX(1.0, S / 30.0);
+    uint32_t ln = RGBA(225, 242, 255, 220);
+    double th = MAX(1.0, S / 34.0);
     /* meridians and parallels */
-    for (int i = 0; i < 24; i++) {
-        double a0 = -M_PI / 2 + i * M_PI / 24, a1 = a0 + M_PI / 24;
-        gfx_thick_line(s, (int)(cx + r * 0.45 * cos(a0)), (int)(cy + r * sin(a0)), (int)(cx + r * 0.45 * cos(a1)), (int)(cy + r * sin(a1)), (int)th, ln);
-        gfx_thick_line(s, (int)(cx - r * 0.45 * cos(a0)), (int)(cy + r * sin(a0)), (int)(cx - r * 0.45 * cos(a1)), (int)(cy + r * sin(a1)), (int)th, ln);
+    for (int i = 0; i < 32; i++) {
+        double a0 = -M_PI / 2 + i * M_PI / 32, a1 = a0 + M_PI / 32;
+        for (int sgn = -1; sgn <= 1; sgn += 2)
+            aa_stroke(s, cx + sgn * r * 0.45 * cos(a0), cy + r * sin(a0), cx + sgn * r * 0.45 * cos(a1), cy + r * sin(a1), th, ln);
     }
-    gfx_thick_line(s, (int)cx, (int)(cy - r), (int)cx, (int)(cy + r), (int)th, ln);
-    gfx_thick_line(s, (int)(cx - r), (int)cy, (int)(cx + r), (int)cy, (int)th, ln);
+    aa_stroke(s, cx, cy - r, cx, cy + r, th, ln);
+    aa_stroke(s, cx - r, cy, cx + r, cy, th, ln);
     double py = r * 0.52, hw = sqrt(r * r - py * py);
-    gfx_thick_line(s, (int)(cx - hw), (int)(cy - py), (int)(cx + hw), (int)(cy - py), (int)th, ln);
-    gfx_thick_line(s, (int)(cx - hw), (int)(cy + py), (int)(cx + hw), (int)(cy + py), (int)th, ln);
-    /* an orbit swinging round the globe, with a small star */
-    uint32_t orb = RGB(255, 196, 60);
-    double rx = S * 0.48, ry = S * 0.16, tilt = -0.42;
-    for (int i = 0; i < 48; i++) {
-        double a0 = i * 2 * M_PI / 48, a1 = a0 + 2 * M_PI / 48;
-        if (sin(a0) < -0.1 && sin(a1) < -0.1 && i % 2) continue;   /* gaps behind the globe */
-        double x0 = rx * cos(a0), y0 = ry * sin(a0), x1 = rx * cos(a1), y1 = ry * sin(a1);
-        gfx_thick_line(s, (int)(cx + x0 * cos(tilt) - y0 * sin(tilt)), (int)(cy + x0 * sin(tilt) + y0 * cos(tilt)),
-                       (int)(cx + x1 * cos(tilt) - y1 * sin(tilt)), (int)(cy + x1 * sin(tilt) + y1 * cos(tilt)),
-                       (int)MAX(1.0, S / 22.0), orb);
-    }
-    double sa = 0.35, sx = rx * cos(sa), sy = ry * sin(sa);
+    aa_stroke(s, cx - hw, cy - py, cx + hw, cy - py, th, ln);
+    aa_stroke(s, cx - hw, cy + py, cx + hw, cy + py, th, ln);
+    /* the near half of the orbit, in front, with a small star on it */
+    orbit(s, cx, cy, rx, ry, tilt, oth, RGB(255, 196, 60), true);
+    double sa = 0.55, sx = rx * cos(sa), sy = ry * sin(sa);
     double px = cx + sx * cos(tilt) - sy * sin(tilt), pyy = cy + sx * sin(tilt) + sy * cos(tilt);
-    gfx_fill_circle_aa(s, px, pyy, S * 0.07, RGB(255, 236, 160));
+    gfx_fill_circle_aa(s, px, pyy, S * 0.075, RGB(255, 240, 170));
+    gfx_fill_circle_aa(s, px, pyy, S * 0.04, RGB(255, 255, 255));
 }
 
 REGISTER_APP(.name = "Web Browser", .category = CAT_INTERNET,

@@ -568,8 +568,9 @@ void tab_restyle(tab_t *t) {
     t->styled = true;
     tab_relayout(t);
     if (first) {
-        klog("browser: %s: %d elements, %d stylesheets, style %u ms, layout %d ms, %d items",
-             t->url, t->pg.doc->nelems, n, (unsigned)(t1 - t0), t->pg.lay.ms, t->pg.lay.nitems);
+        klog("browser: %s: %d elements, %d stylesheets, style %u ms, layout %d ms, %d items, heap %u KB used",
+             t->url, t->pg.doc->nelems, n, (unsigned)(t1 - t0), t->pg.lay.ms, t->pg.lay.nitems,
+             (unsigned)(sys_mem_used() / 1024));
         pump(t);
     }
 }
