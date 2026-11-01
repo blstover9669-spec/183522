@@ -107,6 +107,8 @@ struct web_node {
     int      ctl;            /* form control index or -1                    */
     int      img;            /* image index or -1                           */
     int      link;           /* link index or -1                            */
+    void    *inl;            /* parsed style="" declarations (CSS engine)   */
+    int16_t  ninl;           /* their count, -1 = not parsed yet            */
     uint32_t mgen;           /* measure cache generation                    */
     int      minw, maxw;     /* measure cache                               */
     int      index;          /* element index among siblings (1-based)      */
@@ -237,7 +239,7 @@ typedef struct web_ctrl {
 typedef struct web_link { web_node_t *node; const char *href; const char *target; } web_link_t;
 
 /* ==== layout / display list ================================================= */
-enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT };
+enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT, WI_BOX };   /* WI_BOX: debug only, not painted */
 typedef struct web_item {
     uint8_t  kind, deco, marker;
     int      link;            /* link index or -1                    */
@@ -247,6 +249,7 @@ typedef struct web_item {
     const char *text;         /* WI_TEXT / WI_IMGALT (1252)           */
     int      len;
     int      ref;             /* image / control index; WI_TEXT: baseline offset */
+    const web_node_t *node;   /* WI_BOX: the element                */
 } web_item_t;
 
 typedef struct web_anchor { const char *name; int y, mark; } web_anchor_t;
@@ -280,6 +283,9 @@ void web_page_free_resources(web_page_t *pg);
 /* Lay out the styled document for a viewport size. */
 void web_layout(web_page_t *pg, int width, int height);
 void web_layout_free(web_layout_t *L);
+/* Debugging (host test harness): when set, layout records every element's final
+   border box as a WI_BOX item. */
+extern bool web_layout_debug_boxes;
 /* y of an anchor (#name), -1 if none. */
 int  web_anchor_y(web_page_t *pg, const char *name);
 /* Paint the part of the layout visible in view (doc coords sx,sy at view's top-left). */

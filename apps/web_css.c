@@ -2335,13 +2335,23 @@ static void presentational(cctx_t *cx, web_node_t *n, web_style_t *st, const web
 }
 
 /* ---- per-element style ------------------------------------------------------------------------------ */
-static web_sheet_t *inline_sheet_parse_decls(cctx_t *cx, const char *style, decl_t **decls, int *nd) {
-    web_sheet_t *tmp = calloc(1, sizeof *tmp);
-    if (!tmp) return NULL;
-    char *text = wa_strndup(&tmp->ar, style, strlen(style));
-    *nd = text ? parse_decl_block(tmp, text, text + strlen(text), decls) : 0;
-    (void)cx;
-    return tmp;
+/* The declarations of an element's style="" attribute, parsed once into the
+   document's arena: they (and the custom properties children inherit from
+   them) must live as long as the document. */
+static int inline_decls(cctx_t *cx, web_node_t *n, const char *style, decl_t **decls) {
+    if (n->ninl < 0) {
+        web_sheet_t tmp;
+        memset(&tmp, 0, sizeof tmp);
+        tmp.ar = cx->doc->ar;             /* allocate in the document's arena */
+        decl_t *d = NULL;
+        char *text = wa_strndup(&tmp.ar, style, strlen(style));
+        int nd = text ? parse_decl_block(&tmp, text, text + strlen(text), &d) : 0;
+        cx->doc->ar = tmp.ar;
+        n->inl = d;
+        n->ninl = (int16_t)(nd > 32000 ? 32000 : nd);
+    }
+    *decls = n->inl;
+    return n->ninl;
 }
 
 static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
@@ -2387,12 +2397,10 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     if (cx->doc->quirks) match_sheet(cx, ua_quirks, 0, 0, n, NULL);
     for (int i = 0; i < cx->c->nsheets && i < 63; i++)
         match_sheet(cx, cx->c->sheets[i], 2, i + 1, n, cx->media_ok[i]);
-    web_sheet_t *inl = NULL;
     const char *sa = web_attr(n, "style");
     if (sa && *sa) {
         decl_t *decls = NULL;
-        int nd = 0;
-        inl = inline_sheet_parse_decls(cx, sa, &decls, &nd);
+        int nd = inline_decls(cx, n, sa, &decls);
         for (int i = 0; i < nd; i++) m_add(cx, &decls[i], make_key(&decls[i], 3, 0, i));
     }
     if (cx->nm > 1) qsort(cx->m, cx->nm, sizeof(mdecl_t), mcmp);
@@ -2418,7 +2426,6 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
         }
         for (int i = split; i < cx->nm; i++) apply_decl(cx, n, st, ps, cx->m[i].d, pass);
     }
-    if (inl) web_css_free(inl);
 
     /* finish borders: a width only counts with a style */
     for (int i = 0; i < 4; i++) {

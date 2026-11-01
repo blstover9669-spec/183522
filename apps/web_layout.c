@@ -55,6 +55,7 @@ typedef struct lctx {
 typedef struct bres { int h, w, mb; } bres_t;
 
 static uint32_t g_gen;
+bool web_layout_debug_boxes;
 
 /* The kernel stack is shared by everything (256 KiB): deeply nested pages stop
    being laid out long before it runs out. */
@@ -62,7 +63,9 @@ static uintptr_t stack_base;
 #define LAYOUT_STACK_MAX (120 * 1024)
 static bool stack_low(void) {
     char here;
-    return stack_base - (uintptr_t)&here > LAYOUT_STACK_MAX;
+    intptr_t used = (intptr_t)(stack_base - (uintptr_t)&here);
+    /* only a plausible depth counts (sanitizer builds keep locals elsewhere) */
+    return used > LAYOUT_STACK_MAX && used < (16 << 20);
 }
 
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum);
@@ -2098,6 +2101,10 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int bh = b.bt + b.pt + ch + b.pb + b.bb;
     fill_bg(lc, bgi, bx, y, bw, bh);
     borders(lc, st, bx, y, bw, bh);
+    if (web_layout_debug_boxes) {
+        web_item_t *dbg = item_add(lc, WI_BOX);
+        if (dbg) { dbg->x = bx; dbg->y = y; dbg->w = bw; dbg->h = bh; dbg->node = n; }
+    }
     if (st->position == POS_RELATIVE) {
         int dx = st->left.u == U_PX ? st->left.v : 0, dy = st->top.u == U_PX ? st->top.v : 0;
         shift_items(lc, first_item, lc->L->nitems, dx, dy);

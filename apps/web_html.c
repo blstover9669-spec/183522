@@ -397,6 +397,7 @@ static web_node_t *new_node(parser_t *p, int type) {
     if (!n) return NULL;
     n->type = (uint8_t)type;
     n->ctl = n->img = n->link = -1;
+    n->ninl = -1;
     return n;
 }
 
