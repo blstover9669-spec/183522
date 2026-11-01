@@ -2065,6 +2065,8 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int bx = x + ml;
     int cx = bx + b.bl + b.pl, cy = y + b.bt + b.pt;
     int first_item = lc->L->nitems;
+    int dbgi = -1;
+    if (web_layout_debug_boxes && item_add(lc, WI_BOX)) dbgi = lc->L->nitems - 1;
     int bgi = (st->visibility_hidden || n == lc->skip_bg) ? -1 : reserve_bg(lc, st->bg);
     if (n->id) anchor_add(lc, n->id, y);
     if (st->display == D_LIST_ITEM) {
@@ -2101,9 +2103,9 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int bh = b.bt + b.pt + ch + b.pb + b.bb;
     fill_bg(lc, bgi, bx, y, bw, bh);
     borders(lc, st, bx, y, bw, bh);
-    if (web_layout_debug_boxes) {
-        web_item_t *dbg = item_add(lc, WI_BOX);
-        if (dbg) { dbg->x = bx; dbg->y = y; dbg->w = bw; dbg->h = bh; dbg->node = n; }
+    if (dbgi >= 0) {
+        web_item_t *dbg = &lc->L->items[dbgi];
+        dbg->x = bx; dbg->y = y; dbg->w = bw; dbg->h = bh; dbg->node = n;
     }
     if (st->position == POS_RELATIVE) {
         int dx = st->left.u == U_PX ? st->left.v : 0, dy = st->top.u == U_PX ? st->top.v : 0;
