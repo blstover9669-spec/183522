@@ -160,8 +160,25 @@ enum { AI_STRETCH = 0, AI_START, AI_CENTER, AI_END, AI_BASELINE };
 #define DECO_STRIKE    2
 #define DECO_OVERLINE  4
 
-enum { U_AUTO = 0, U_PX, U_PCT, U_NONE };     /* resolved lengths */
-typedef struct web_len { int16_t v; uint8_t u; } web_len_t;
+enum { U_AUTO = 0, U_PX, U_PCT, U_NONE, U_CALC };   /* resolved lengths */
+/* U_PX: v px; U_PCT: v tenths of a percent; U_CALC: v px + pc tenths of a percent */
+typedef struct web_len { int16_t v; uint8_t u; int16_t pc; } web_len_t;
+
+/* grid tracks (grid-template-columns / -rows) */
+enum { GT_PX = 0, GT_PCT, GT_FR, GT_AUTO, GT_MIN, GT_MAX, GT_FIT };
+typedef struct web_track {
+    uint8_t lo, hi;           /* minmax(lo, hi) kinds (GT_*); plain sizes have lo == hi */
+    int16_t lv, hv;           /* px, tenths of a percent, or fr x100                    */
+} web_track_t;
+typedef struct web_grid {
+    web_track_t *cols, *rows;
+    int16_t ncols, nrows;
+    int16_t col_rep, col_nrep;   /* repeat(auto-fill|auto-fit, ...): first track, count (0 = none) */
+    int16_t row_rep, row_nrep;
+    web_track_t auto_col, auto_row;
+    const char **areas;          /* grid-template-areas: area_rows x area_cols names (NULL = ".") */
+    int16_t area_rows, area_cols;
+} web_grid_t;
 
 typedef struct web_var { const char *name, *value; const struct web_var *next; } web_var_t;
 
@@ -187,7 +204,26 @@ typedef struct web_style {
     web_len_t width, height, maxw, minw, left, top;
     int16_t  spacing;        /* table border-spacing            */
     const web_var_t *vars;   /* custom properties (inherited)   */
+    web_len_t right, bottom;           /* positioned boxes                  */
+    web_len_t minh, maxh;              /* min-height / max-height           */
+    web_len_t tx, ty;                  /* transform translate (U_PCT: of the box's own size) */
+    int16_t  radius[4];                /* border radii px: tl, tr, br, bl   */
+    int16_t  z;                        /* z-index (z_auto = 0: auto)        */
+    uint8_t  z_set;
+    uint8_t  align_self, justify_self; /* AI_* + 1 (0 = auto)               */
+    uint8_t  justify_items, align_content;
+    uint8_t  grid_flow;                /* grid-auto-flow: 1 = column, 2 = dense */
+    uint8_t  aspect_set;
+    uint8_t  isolate;                  /* isolation: isolate                */
+    uint8_t  ovf_scroll;               /* overflow: auto / scroll           */
+    uint8_t  masked;                   /* mask-image: the background is only an icon's shape */
+    uint16_t aspect;                   /* aspect-ratio w/h x1000            */
+    const web_grid_t *grid;            /* grid containers                   */
+    int16_t  gcs, gce, grs, gre;       /* grid item lines: n > 0 line, n < 0 from the end,
+                                          0 auto, GSPAN + n = span n           */
+    const char *garea;                 /* grid-area: <name>                 */
 } web_style_t;
+#define GSPAN 10000
 
 typedef struct web_cascade {
     web_sheet_t **sheets;    /* author sheets in document order */
@@ -232,6 +268,7 @@ typedef struct web_ctrl {
     int      size, rows, cols, maxlen;
     int      img;             /* C_IMAGE: image index                           */
     int      x, y, w, h;      /* layout rect (document coordinates; w 0 = hidden) */
+    bool     fixed;           /* in a position:fixed box: y is relative to the view */
     const font_t *font;
     uint32_t color;
 } web_ctrl_t;
@@ -239,9 +276,12 @@ typedef struct web_ctrl {
 typedef struct web_link { web_node_t *node; const char *href; const char *target; } web_link_t;
 
 /* ==== layout / display list ================================================= */
-enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT, WI_BOX };   /* WI_BOX: debug only, not painted */
+enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT, WI_BOX,   /* WI_BOX: debug only, not painted */
+       WI_PLACE,                /* layout bookkeeping (where an absolutely positioned box was), not painted */
+       WI_SVG };                /* an inline <svg> (node), drawn from its shapes */
 typedef struct web_item {
     uint8_t  kind, deco, marker;
+    uint8_t  fixed;           /* position:fixed - stays put when the page scrolls */
     int      link;            /* link index or -1                    */
     int      x, y, w, h;      /* document coordinates                */
     uint32_t color;
@@ -249,8 +289,16 @@ typedef struct web_item {
     const char *text;         /* WI_TEXT / WI_IMGALT (1252)           */
     int      len;
     int      ref;             /* image / control index; WI_TEXT: baseline offset */
-    const web_node_t *node;   /* WI_BOX: the element                */
+    const web_node_t *node;   /* WI_BOX / WI_SVG: the element       */
+    int16_t  rad[4];          /* WI_RECT: corner radii (tl tr br bl) */
+    int16_t  ring;            /* WI_RECT: > 0 = only a border this wide (rounded boxes) */
+    int16_t  layer;           /* painting order while laying out (z-index)  */
+    int      clip;            /* clipped to clips[clip - 1] (overflow), 0 = not */
 } web_item_t;
+
+/* a clipping rectangle (the padding box of an overflow:hidden box), document coordinates;
+   r* = intersected with the enclosing clips */
+typedef struct web_clip { int x, y, w, h, parent, mark; int rx, ry, rw, rh; } web_clip_t;
 
 typedef struct web_anchor { const char *name; int y, mark; } web_anchor_t;
 
@@ -264,6 +312,10 @@ typedef struct web_layout {
     web_arena_t ar;           /* text runs                           */
     int      ms;              /* time the last layout took           */
     int      vw;              /* viewport width it was made for      */
+    int      paint_sy;        /* scroll position of the last paint (fixed boxes) */
+    bool     has_fixed;
+    web_clip_t *clips;        /* overflow clipping rectangles        */
+    int      nclips, clipcap;
 } web_layout_t;
 
 typedef struct web_page {

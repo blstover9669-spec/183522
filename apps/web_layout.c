@@ -50,7 +50,20 @@ typedef struct lctx {
     int depth;
     int last_base;               /* baseline of the last line laid out          */
     const web_node_t *skip_bg;   /* body whose background became the canvas     */
+    struct absbox *abs;          /* absolutely positioned boxes waiting for their containing block */
+    int nabs, abscap;
+    int force_h;                 /* border-box height the next layout_box must use, -1 = none */
+    int cb_h;                    /* definite content height of the containing block, -1 = none */
+    int relayouts;               /* second layout passes used (flex / grid), bounded */
+    int cur_clip;                /* clip of the items being made (index + 1, 0 = none) */
 } lctx_t;
+
+/* an absolutely positioned / fixed box: laid out when its containing block is done;
+   `place` is a WI_PLACE item at its static position (it moves with the content) */
+typedef struct absbox { web_node_t *n; int place; uint8_t fixed; } absbox_t;
+
+#define MAX_RELAYOUTS 200
+#define MAX_TRACKS_LAYOUT 64
 
 typedef struct bres { int h, w, mb; } bres_t;
 
@@ -74,15 +87,50 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx);
 static int run_ifc(lctx_t *lc, web_node_t *container, web_node_t *from, web_node_t *to, int cx, int y, int cw, bool *any);
 static void flex_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx);
 static bool is_flex_row(const web_style_t *st);
+static bool is_flex_col(const web_style_t *st);
+static void svg_box(lctx_t *lc, const web_node_t *n, int cbw, int *ow, int *oh);
+static void abs_add(lctx_t *lc, web_node_t *n, int sx, int sy);
+static void grid_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx);
 
 /* ---- helpers --------------------------------------------------------------------- */
 static int rlen(web_len_t l, int base) {
     if (l.u == U_PX) return l.v;
     if (l.u == U_PCT) return (int)((int64_t)l.v * base / 1000);
+    if (l.u == U_CALC) return l.v + (int)((int64_t)l.pc * base / 1000);
     return 0;
 }
 
 static bool is_auto(web_len_t l) { return l.u == U_AUTO; }
+/* a length (not auto / none) */
+static bool len_set(web_len_t l) { return l.u == U_PX || l.u == U_PCT || l.u == U_CALC; }
+/* a length that does not depend on a percentage base */
+static bool len_fixed(web_len_t l) { return l.u == U_PX; }
+
+static bool out_of_flow(const web_node_t *c) {
+    return c->type == WN_ELEM && c->st && (c->st->position == POS_ABSOLUTE || c->st->position == POS_FIXED);
+}
+
+/* ---- box-tree children: display:contents elements are replaced by their children ---- */
+static bool is_contents(const web_node_t *c) {
+    return c->type == WN_ELEM && c->st && c->st->display == D_CONTENTS;
+}
+
+/* c: the next node to look at, p: its parent (or the node whose children are done) */
+static web_node_t *bt_walk(const web_node_t *top, web_node_t *c, web_node_t *p) {
+    for (;;) {
+        if (c) {
+            if (!is_contents(c)) return c;
+            if (c->first) { p = c; c = c->first; continue; }
+            c = c->next;              /* an empty display:contents element */
+            continue;
+        }
+        if (!p || p == top) return NULL;
+        c = p->next;
+        p = p->parent;
+    }
+}
+#define BT_FIRST(top) bt_walk((top), (top)->first, (web_node_t *)(top))
+#define BT_NEXT(top, c) bt_walk((top), (c)->next, (c)->parent)
 
 static int collapse(int a, int b) {
     if (a >= 0 && b >= 0) return a > b ? a : b;
@@ -119,7 +167,26 @@ static web_item_t *item_add(lctx_t *lc, int kind) {
     memset(it, 0, sizeof *it);
     it->kind = (uint8_t)kind;
     it->link = -1;
+    it->clip = lc->cur_clip;
     return it;
+}
+
+/* a new clipping rectangle inside the current one (filled in later); index + 1 */
+static int clip_add(lctx_t *lc) {
+    web_layout_t *L = lc->L;
+    if (L->nclips >= 30000) return lc->cur_clip;
+    if (L->nclips >= L->clipcap) {
+        int nc = L->clipcap ? L->clipcap * 2 : 32;
+        web_clip_t *ncl = realloc(L->clips, sizeof *ncl * nc);
+        if (!ncl) return lc->cur_clip;
+        L->clips = ncl;
+        L->clipcap = nc;
+    }
+    web_clip_t *c = &L->clips[L->nclips++];
+    memset(c, 0, sizeof *c);
+    c->parent = lc->cur_clip;
+    c->mark = L->nitems;
+    return L->nclips;
 }
 
 static void rect_item(lctx_t *lc, int x, int y, int w, int h, uint32_t c) {
@@ -142,6 +209,28 @@ static void fill_bg(lctx_t *lc, int idx, int x, int y, int w, int h) {
     if (idx < 0) return;
     web_item_t *it = &lc->L->items[idx];
     it->x = x; it->y = y; it->w = w > 0 ? w : 0; it->h = h > 0 ? h : 0;
+}
+
+static bool has_radius(const web_style_t *st) {
+    return st->radius[0] || st->radius[1] || st->radius[2] || st->radius[3];
+}
+
+/* corner radii of a w x h box (percentages of the smaller side, never more than half of it) */
+static void set_radius(web_item_t *it, const web_style_t *st, int w, int h) {
+    int side = MIN(w, h), lim = side / 2;
+    for (int i = 0; i < 4; i++) {
+        int r = st->radius[i];
+        if (r < 0) r = (int)((int64_t)-r * side / 1000);
+        if (r > lim) r = lim;
+        if (r < 0) r = 0;
+        it->rad[i] = (int16_t)r;
+    }
+}
+
+static void fill_bg_r(lctx_t *lc, int idx, int x, int y, int w, int h, const web_style_t *st) {
+    if (idx < 0) return;
+    fill_bg(lc, idx, x, y, w, h);
+    if (has_radius(st)) set_radius(&lc->L->items[idx], st, w, h);
 }
 
 static void anchor_add(lctx_t *lc, const char *name, int y) {
@@ -168,10 +257,25 @@ static void shift_items(lctx_t *lc, int from, int to, int dx, int dy) {
     int lo = 0, hi = L->nanchors;
     while (lo < hi) { int m = (lo + hi) / 2; if (L->anchors[m].mark < from) lo = m + 1; else hi = m; }
     for (int i = lo; i < L->nanchors && L->anchors[i].mark < to; i++) L->anchors[i].y += dy;
+    /* clipping rectangles made by boxes in the range (in increasing mark order too) */
+    lo = 0; hi = L->nclips;
+    while (lo < hi) { int m = (lo + hi) / 2; if (L->clips[m].mark < from) lo = m + 1; else hi = m; }
+    for (int i = lo; i < L->nclips && L->clips[i].mark < to; i++) { L->clips[i].x += dx; L->clips[i].y += dy; }
 }
 
 static void borders(lctx_t *lc, const web_style_t *st, int x, int y, int w, int h) {
     if (st->visibility_hidden) return;
+    if (has_radius(st) && st->bw[0] && st->bw[0] == st->bw[1] && st->bw[0] == st->bw[2] && st->bw[0] == st->bw[3] &&
+        st->bc[0] == st->bc[1] && st->bc[0] == st->bc[2] && st->bc[0] == st->bc[3]) {
+        /* a rounded box: one ring */
+        if (w <= 0 || h <= 0 || !COLOR_A(st->bc[0])) return;
+        web_item_t *it = item_add(lc, WI_RECT);
+        if (!it) return;
+        it->x = x; it->y = y; it->w = w; it->h = h; it->color = st->bc[0];
+        it->ring = st->bw[0];
+        set_radius(it, st, w, h);
+        return;
+    }
     if (st->bw[0]) rect_item(lc, x, y, w, st->bw[0], st->bc[0]);
     if (st->bw[2]) rect_item(lc, x, y + h - st->bw[2], w, st->bw[2], st->bc[2]);
     if (st->bw[3]) rect_item(lc, x, y + st->bw[0], st->bw[3], h - st->bw[0] - st->bw[2], st->bc[3]);
@@ -507,7 +611,18 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
     if (c->type == WN_TEXT) { meas_text(lc, m, c, pst); return; }
     if (!displayed(c) || depth > MAX_DEPTH || stack_low()) return;
     const web_style_t *st = c->st;
+    if (out_of_flow(c)) return;
     if (c->tag == T_BR) { meas_flush(m); return; }
+    if (c->tag == T_SVG) {
+        int w, h;
+        svg_box(lc, c, 0, &w, &h);
+        bm_t b;
+        box_metrics(st, 0, &b);
+        w += b.ml + b.mr + b.pl + b.pr + b.bl + b.br;
+        if (block_level(c)) { meas_flush(m); if (w > m->min) m->min = w; if (w > m->max) m->max = w; }
+        else meas_atom(m, w, w);
+        return;
+    }
     if (c->tag == T_IMG) {
         int w, h;
         image_box(lc, c, 0, &w, &h);
@@ -943,6 +1058,10 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
         flex_intrinsic(lc, n, mn, mx);
         *mn += mbp;
         *mx += mbp;
+    } else if (st->display == D_GRID) {
+        grid_intrinsic(lc, n, mn, mx);
+        *mn += mbp;
+        *mx += mbp;
     } else {
         meas_t m = { 0, 0, 0, 0, false, false };
         meas_children(lc, &m, n, 0);
@@ -976,7 +1095,7 @@ static int shrink_to_fit(lctx_t *lc, web_node_t *n, int avail) {
     bm_t b;
     box_metrics(st, avail, &b);
     int mbp = b.bl + b.br + b.pl + b.pr;
-    if (st->width.u == U_PX || st->width.u == U_PCT) {
+    if (len_set(st->width)) {
         int w = rlen(st->width, avail);
         if (st->border_box) w -= mbp;
         if (st->maxw.u != U_NONE) { int c = rlen(st->maxw, avail) - (st->border_box ? mbp : 0); if (w > c) w = c; }
@@ -1026,6 +1145,7 @@ typedef struct ifc {
 } ifc_t;
 
 static void place_float(lctx_t *lc, web_node_t *c, int cx, int cw, int y);
+static void add_svg(ifc_t *f, web_node_t *c);
 
 static void ifc_bounds(ifc_t *f) {
     fl_bounds(f->lc, f->y, f->sasc + f->sdesc, f->cx, f->cw, &f->lx, &f->aw);
@@ -1547,6 +1667,9 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
     if (c->type == WN_TEXT) { if (pst) add_text(f, c, pst); return; }
     if (!displayed(c) || lc->depth > MAX_DEPTH || stack_low()) return;
     const web_style_t *st = c->st;
+    if (out_of_flow(c)) { abs_add(lc, c, f->lx + f->used, f->y); return; }
+    if (st->display == D_CONTENTS) { lc->depth++; inline_children(f, c); lc->depth--; return; }
+    if (c->tag == T_SVG) { add_svg(f, c); return; }
     if (is_float(c)) {
         if (f->n == 0) { place_float(lc, c, f->cx, f->cw, f->y); ifc_bounds(f); }
         else if (f->ndefer < 8) f->defer[f->ndefer++] = c;
@@ -1570,7 +1693,7 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
     int saved_link = lc->link;
     uint32_t saved_bg = lc->ibg;
     if (c->link >= 0) lc->link = c->link;
-    if (COLOR_A(st->bg) && !st->visibility_hidden) lc->ibg = st->bg;
+    if (COLOR_A(st->bg) && !st->visibility_hidden && !st->masked) lc->ibg = st->bg;
     bm_t b;
     box_metrics(st, f->cw, &b);
     int lpad = b.ml + b.bl + b.pl, rpad = b.mr + b.br + b.pr;
@@ -1679,12 +1802,243 @@ static void place_float(lctx_t *lc, web_node_t *c, int cx, int cw, int y) {
     fl_add(lc, fx, fy, ow, oh, right);
 }
 
+/* ---- painting order (stacking contexts) ---------------------------------------------------
+   Items carry a layer while laying out: 0 for in-flow content, 2 z + 1 for positioned boxes
+   (z-index auto counts as 0). A stacking context sorts its own items by layer when it is
+   done (its background and borders first) and then hands them to its parent as one layer. */
+static void sort_layers(lctx_t *lc, int from, int to) {
+    web_item_t *it = lc->L->items;
+    int n = to - from;
+    bool sorted = true;
+    for (int i = from + 1; i < to && sorted; i++) if (it[i].layer < it[i - 1].layer) sorted = false;
+    if (sorted || n < 2) return;
+    web_item_t *tmp = malloc(sizeof *tmp * (size_t)n);
+    if (!tmp) return;
+    /* stable merge sort, bottom up */
+    web_item_t *a = it + from, *b = tmp;
+    for (int w = 1; w < n; w *= 2) {
+        for (int lo = 0; lo < n; lo += 2 * w) {
+            int mid = MIN(lo + w, n), hi = MIN(lo + 2 * w, n), i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) b[k++] = a[j].layer < a[i].layer ? a[j++] : a[i++];
+            while (i < mid) b[k++] = a[i++];
+            while (j < hi) b[k++] = a[j++];
+        }
+        web_item_t *t = a; a = b; b = t;
+    }
+    if (a != it + from) memcpy(it + from, a, sizeof *tmp * (size_t)n);
+    free(tmp);
+    /* boxes still waiting for their containing block find their static position again */
+    for (int i = from; i < to; i++)
+        if (it[i].kind == WI_PLACE && it[i].ref >= 0 && it[i].ref < lc->nabs && lc->abs[it[i].ref].place >= from &&
+            lc->abs[it[i].ref].place < to)
+            lc->abs[it[i].ref].place = i;
+}
+
+static int16_t z_layer(const web_style_t *st) {
+    if (!st->z_set) return 1;
+    int z = st->z * 2 + 1;
+    return (int16_t)CLAMP(z, -30000, 30000);
+}
+
+/* ---- <svg> as a replaced box --------------------------------------------------------- */
+static bool svg_viewbox(const web_node_t *n, float vb[4]) {
+    const char *a = web_attr(n, "viewbox");
+    if (!a) return false;
+    for (int i = 0; i < 4; i++) {
+        while (*a == ' ' || *a == ',' || *a == '\t' || *a == '\n') a++;
+        char *e;
+        vb[i] = (float)strtod(a, &e);
+        if (e == a) return false;
+        a = e;
+    }
+    return vb[2] > 0 && vb[3] > 0;
+}
+
+static void svg_box(lctx_t *lc, const web_node_t *n, int cbw, int *ow, int *oh) {
+    const web_style_t *st = n->st;
+    int w = -1, h = -1;
+    if (st->width.u == U_PX) w = st->width.v;
+    else if (len_set(st->width) && cbw > 0) w = rlen(st->width, cbw);
+    if (st->height.u == U_PX) h = st->height.v;
+    else if (len_set(st->height) && lc->cb_h >= 0) h = rlen(st->height, lc->cb_h);
+    if (w < 0) { const char *a = web_attr(n, "width"); if (a && *a && !strchr(a, '%')) w = atoi(a) * lc->zoom / 100; }
+    if (h < 0) { const char *a = web_attr(n, "height"); if (a && *a && !strchr(a, '%')) h = atoi(a) * lc->zoom / 100; }
+    float vb[4];
+    bool has_vb = svg_viewbox(n, vb);
+    if (has_vb) {
+        if (w < 0 && h >= 0) w = (int)(h * vb[2] / vb[3] + 0.5f);
+        if (h < 0 && w >= 0) h = (int)(w * vb[3] / vb[2] + 0.5f);
+        if (w < 0 && h < 0 && cbw > 0) { w = cbw; h = (int)(w * vb[3] / vb[2] + 0.5f); }
+    }
+    if (w < 0) w = 300 * lc->zoom / 100;
+    if (h < 0) h = 150 * lc->zoom / 100;
+    if (st->maxw.u != U_NONE && len_set(st->maxw)) { int mx = rlen(st->maxw, cbw); if (mx >= 0 && w > mx) w = mx; }
+    *ow = w;
+    *oh = h;
+}
+
+/* an svg laid out at the origin (its margin box); returns the border box size */
+static void svg_items(lctx_t *lc, web_node_t *c, int cbw, const bm_t *b, int x, int y, int *bw, int *bh) {
+    const web_style_t *st = c->st;
+    int w, h;
+    svg_box(lc, c, cbw, &w, &h);
+    *bw = w + b->pl + b->pr + b->bl + b->br;
+    *bh = h + b->pt + b->pb + b->bt + b->bb;
+    if (st->visibility_hidden) return;
+    int bgi = reserve_bg(lc, st->bg);
+    fill_bg_r(lc, bgi, x, y, *bw, *bh, st);
+    borders(lc, st, x, y, *bw, *bh);
+    web_item_t *it = item_add(lc, WI_SVG);
+    if (!it) return;
+    it->x = x + b->bl + b->pl;
+    it->y = y + b->bt + b->pt;
+    it->w = w;
+    it->h = h;
+    it->node = c;
+    it->color = st->color;
+    it->link = lc->link;
+}
+
+static void add_svg(ifc_t *f, web_node_t *c) {
+    lctx_t *lc = f->lc;
+    bm_t b;
+    box_metrics(c->st, f->cw, &b);
+    int first = lc->L->nitems, bw, bh;
+    svg_items(lc, c, f->cw, &b, b.ml, b.mt, &bw, &bh);
+    int ow = b.ml + bw + b.mr, oh = b.mt + bh + b.mb;
+    int spw = 0;
+    uint16_t nsp = 0;
+    if (f->pend && f->n > 0) { spw = font_char_width(sfont(lc, c->st), ' '); nsp = 1; }
+    f->pend = f->pend_brk = false;
+    ifc_make_room(f, ow, &spw, &nsp, false, c->st->ws != WS_NOWRAP);
+    litem_t *it = ifc_push(f);
+    if (!it) return;
+    it->kind = LI_BOX;
+    it->first = first;
+    it->last = lc->L->nitems;
+    it->x = f->used + spw;
+    it->spw = spw;
+    it->w = ow;
+    it->asc = oh;
+    it->desc = 0;
+    it->valign = c->st->valign;
+    it->fs = c->st->fsize;
+    f->used = it->x + ow;
+}
+
+/* ---- absolutely positioned and fixed boxes ------------------------------------------- */
+static void abs_add(lctx_t *lc, web_node_t *n, int sx, int sy) {
+    if (lc->nabs >= lc->abscap) {
+        int nc = lc->abscap ? lc->abscap * 2 : 16;
+        absbox_t *na = realloc(lc->abs, sizeof *na * nc);
+        if (!na) return;
+        lc->abs = na;
+        lc->abscap = nc;
+    }
+    int place = -1;
+    web_item_t *it = item_add(lc, WI_PLACE);
+    if (it) { it->x = sx; it->y = sy; it->ref = lc->nabs; place = lc->L->nitems - 1; }
+    lc->abs[lc->nabs].n = n;
+    lc->abs[lc->nabs].place = place;
+    lc->abs[lc->nabs].fixed = n->st->position == POS_FIXED;
+    lc->nabs++;
+}
+
+/* lay out one positioned box in the containing block (padding box) cbx, cby, cbw, cbh */
+static void layout_abs(lctx_t *lc, const absbox_t *a, int cbx, int cby, int cbw, int cbh) {
+    web_node_t *n = a->n;
+    const web_style_t *st = n->st;
+    if (!displayed(n) || lc->depth > MAX_DEPTH || stack_low()) return;
+    bm_t b;
+    box_metrics(st, cbw, &b);
+    int hp = b.pl + b.pr + b.bl + b.br;
+    bool L = len_set(st->left), R = len_set(st->right), T = len_set(st->top), B = len_set(st->bottom);
+    int left = L ? rlen(st->left, cbw) : 0, right = R ? rlen(st->right, cbw) : 0;
+    int top = T ? rlen(st->top, cbh) : 0, bottom = B ? rlen(st->bottom, cbh) : 0;
+    int sx = cbx, sy = cby;
+    if (a->place >= 0 && a->place < lc->L->nitems) { sx = lc->L->items[a->place].x; sy = lc->L->items[a->place].y; }
+    bool wspec = len_set(st->width);
+    int w;
+    if (n->tag == T_SVG) {
+        int sw, sh;
+        svg_box(lc, n, cbw, &sw, &sh);
+        w = sw;
+    } else if (wspec) w = rlen(st->width, cbw) - (st->border_box ? hp : 0);
+    else if (L && R) w = cbw - left - right - b.ml - b.mr - hp;
+    else {
+        int avail = cbw - left - right;
+        if (!L && !R) avail = cbw - MAX(0, sx - cbx);
+        w = shrink_to_fit(lc, n, avail > 0 ? avail : 0);
+    }
+    if (st->maxw.u != U_NONE && len_set(st->maxw)) {
+        int mx = rlen(st->maxw, cbw) - (st->border_box ? hp : 0);
+        if (mx >= 0 && w > mx) w = mx;
+    }
+    if (len_set(st->minw)) {
+        int mn = rlen(st->minw, cbw) - (st->border_box ? hp : 0);
+        if (w < mn) w = mn;
+    }
+    if (w < 0) w = 0;
+    int bw = w + hp, x;
+    if (L && R && wspec && b.aml && b.amr) x = cbx + left + (cbw - left - right - bw) / 2;
+    else if (L) x = cbx + left + b.ml;
+    else if (R) x = cbx + cbw - right - b.mr - bw;
+    else x = sx + b.ml;
+    int fh = -1;
+    if (T && B && !len_set(st->height)) fh = MAX(0, cbh - top - bottom - b.mt - b.mb);
+    int y = T ? cby + top + b.mt : B ? cby : sy + b.mt;
+    int first = lc->L->nitems;
+    marker_t mk = lc->mk;
+    lc->mk.on = false;
+    int fbase = lc->flbase;
+    lc->flbase = lc->nfl;
+    int saved_cbh = lc->cb_h, saved_link = lc->link, saved_lb = lc->last_base;
+    lc->cb_h = cbh;
+    if (n->link >= 0) lc->link = n->link;
+    int saved_clip = lc->cur_clip;
+    if (a->fixed) lc->cur_clip = 0;
+    bres_t r;
+    lc->depth++;
+    lc->force_h = fh;
+    layout_box(lc, n, x - b.ml, y, cbw, w, &r, 0);
+    lc->cur_clip = saved_clip;
+    lc->force_h = -1;
+    lc->depth--;
+    lc->last_base = saved_lb;
+    lc->link = saved_link;
+    lc->cb_h = saved_cbh;
+    lc->flbase = fbase;
+    lc->mk = mk;
+    if (!T && B) shift_items(lc, first, lc->L->nitems, 0, cby + cbh - bottom - b.mb - r.h - y);
+}
+
+/* a containing block is done: lay out the positioned boxes recorded since `mark`
+   (fixed ones wait for the root, whose containing block is the viewport) */
+static void process_abs(lctx_t *lc, int mark, int cbx, int cby, int cbw, int cbh, bool root) {
+    int keep = mark;
+    for (int i = mark; i < lc->nabs; i++) {
+        absbox_t a = lc->abs[i];
+        if (a.fixed && !root) {
+            if (a.place >= 0 && a.place < lc->L->nitems) lc->L->items[a.place].ref = keep;
+            lc->abs[keep++] = a;
+            continue;
+        }
+        int first = lc->L->nitems;
+        layout_abs(lc, &a, cbx, cby, cbw, cbh);
+        if (a.fixed) {
+            for (int k = first; k < lc->L->nitems; k++) lc->L->items[k].fixed = 1;
+            if (lc->L->nitems > first) lc->L->has_fixed = true;
+        }
+    }
+    lc->nabs = keep;
+}
+
 /* ---- block layout -------------------------------------------------------------------- */
 static web_node_t *first_inflow(web_node_t *n) {
-    for (web_node_t *c = n->first; c; c = c->next) {
+    for (web_node_t *c = BT_FIRST(n); c; c = BT_NEXT(n, c)) {
         if (c->type == WN_TEXT) { if (ws_only(c)) continue; return NULL; }
         if (!displayed(c)) continue;
-        if (is_float(c)) continue;
+        if (is_float(c) || out_of_flow(c)) continue;
         if (!block_level(c)) return NULL;
         return c;
     }
@@ -1706,38 +2060,63 @@ static int leading_margin(web_node_t *n, int cbw, int depth) {
     return collapse(mt, leading_margin(c, cbw, depth + 1));
 }
 
-/* ---- flex rows ------------------------------------------------------------------------ */
+/* ---- flex boxes ------------------------------------------------------------------------ */
 typedef struct fitem {
     web_node_t *n;              /* the item, or NULL for a run of text            */
     web_node_t *from, *to;      /* text run                                       */
     int order, idx;
-    int base, minw, w;          /* margin-box widths                              */
+    int base, minw, w;          /* main-axis margin-box sizes                     */
     int grow, shrink;
-    int ml, mr, mt, mb, hp;
+    int ml, mr, mt, mb, hp, vp;
+    bool aml, amr, amt, amb;    /* auto margins                                   */
     int first, last, h;
+    int align;                  /* AI_* (align-self or the container's align-items) */
+    int target;                 /* column: border-box height to lay out with, -1 = content */
 } fitem_t;
 
 static bool is_flex_row(const web_style_t *st) {
     return (st->display == D_FLEX || st->display == D_INLINE_FLEX) && !st->flex_column;
 }
 
+static bool is_flex_col(const web_style_t *st) {
+    return (st->display == D_FLEX || st->display == D_INLINE_FLEX) && st->flex_column;
+}
+
 static int fitem_cmp(const fitem_t *a, const fitem_t *b) {
     return a->order != b->order ? (a->order < b->order ? -1 : 1) : (a->idx < b->idx ? -1 : a->idx > b->idx);
 }
 
-/* the items of a flex container, in display order; *n returns the count */
-static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count) {
+/* layout state that a second pass rolls back to */
+typedef struct lsave { int nitems, nanchors, nfl, nabs, nclips, last_base; marker_t mk; } lsave_t;
+static void lsave(lctx_t *lc, lsave_t *s) {
+    s->nitems = lc->L->nitems; s->nanchors = lc->L->nanchors; s->nfl = lc->nfl; s->nabs = lc->nabs;
+    s->nclips = lc->L->nclips; s->last_base = lc->last_base; s->mk = lc->mk;
+}
+static void lrestore(lctx_t *lc, const lsave_t *s) {
+    lc->L->nitems = s->nitems; lc->L->nanchors = s->nanchors; lc->nfl = s->nfl; lc->nabs = s->nabs;
+    lc->L->nclips = s->nclips; lc->last_base = s->last_base; lc->mk = s->mk;
+}
+
+/* the items of a flex container, in display order; *n returns the count. With rec, boxes
+   taken out of flow are recorded (static position cx, cy). */
+static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count, bool rec, int cx, int cy) {
     fitem_t *it = NULL;
     int n = 0, cap = 0;
-    for (web_node_t *c = box->first; c;) {
+    bool col = is_flex_col(box->st);
+    for (web_node_t *c = BT_FIRST(box); c;) {
         web_node_t *from = NULL, *to = NULL;
         if (c->type == WN_TEXT) {
             from = c;
             bool content = false;
-            while (c && c->type == WN_TEXT) { if (!ws_only(c)) content = true; c = c->next; }
+            while (c && c->type == WN_TEXT) { if (!ws_only(c)) content = true; c = BT_NEXT(box, c); }
             to = c;
             if (!content) continue;
-        } else if (!displayed(c)) { c = c->next; continue; }
+        } else if (!displayed(c)) { c = BT_NEXT(box, c); continue; }
+        else if (out_of_flow(c)) {
+            if (rec) abs_add(lc, c, cx, cy);
+            c = BT_NEXT(box, c);
+            continue;
+        }
         if (n >= cap) {
             int nc = cap ? cap * 2 : 16;
             fitem_t *ni = realloc(it, sizeof *ni * nc);
@@ -1748,11 +2127,13 @@ static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count) {
         fitem_t *f = &it[n];
         memset(f, 0, sizeof *f);
         f->idx = n;
+        f->target = -1;
+        f->align = box->st->align_items;
         if (from) {
             f->from = from;
             f->to = to;
             meas_t m = { 0, 0, 0, 0, false, false };
-            for (web_node_t *x = from; x != to; x = x->next) meas_node(lc, &m, x, box->st, 0);
+            for (web_node_t *x = from; x && x != to; x = BT_NEXT(box, x)) meas_node(lc, &m, x, x->parent->st, 0);
             meas_flush(&m);
             f->base = m.max;
             f->minw = m.min;
@@ -1766,32 +2147,44 @@ static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count) {
             f->grow = st->grow;
             f->shrink = st->shrink;
             f->ml = b.ml; f->mr = b.mr; f->mt = b.mt; f->mb = b.mb;
+            f->aml = b.aml; f->amr = b.amr;
+            f->amt = is_auto(st->margin[0]); f->amb = is_auto(st->margin[2]);
             f->hp = b.pl + b.pr + b.bl + b.br;
-            int mn, mx;
-            intrinsic(lc, c, &mn, &mx);
-            web_len_t size = st->basis.u == U_PX || st->basis.u == U_PCT ? st->basis : st->width;
-            if (size.u == U_PX || size.u == U_PCT) {
-                int content = rlen(size, cw) - (st->border_box ? f->hp : 0);
-                if (content < 0) content = 0;
-                f->base = f->ml + f->hp + content + f->mr;
-            } else {
-                f->base = mx;
-            }
-            f->minw = st->overflow_hidden ? f->ml + f->hp + f->mr : MIN(mn, f->base);
-            if (st->width.u == U_PX) f->minw = MIN(f->minw, f->base);
-            if (st->minw.u == U_PX || st->minw.u == U_PCT) {
-                int lo = f->ml + f->hp + f->mr + rlen(st->minw, cw) - (st->border_box ? f->hp : 0);
-                if (lo > f->minw) f->minw = lo;
-                if (lo > f->base) f->base = lo;
-            }
-            if (st->maxw.u == U_PX || st->maxw.u == U_PCT) {
-                int hi = f->ml + f->hp + f->mr + rlen(st->maxw, cw) - (st->border_box ? f->hp : 0);
-                if (f->base > hi) f->base = hi;
-                if (f->minw > hi) f->minw = hi;
+            f->vp = b.pt + b.pb + b.bt + b.bb;
+            if (st->align_self) f->align = st->align_self - 1;
+            if (!col) {
+                int mn, mx;
+                intrinsic(lc, c, &mn, &mx);
+                web_len_t size = len_set(st->basis) ? st->basis : st->width;
+                if (len_set(size)) {
+                    int content = rlen(size, cw) - (st->border_box ? f->hp : 0);
+                    if (content < 0) content = 0;
+                    f->base = f->ml + f->hp + content + f->mr;
+                } else if (c->tag == T_SVG) {
+                    int sw, sh;
+                    svg_box(lc, c, cw, &sw, &sh);
+                    f->base = f->ml + f->hp + sw + f->mr;
+                } else {
+                    f->base = mx;
+                }
+                f->minw = st->overflow_hidden ? f->ml + f->hp + f->mr : MIN(mn, f->base);
+                if (len_fixed(st->width)) f->minw = MIN(f->minw, f->base);
+                if (len_set(st->minw)) {
+                    int lo = f->ml + f->hp + f->mr + rlen(st->minw, cw) - (st->border_box ? f->hp : 0);
+                    if (lo > f->minw) f->minw = lo;
+                    if (lo > f->base) f->base = lo;
+                } else if (st->minw.u == U_AUTO && !st->overflow_hidden && b.ml + b.mr >= 0) {
+                    /* min-width:auto keeps the item from shrinking below its content */
+                }
+                if (st->maxw.u != U_NONE && len_set(st->maxw)) {
+                    int hi = f->ml + f->hp + f->mr + rlen(st->maxw, cw) - (st->border_box ? f->hp : 0);
+                    if (f->base > hi) f->base = hi;
+                    if (f->minw > hi) f->minw = hi;
+                }
             }
         }
         n++;
-        if (!from) c = c->next;
+        if (!from) c = BT_NEXT(box, c);
     }
     /* stable sort by `order` */
     for (int i = 1; i < n; i++) {
@@ -1806,7 +2199,7 @@ static fitem_t *flex_items(lctx_t *lc, web_node_t *box, int cw, int *count) {
 
 static void flex_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx) {
     int n;
-    fitem_t *it = flex_items(lc, box, lc->vw, &n);
+    fitem_t *it = flex_items(lc, box, lc->vw, &n, false, 0, 0);
     int gap = box->st->gap, smin = 0, smax = 0;
     for (int i = 0; i < n; i++) {
         smax += it[i].base + (i ? gap : 0);
@@ -1831,10 +2224,27 @@ static void stretch_box(lctx_t *lc, int first, int last, int bx, int by, int bw,
     }
 }
 
+/* make a laid-out item (items first..last, border box at bx?, by, width bw, height bh) `room` taller */
+static void stretch_item(lctx_t *lc, int first, int last, int by, int bw, int bh, int room) {
+    if (last <= first || room <= 0) return;
+    /* the box's border box: the first item is its background when it has one */
+    web_item_t *bg = &lc->L->items[first];
+    if (bg->kind == WI_BOX && first + 1 < last) bg = &lc->L->items[first + 1];
+    if (bg->kind == WI_RECT && bg->w == bw && bg->y == by) { stretch_box(lc, first, last, bg->x, by, bw, bh, room); return; }
+    for (int k = first; k < last; k++) {
+        web_item_t *r = &lc->L->items[k];
+        if (r->kind == WI_RECT && r->y == by && r->w == bw) { stretch_box(lc, first, last, r->x, by, bw, bh, room); return; }
+    }
+    for (int k = first; k < last; k++) {   /* debug boxes (host tests) */
+        web_item_t *r = &lc->L->items[k];
+        if (r->kind == WI_BOX && r->y == by && r->w == bw && r->h == bh) { r->h += room; return; }
+    }
+}
+
 static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fixed_h) {
     const web_style_t *cs = box->st;
     int n;
-    fitem_t *it = flex_items(lc, box, cw, &n);
+    fitem_t *it = flex_items(lc, box, cw, &n, true, cx, cy);
     if (!it) return 0;
     int gap = cs->gap, y = cy;
     for (int a = 0; a < n;) {
@@ -1875,8 +2285,11 @@ static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fix
                 if (!taken) break;
             }
         }
-        /* justify-content */
-        int cnt = b - a, x = cx, spacing = gap;
+        /* auto margins take the free space first, then justify-content */
+        int cnt = b - a, x = cx, spacing = gap, nauto = 0;
+        for (int i = a; i < b; i++) nauto += it[i].aml + it[i].amr;
+        int auto_share = 0;
+        if (free_w > 0 && nauto) { auto_share = free_w / nauto; free_w = 0; }
         if (free_w > 0) {
             switch (cs->justify) {
             case JC_CENTER: x += free_w / 2; break;
@@ -1891,6 +2304,7 @@ static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fix
         int lineh = 0;
         for (int i = a; i < b; i++) {
             fitem_t *f = &it[i];
+            if (f->aml) x += auto_share;
             f->first = lc->L->nitems;
             if (f->n) {
                 int content = f->w - f->ml - f->mr - f->hp;
@@ -1898,7 +2312,9 @@ static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fix
                 int saved = lc->link;
                 if (f->n->link >= 0) lc->link = f->n->link;
                 bres_t r;
+                lc->depth++;
                 layout_box(lc, f->n, x, y + f->mt, cw, content, &r, 0);
+                lc->depth--;
                 lc->link = saved;
                 f->h = f->mt + r.h + f->mb;
             } else {
@@ -1908,32 +2324,21 @@ static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fix
             f->last = lc->L->nitems;
             if (f->h > lineh) lineh = f->h;
             x += f->w + spacing;
+            if (f->amr) x += auto_share;
         }
         if (a == 0 && b == n && fixed_h > lineh) lineh = fixed_h;
-        /* align-items */
+        /* align-items / align-self */
         for (int i = a; i < b; i++) {
             fitem_t *f = &it[i];
             int room = lineh - f->h;
             if (room <= 0) continue;
-            if (cs->align_items == AI_CENTER) shift_items(lc, f->first, f->last, 0, room / 2);
-            else if (cs->align_items == AI_END) shift_items(lc, f->first, f->last, 0, room);
-            else if (cs->align_items == AI_STRETCH && f->n && f->n->st->height.u == U_AUTO && f->last > f->first) {
-                web_item_t *bg = &lc->L->items[f->first];
-                /* the box's border box: the first item is its background when it has one */
-                int bwid = f->w - f->ml - f->mr, bh = f->h - f->mt - f->mb;
-                int bxx = bg->kind == WI_RECT && bg->w == bwid ? bg->x : INT_MIN;
-                if (bxx != INT_MIN) stretch_box(lc, f->first, f->last, bxx, y + f->mt, bwid, bh, room);
-                else {
-                    /* no background: find the left border to locate the box */
-                    for (int k = f->first; k < f->last; k++) {
-                        web_item_t *r = &lc->L->items[k];
-                        if (r->kind == WI_RECT && r->y == y + f->mt && r->w == bwid) {
-                            stretch_box(lc, f->first, f->last, r->x, y + f->mt, bwid, bh, room);
-                            break;
-                        }
-                    }
-                }
-            }
+            if (f->amt || f->amb) {
+                int dy = f->amt && f->amb ? room / 2 : f->amt ? room : 0;
+                shift_items(lc, f->first, f->last, 0, dy);
+            } else if (f->align == AI_CENTER) shift_items(lc, f->first, f->last, 0, room / 2);
+            else if (f->align == AI_END) shift_items(lc, f->first, f->last, 0, room);
+            else if (f->align == AI_STRETCH && f->n && !len_set(f->n->st->height))
+                stretch_item(lc, f->first, f->last, y + f->mt, f->w - f->ml - f->mr, f->h - f->mt - f->mb, room);
         }
         y += lineh;
         a = b;
@@ -1943,10 +2348,754 @@ static int flex_row(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int fix
     return y - cy;
 }
 
+/* flex-direction: column. defh: the container's definite content height (-1 = none);
+   minh / maxh: its min / max content height (0 / -1 = none). */
+static int flex_col(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int defh, int minh, int maxh) {
+    const web_style_t *cs = box->st;
+    int n;
+    fitem_t *it = flex_items(lc, box, cw, &n, true, cx, cy);
+    if (!it) return 0;
+    int gap = cs->rgap;
+    lsave_t sv;
+    lsave(lc, &sv);
+    int H = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int y = cy;
+        int64_t gsum = 0, ssum = 0;
+        for (int i = 0; i < n; i++) {
+            fitem_t *f = &it[i];
+            f->first = lc->L->nitems;
+            if (!f->n) {
+                bool any;
+                f->h = run_ifc(lc, box, f->from, f->to, cx, y, cw, &any);
+            } else {
+                const web_style_t *st = f->n->st;
+                int w;
+                bool autom = f->aml || f->amr;
+                bool shrink = autom || (f->align != AI_STRETCH && !len_set(st->width));
+                if (len_set(st->width) || shrink) w = shrink_to_fit(lc, f->n, cw);
+                else w = cw - f->ml - f->mr - f->hp;
+                if (!len_set(st->width) && !shrink) {
+                    if (st->maxw.u != U_NONE && len_set(st->maxw)) { int mx = rlen(st->maxw, cw) - (st->border_box ? f->hp : 0); if (mx >= 0 && w > mx) w = mx; }
+                    if (len_set(st->minw)) { int mn = rlen(st->minw, cw) - (st->border_box ? f->hp : 0); if (w < mn) w = mn; }
+                }
+                if (w < 0) w = 0;
+                int bw = w + f->hp, room = cw - f->ml - f->mr - bw, x = cx + f->ml;
+                if (room > 0) {
+                    if (autom) x += f->aml && f->amr ? room / 2 : f->aml ? room : 0;
+                    else if (f->align == AI_CENTER) x += room / 2;
+                    else if (f->align == AI_END) x += room;
+                }
+                /* main size: flex-basis / height (px), or what pass 0 decided */
+                int fh = f->target;
+                if (fh < 0 && st->basis.u == U_PX) fh = st->basis.v + (st->border_box ? 0 : f->vp);
+                else if (fh < 0 && st->basis.u == U_PCT && defh >= 0) fh = rlen(st->basis, defh) + (st->border_box ? 0 : f->vp);
+                int saved = lc->link;
+                if (f->n->link >= 0) lc->link = f->n->link;
+                int saved_cbh = lc->cb_h;
+                lc->cb_h = defh;
+                bres_t r;
+                lc->depth++;
+                lc->force_h = fh;
+                layout_box(lc, f->n, x - f->ml, y + f->mt, cw, w, &r, 0);
+                lc->force_h = -1;
+                lc->depth--;
+                lc->cb_h = saved_cbh;
+                lc->link = saved;
+                f->h = f->mt + r.h + f->mb;
+                gsum += f->grow;
+                ssum += f->shrink;
+            }
+            f->last = lc->L->nitems;
+            y += f->h + (i + 1 < n ? gap : 0);
+        }
+        int total = y - cy;
+        H = defh >= 0 ? defh : MAX(total, minh);
+        if (maxh >= 0 && defh < 0 && H > maxh) H = maxh;
+        int free_h = H - total;
+        if (pass == 0 && free_h > 0 && gsum > 0 && lc->relayouts < MAX_RELAYOUTS) {
+            /* flex-grow: lay the items out again with their grown heights */
+            int given = 0, last = -1;
+            for (int i = 0; i < n; i++) {
+                fitem_t *f = &it[i];
+                if (!f->n || !f->grow) continue;
+                int d = (int)((int64_t)free_h * f->grow / gsum);
+                f->target = f->h - f->mt - f->mb + d;
+                given += d;
+                last = i;
+            }
+            if (last >= 0) it[last].target += free_h - given;
+            lc->relayouts++;
+            lrestore(lc, &sv);
+            continue;
+        }
+        if (pass == 0 && free_h < 0 && defh >= 0 && ssum > 0 && lc->relayouts < MAX_RELAYOUTS) {
+            /* flex-shrink (items keep their content height at least) */
+            bool any = false;
+            int need = -free_h;
+            for (int i = 0; i < n && need > 0; i++) {
+                fitem_t *f = &it[i];
+                if (!f->n || !f->shrink || !f->n->st->overflow_hidden) continue;
+                int bh = f->h - f->mt - f->mb, d = MIN(need, bh);
+                f->target = bh - d;
+                need -= d;
+                any = true;
+            }
+            if (any) {
+                lc->relayouts++;
+                lrestore(lc, &sv);
+                continue;
+            }
+        }
+        if (free_h > 0) {
+            /* justify-content / auto margins along the column */
+            int nauto = 0;
+            for (int i = 0; i < n; i++) nauto += it[i].amt + it[i].amb;
+            int off = 0, spacing = 0;
+            if (nauto) {
+                int share = free_h / nauto;
+                for (int i = 0; i < n; i++) {
+                    fitem_t *f = &it[i];
+                    if (f->amt) off += share;
+                    shift_items(lc, f->first, f->last, 0, off);
+                    if (f->amb) off += share;
+                }
+            } else {
+                switch (cs->justify) {
+                case JC_CENTER: off = free_h / 2; break;
+                case JC_END: off = free_h; break;
+                case JC_BETWEEN: if (n > 1) spacing = free_h / (n - 1); break;
+                case JC_AROUND: spacing = free_h / MAX(n, 1); off = spacing / 2; break;
+                case JC_EVENLY: spacing = free_h / (n + 1); off = spacing; break;
+                default: break;
+                }
+                for (int i = 0; i < n; i++) shift_items(lc, it[i].first, it[i].last, 0, off + spacing * i);
+            }
+        }
+        break;
+    }
+    free(it);
+    return H;
+}
+
+/* ---- grid ------------------------------------------------------------------------------- */
+typedef struct gitem {
+    web_node_t *n;              /* the item, or NULL for a run of text */
+    web_node_t *from, *to;
+    int r0, r1, c0, c1;         /* rows [r0, r1), columns [c0, c1)     */
+    int mn, mx;                 /* min / max-content widths (margin box) */
+    int first, last, h, w, x;   /* laid out: items, margin-box height, border-box width, left */
+    int ml, mr, mt, mb, hp, vp;
+    bool aml, amr;
+    int jalign, valign;         /* AI_* in the cell                    */
+} gitem_t;
+
+#define GMAX_ROWS 600
+
+typedef struct gsizes {
+    int n;
+    web_track_t *t;             /* track definitions (n)               */
+    int *size, *pos;
+} gsizes_t;
+
+/* resolve one axis of an item's placement: start index (or -1 = auto) and span */
+static void grid_span(int s, int e, int ntracks, int *start, int *span) {
+    int ls = -1, le = -1, sp = 1;
+    if (s > 0 && s < GSPAN) ls = s - 1;
+    else if (s < 0) ls = MAX(0, ntracks + 1 + s);
+    if (e > 0 && e < GSPAN) le = e - 1;
+    else if (e < 0) le = MAX(0, ntracks + 1 + e);
+    if (s >= GSPAN) sp = s - GSPAN;
+    if (e >= GSPAN) sp = e - GSPAN;
+    if (sp < 1) sp = 1;
+    if (ls >= 0 && le >= 0) {
+        if (le < ls) { int t = ls; ls = le; le = t; }
+        if (le == ls) le = ls + 1;
+        *start = ls; *span = le - ls;
+    } else if (ls >= 0) { *start = ls; *span = sp; }
+    else if (le >= 0) { *start = MAX(0, le - sp); *span = MAX(1, le - *start); }
+    else { *start = -1; *span = sp; }
+    if (*span > GMAX_ROWS) *span = GMAX_ROWS;
+}
+
+static bool grid_area(const web_grid_t *g, const char *name, int *r0, int *r1, int *c0, int *c1) {
+    if (!g || !g->areas || !name) return false;
+    bool found = false;
+    for (int r = 0; r < g->area_rows; r++)
+        for (int c = 0; c < g->area_cols; c++) {
+            const char *a = g->areas[r * g->area_cols + c];
+            if (!a || strcmp(a, name)) continue;
+            if (!found) { *r0 = r; *r1 = r + 1; *c0 = c; *c1 = c + 1; found = true; }
+            else { *r1 = MAX(*r1, r + 1); *c1 = MAX(*c1, c + 1); *r0 = MIN(*r0, r); *c0 = MIN(*c0, c); }
+        }
+    return found;
+}
+
+/* explicit column count, expanding repeat(auto-fill / auto-fit) for the width cw */
+static int grid_ncols(const web_grid_t *g, int cw, int gap) {
+    if (!g) return 0;
+    int n = g->ncols;
+    if (g->col_nrep > 0) {
+        int fixed = 0, rep = 0;
+        for (int i = 0; i < g->ncols; i++) {
+            const web_track_t *t = &g->cols[i];
+            int v = t->lo == GT_PX ? t->lv : t->lo == GT_PCT ? (int)((int64_t)t->lv * cw / 1000) :
+                    t->hi == GT_PX ? t->hv : t->hi == GT_PCT ? (int)((int64_t)t->hv * cw / 1000) : 0;
+            if (i >= g->col_rep && i < g->col_rep + g->col_nrep) rep += v + gap;
+            else fixed += v + gap;
+        }
+        int times = 1;
+        if (rep > 0) times = MAX(1, (cw + gap - fixed) / rep);
+        if (times > MAX_TRACKS_LAYOUT) times = MAX_TRACKS_LAYOUT;
+        n = g->ncols + (times - 1) * g->col_nrep;
+    }
+    return n;
+}
+
+static web_track_t grid_track(const web_grid_t *g, bool col, int i) {
+    web_track_t t = { GT_AUTO, GT_AUTO, 0, 0 };
+    if (!g) return t;
+    int n = col ? g->ncols : g->nrows, rep = col ? g->col_rep : g->row_rep, nrep = col ? g->col_nrep : g->row_nrep;
+    const web_track_t *tr = col ? g->cols : g->rows;
+    if (nrep > 0 && i >= rep) {
+        /* inside / after the expanded repeat */
+        int extra = i - rep;
+        if (extra < 0) extra = 0;
+        int k = rep + extra % nrep;
+        int after = n - rep - nrep;   /* tracks after the repeat */
+        (void)after;
+        if (k < n) return tr[k];
+    }
+    if (i < n) return tr[i];
+    return col ? g->auto_col : g->auto_row;
+}
+
+/* size the tracks of one axis: avail = space for the tracks (gaps removed), -1 = indefinite;
+   contributions: per track min / max content of the single-span items */
+static void grid_size_tracks(gsizes_t *gs, int avail, int pct_base, const int *cmin, const int *cmax, bool stretch_auto) {
+    int n = gs->n;
+    int64_t frsum = 0;
+    int used = 0;
+    for (int i = 0; i < n; i++) {
+        web_track_t t = gs->t[i];
+        int lo, hi;
+        switch (t.lo) {
+        case GT_PX: lo = t.lv; break;
+        case GT_PCT: lo = pct_base >= 0 ? (int)((int64_t)t.lv * pct_base / 1000) : cmin[i]; break;
+        case GT_MAX: lo = cmax[i]; break;
+        default: lo = cmin[i]; break;   /* auto / min-content */
+        }
+        switch (t.hi) {
+        case GT_PX: hi = t.hv; break;
+        case GT_PCT: hi = pct_base >= 0 ? (int)((int64_t)t.hv * pct_base / 1000) : cmax[i]; break;
+        case GT_MIN: hi = cmin[i]; break;
+        case GT_FIT: hi = MIN(cmax[i], t.hv); break;
+        case GT_FR: hi = INT_MAX; frsum += t.hv; break;
+        default: hi = cmax[i]; break;   /* auto / max-content */
+        }
+        if (hi < lo) hi = lo;
+        gs->size[i] = lo;
+        gs->pos[i] = hi;              /* (limit, until the positions are filled in) */
+        used += lo;
+    }
+    if (avail >= 0) {
+        /* grow the non-flexible tracks towards their limits */
+        int free_sp = avail - used;
+        for (int guard = 0; free_sp > 0 && guard < 8; guard++) {
+            int cnt = 0;
+            for (int i = 0; i < n; i++) if (gs->t[i].hi != GT_FR && gs->size[i] < gs->pos[i]) cnt++;
+            if (!cnt) break;
+            int share = MAX(1, free_sp / cnt);
+            for (int i = 0; i < n && free_sp > 0; i++) {
+                if (gs->t[i].hi == GT_FR || gs->size[i] >= gs->pos[i]) continue;
+                int d = MIN(share, MIN(free_sp, gs->pos[i] - gs->size[i]));
+                gs->size[i] += d;
+                free_sp -= d;
+            }
+        }
+        if (frsum > 0) {
+            /* flexible tracks share what is left (never below their base size) */
+            int fixed = 0;
+            for (int i = 0; i < n; i++) if (gs->t[i].hi != GT_FR) fixed += gs->size[i];
+            int64_t fs = frsum;
+            int left = avail - fixed;
+            bool *frozen = calloc((size_t)n, 1);
+            for (int guard = 0; guard < 8 && fs > 0; guard++) {
+                bool again = false;
+                for (int i = 0; i < n; i++) {
+                    if (gs->t[i].hi != GT_FR || (frozen && frozen[i])) continue;
+                    int want = left > 0 ? (int)((int64_t)left * gs->t[i].hv / fs) : 0;
+                    if (want < gs->size[i]) {      /* its base is bigger: take it out */
+                        if (frozen) frozen[i] = 1;
+                        left -= gs->size[i];
+                        fs -= gs->t[i].hv;
+                        again = true;
+                    }
+                }
+                if (!again || !frozen) break;
+            }
+            int given = 0, lastfr = -1;
+            for (int i = 0; i < n; i++) {
+                if (gs->t[i].hi != GT_FR || (frozen && frozen[i])) continue;
+                int want = left > 0 && fs > 0 ? (int)((int64_t)left * gs->t[i].hv / fs) : 0;
+                if (want > gs->size[i]) gs->size[i] = want;
+                given += gs->size[i];
+                lastfr = i;
+            }
+            if (lastfr >= 0 && left > given && fs > 0) gs->size[lastfr] += left - given;   /* rounding */
+            free(frozen);
+        } else if (stretch_auto) {
+            /* no flexible tracks: auto tracks take the free space */
+            int now = 0, cnt = 0;
+            for (int i = 0; i < n; i++) { now += gs->size[i]; if (gs->t[i].hi == GT_AUTO) cnt++; }
+            int free2 = avail - now;
+            if (free2 > 0 && cnt) {
+                int share = free2 / cnt, given = 0, lasta = -1;
+                for (int i = 0; i < n; i++) if (gs->t[i].hi == GT_AUTO) { gs->size[i] += share; given += share; lasta = i; }
+                if (lasta >= 0) gs->size[lasta] += free2 - given;
+            }
+        }
+    } else {
+        /* indefinite space: tracks grow to their limits (content size); a flexible
+           track is as big as its content */
+        for (int i = 0; i < n; i++) {
+            if (gs->t[i].hi == GT_FR) gs->size[i] = MAX(gs->size[i], cmax[i]);
+            else if (gs->pos[i] != INT_MAX) gs->size[i] = MAX(gs->size[i], gs->pos[i]);
+        }
+    }
+}
+
+/* place the items of a grid container; returns the item array (count in *count) and the
+   number of columns / rows in *ncols / *nrows */
+static gitem_t *grid_items(lctx_t *lc, web_node_t *box, int cw, int *count, int *ncols, int *nrows, bool rec, int cx, int cy) {
+    const web_style_t *cs = box->st;
+    const web_grid_t *g = cs->grid;
+    int nc = grid_ncols(g, cw, cs->gap);
+    if (g && g->area_cols > nc) nc = g->area_cols;
+    int nr0 = g ? MAX(g->nrows, g->area_rows) : 0;
+    gitem_t *it = NULL;
+    int n = 0, cap = 0;
+    for (web_node_t *c = BT_FIRST(box); c;) {
+        web_node_t *from = NULL, *to = NULL;
+        if (c->type == WN_TEXT) {
+            from = c;
+            bool content = false;
+            while (c && c->type == WN_TEXT) { if (!ws_only(c)) content = true; c = BT_NEXT(box, c); }
+            to = c;
+            if (!content) continue;
+        } else if (!displayed(c)) { c = BT_NEXT(box, c); continue; }
+        else if (out_of_flow(c)) {
+            if (rec) abs_add(lc, c, cx, cy);
+            c = BT_NEXT(box, c);
+            continue;
+        }
+        if (n >= cap) {
+            int ncap = cap ? cap * 2 : 16;
+            gitem_t *ni = realloc(it, sizeof *ni * ncap);
+            if (!ni) break;
+            it = ni;
+            cap = ncap;
+        }
+        gitem_t *gi = &it[n++];
+        memset(gi, 0, sizeof *gi);
+        gi->r0 = gi->c0 = -1;
+        gi->r1 = gi->c1 = 1;      /* spans until placed */
+        if (from) {
+            gi->from = from;
+            gi->to = to;
+            gi->jalign = gi->valign = AI_STRETCH;
+        } else {
+            const web_style_t *st = c->st;
+            gi->n = c;
+            int r0, r1, c0, c1;
+            if (st->garea && grid_area(g, st->garea, &r0, &r1, &c0, &c1)) {
+                gi->r0 = r0; gi->r1 = r1 - r0; gi->c0 = c0; gi->c1 = c1 - c0;
+            } else {
+                grid_span(st->grs, st->gre, nr0, &gi->r0, &gi->r1);
+                grid_span(st->gcs, st->gce, nc, &gi->c0, &gi->c1);
+            }
+            gi->jalign = st->justify_self ? st->justify_self - 1 : cs->justify_items ? cs->justify_items - 1 : AI_STRETCH;
+            gi->valign = st->align_self ? st->align_self - 1 : cs->align_items;
+        }
+        if (!from) c = BT_NEXT(box, c);
+    }
+    /* columns needed by items placed explicitly */
+    for (int i = 0; i < n; i++) if (it[i].c0 >= 0 && it[i].c0 + it[i].c1 > nc) nc = it[i].c0 + it[i].c1;
+    if (nc < 1) nc = 1;
+    if (nc > MAX_TRACKS_LAYOUT) nc = MAX_TRACKS_LAYOUT;
+    bool colflow = cs->grid_flow & 1, dense = cs->grid_flow & 2;
+    if (colflow) {
+        /* column flow: lay the grid out transposed (rows <-> columns), then swap back */
+        int nrr = MAX(nr0, 1);
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            int t = gi->r0; gi->r0 = gi->c0; gi->c0 = t;
+            t = gi->r1; gi->r1 = gi->c1; gi->c1 = t;
+            if (gi->c0 >= 0 && gi->c0 + gi->c1 > nrr) nrr = gi->c0 + gi->c1;
+        }
+        nr0 = 0;
+        nc = MIN(nrr, MAX_TRACKS_LAYOUT);
+    }
+    /* occupancy: major (rows) x minor (columns, nc), grown as needed */
+    int rows_cap = MAX(nr0, 4);
+    if (rows_cap > GMAX_ROWS) rows_cap = GMAX_ROWS;
+    uint8_t *occ = calloc((size_t)(rows_cap * nc), 1);
+    int nr = nr0;
+    int cur_r = 0, cur_c = 0;
+#define G_FITS(R, C, RS, CS, OK) do { OK = true; \
+        for (int rr_ = (R); rr_ < (R) + (RS) && OK; rr_++) \
+            for (int cc_ = (C); cc_ < (C) + (CS) && OK; cc_++) \
+                if (rr_ < rows_cap && occ[rr_ * nc + cc_]) OK = false; } while (0)
+    for (int pass = 0; pass < 3 && occ; pass++) {
+        /* 0: definite row and column; 1: definite row; 2: the rest, with a cursor */
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            bool dr = gi->r0 >= 0, dc = gi->c0 >= 0;
+            if (pass == 0 && !(dr && dc)) continue;
+            if (pass == 1 && !(dr && !dc)) continue;
+            if (pass == 2 && dr) continue;
+            int cspan = MIN(gi->c1, nc), rspan = MIN(gi->r1, GMAX_ROWS / 2);
+            int r = gi->r0, c = gi->c0;
+            if (c >= 0 && c + cspan > nc) c = MAX(0, nc - cspan);
+            bool ok;
+            if (pass == 1) {
+                for (c = 0; c + cspan <= nc; c++) { G_FITS(r, c, rspan, cspan, ok); if (ok) break; }
+                if (c + cspan > nc) c = 0;
+            } else if (pass == 2) {
+                if (dense) { cur_r = 0; cur_c = 0; }
+                if (dc) {
+                    if (c < cur_c) cur_r++;
+                    cur_c = c;
+                    for (int guard = 0; guard < GMAX_ROWS; guard++) {
+                        G_FITS(cur_r, c, rspan, cspan, ok);
+                        if (ok) break;
+                        cur_r++;
+                    }
+                    r = cur_r;
+                } else {
+                    for (int guard = 0; guard < GMAX_ROWS * 2; guard++) {
+                        while (cur_c + cspan <= nc) {
+                            G_FITS(cur_r, cur_c, rspan, cspan, ok);
+                            if (ok) break;
+                            cur_c++;
+                        }
+                        if (cur_c + cspan <= nc) break;
+                        cur_r++;
+                        cur_c = 0;
+                    }
+                    r = cur_r;
+                    c = cur_c;
+                }
+            }
+            if (r > GMAX_ROWS - rspan) r = GMAX_ROWS - rspan;
+            if (r < 0) r = 0;
+            if (c < 0) c = 0;
+            if (r + rspan > rows_cap) {
+                int ncap2 = MIN(GMAX_ROWS, MAX(rows_cap * 2, r + rspan));
+                uint8_t *no = realloc(occ, (size_t)(ncap2 * nc));
+                if (!no) break;
+                memset(no + rows_cap * nc, 0, (size_t)((ncap2 - rows_cap) * nc));
+                occ = no;
+                rows_cap = ncap2;
+            }
+            for (int rr = r; rr < r + rspan && rr < rows_cap; rr++)
+                for (int cc = c; cc < c + cspan; cc++) occ[rr * nc + cc] = 1;
+            gi->r0 = r; gi->r1 = r + rspan; gi->c0 = c; gi->c1 = c + cspan;
+            if (gi->r1 > nr) nr = gi->r1;
+        }
+    }
+#undef G_FITS
+    if (colflow) {
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            int t = gi->r0; gi->r0 = gi->c0; gi->c0 = t;
+            t = gi->r1; gi->r1 = gi->c1; gi->c1 = t;
+        }
+        int t = nr; nr = nc; nc = t;
+        if (nc > MAX_TRACKS_LAYOUT) nc = MAX_TRACKS_LAYOUT;
+        for (int i = 0; i < n; i++) if (it[i].c1 > nc) { it[i].c1 = nc; if (it[i].c0 >= nc) it[i].c0 = nc - 1; }
+    }
+    free(occ);
+    if (nr < 1) nr = 1;
+    *count = n;
+    *ncols = nc;
+    *nrows = nr;
+    return it;
+}
+
+static void grid_intrinsic(lctx_t *lc, web_node_t *box, int *mn, int *mx) {
+    int n, nc, nr;
+    gitem_t *it = grid_items(lc, box, lc->vw, &n, &nc, &nr, false, 0, 0);
+    int *cmin = calloc((size_t)nc, sizeof(int)), *cmax = calloc((size_t)nc, sizeof(int));
+    int smin = 0, smax = 0;
+    if (cmin && cmax) {
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            int a, b;
+            if (gi->n) intrinsic(lc, gi->n, &a, &b);
+            else { meas_t m = { 0, 0, 0, 0, false, false }; for (web_node_t *x = gi->from; x && x != gi->to; x = BT_NEXT(box, x)) meas_node(lc, &m, x, x->parent->st, 0); meas_flush(&m); a = m.min; b = m.max; }
+            int span = gi->c1 - gi->c0;
+            /* an item spanning several tracks one of which is flexible has no automatic
+               minimum (it does not hold the tracks open) */
+            bool flexy = false;
+            if (span > 1)
+                for (int c = gi->c0; c < gi->c1 && c < nc; c++) if (grid_track(box->st->grid, true, c).hi == GT_FR) flexy = true;
+            for (int c = gi->c0; c < gi->c1 && c < nc; c++) {
+                if (!flexy) cmin[c] = MAX(cmin[c], a / span);
+                cmax[c] = MAX(cmax[c], b / span);
+            }
+        }
+        const web_grid_t *g = box->st->grid;
+        for (int c = 0; c < nc; c++) {
+            web_track_t t = grid_track(g, true, c);
+            int lo = cmin[c], hi = cmax[c];
+            if (t.lo == GT_PX) lo = MAX(lo, t.lv);
+            if (t.hi == GT_PX) { hi = t.hv; if (t.lo == GT_PX) lo = MAX(t.lv, MIN(lo, t.hv)); }
+            if (t.lo == GT_PX && t.hi == GT_PX) lo = hi = t.hv;
+            if (hi < lo) hi = lo;
+            smin += lo + (c ? box->st->gap : 0);
+            smax += hi + (c ? box->st->gap : 0);
+        }
+    }
+    free(cmin);
+    free(cmax);
+    free(it);
+    *mn = smin;
+    *mx = smax;
+}
+
+static int grid_layout(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int defh, int minh, int maxh) {
+    const web_style_t *cs = box->st;
+    const web_grid_t *g = cs->grid;
+    int n, nc, nr;
+    gitem_t *it = grid_items(lc, box, cw, &n, &nc, &nr, true, cx, cy);
+    int cgap = cs->gap, rgap = cs->rgap;
+    gsizes_t gc = { nc, NULL, NULL, NULL }, gr = { nr, NULL, NULL, NULL };
+    gc.t = malloc(sizeof(web_track_t) * (size_t)nc);
+    gr.t = malloc(sizeof(web_track_t) * (size_t)nr);
+    int *buf = calloc((size_t)(nc + nr) * 4, sizeof(int));
+    if (!gc.t || !gr.t || !buf || (n && !it)) { free(gc.t); free(gr.t); free(buf); free(it); return 0; }
+    gc.size = buf; gc.pos = buf + nc; gr.size = buf + 2 * nc; gr.pos = buf + 2 * nc + nr;
+    int *cmin = buf + 2 * nc + 2 * nr, *cmax = cmin + nc, *rmin = cmax + nc, *rmax = rmin + nr;
+    (void)rmax;
+    for (int c = 0; c < nc; c++) gc.t[c] = grid_track(g, true, c);
+    for (int r = 0; r < nr; r++) gr.t[r] = grid_track(g, false, r);
+    /* column sizes from the items' content widths */
+    for (int i = 0; i < n; i++) {
+        gitem_t *gi = &it[i];
+        if (gi->n) {
+            bm_t b;
+            box_metrics(gi->n->st, cw, &b);
+            gi->ml = b.ml; gi->mr = b.mr; gi->mt = b.mt; gi->mb = b.mb;
+            gi->aml = b.aml; gi->amr = b.amr;
+            gi->hp = b.pl + b.pr + b.bl + b.br;
+            gi->vp = b.pt + b.pb + b.bt + b.bb;
+            if (gi->n->tag == T_SVG) {
+                int sw, sh;
+                svg_box(lc, gi->n, cw, &sw, &sh);
+                gi->mn = gi->mx = sw + gi->hp + gi->ml + gi->mr;
+            } else intrinsic(lc, gi->n, &gi->mn, &gi->mx);
+        } else {
+            meas_t m = { 0, 0, 0, 0, false, false };
+            for (web_node_t *x = gi->from; x && x != gi->to; x = BT_NEXT(box, x)) meas_node(lc, &m, x, x->parent->st, 0);
+            meas_flush(&m);
+            gi->mn = m.min; gi->mx = m.max;
+        }
+        if (gi->c1 - gi->c0 == 1) {
+            cmin[gi->c0] = MAX(cmin[gi->c0], gi->mn);
+            cmax[gi->c0] = MAX(cmax[gi->c0], gi->mx);
+        }
+    }
+    /* items spanning several intrinsic columns: spread what the columns lack */
+    for (int i = 0; i < n; i++) {
+        gitem_t *gi = &it[i];
+        int span = gi->c1 - gi->c0;
+        if (span <= 1) continue;
+        int have = cgap * (span - 1), cnt = 0;
+        for (int c = gi->c0; c < gi->c1; c++) { have += cmax[c]; if (gc.t[c].hi != GT_PX && gc.t[c].hi != GT_FR) cnt++; }
+        if (cnt && gi->mx > have) {
+            int add = (gi->mx - have) / cnt;
+            for (int c = gi->c0; c < gi->c1; c++) if (gc.t[c].hi != GT_PX && gc.t[c].hi != GT_FR) cmax[c] += add;
+        }
+    }
+    int cavail = cw - cgap * (nc - 1);
+    grid_size_tracks(&gc, cavail > 0 ? cavail : 0, cw, cmin, cmax, cs->justify == JC_START);
+    int tot = 0;
+    for (int c = 0; c < nc; c++) tot += gc.size[c] + (c ? cgap : 0);
+    int x0 = cx, cspacing = 0;
+    if (tot < cw) {
+        int fr = cw - tot;
+        switch (cs->justify) {
+        case JC_CENTER: x0 += fr / 2; break;
+        case JC_END: x0 += fr; break;
+        case JC_BETWEEN: if (nc > 1) cspacing = fr / (nc - 1); break;
+        case JC_AROUND: cspacing = fr / nc; x0 += cspacing / 2; break;
+        case JC_EVENLY: cspacing = fr / (nc + 1); x0 += cspacing; break;
+        default: break;
+        }
+    }
+    for (int c = 0, x = x0; c < nc; c++) { gc.pos[c] = x; x += gc.size[c] + cgap + cspacing; }
+    lsave_t sv;
+    lsave(lc, &sv);
+    for (int pass = 0; pass < 2; pass++) {
+        /* lay the items out in their columns (at y 0 for now) */
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            int cellx = gc.pos[gi->c0], cellw = gc.pos[gi->c1 - 1] + gc.size[gi->c1 - 1] - cellx;
+            gi->first = lc->L->nitems;
+            if (!gi->n) {
+                bool any;
+                gi->h = run_ifc(lc, box, gi->from, gi->to, cellx, pass == 1 ? gr.pos[gi->r0] : 0, MAX(cellw, 1), &any);
+                gi->x = cellx;
+                gi->w = cellw;
+                gi->last = lc->L->nitems;
+                continue;
+            }
+            const web_style_t *st = gi->n->st;
+            int avail = cellw - gi->ml - gi->mr;
+            int w;
+            bool shrink = gi->aml || gi->amr || (gi->jalign != AI_STRETCH && !len_set(st->width));
+            if (gi->n->tag == T_SVG) { int sw, sh; svg_box(lc, gi->n, cellw, &sw, &sh); w = sw; shrink = true; }
+            else if (len_set(st->width) || shrink) w = shrink_to_fit(lc, gi->n, cellw);
+            else {
+                w = avail - gi->hp;
+                if (st->maxw.u != U_NONE && len_set(st->maxw)) { int mx = rlen(st->maxw, cellw) - (st->border_box ? gi->hp : 0); if (mx >= 0 && w > mx) w = mx; }
+                if (len_set(st->minw)) { int mnw = rlen(st->minw, cellw) - (st->border_box ? gi->hp : 0); if (w < mnw) w = mnw; }
+            }
+            if (w < 0) w = 0;
+            int bw = w + gi->hp, room = avail - bw, x = cellx + gi->ml;
+            if (room > 0) {
+                if (gi->aml || gi->amr) x += gi->aml && gi->amr ? room / 2 : gi->aml ? room : 0;
+                else if (gi->jalign == AI_CENTER) x += room / 2;
+                else if (gi->jalign == AI_END) x += room;
+            }
+            gi->x = x;
+            gi->w = bw;
+            int fh = -1;
+            if (pass == 1 && gi->valign == AI_STRETCH && !len_set(st->height)) {
+                int rh = gr.pos[gi->r1 - 1] + gr.size[gi->r1 - 1] - gr.pos[gi->r0];
+                fh = MAX(0, rh - gi->mt - gi->mb);
+            }
+            int saved = lc->link;
+            if (gi->n->link >= 0) lc->link = gi->n->link;
+            int saved_cbh = lc->cb_h;
+            lc->cb_h = fh >= 0 ? fh - gi->vp : -1;
+            int y = pass == 1 ? gr.pos[gi->r0] + gi->mt : gi->mt;
+            bres_t r;
+            lc->depth++;
+            lc->force_h = fh;
+            if (gi->n->tag == T_SVG) {
+                bm_t b;
+                box_metrics(st, cellw, &b);
+                int sbw, sbh;
+                svg_items(lc, gi->n, cellw, &b, x, y, &sbw, &sbh);
+                r.h = sbh;
+                lc->force_h = -1;
+            } else layout_box(lc, gi->n, x - gi->ml, y, cellw, w, &r, 0);
+            lc->force_h = -1;
+            lc->depth--;
+            lc->cb_h = saved_cbh;
+            lc->link = saved;
+            gi->h = gi->mt + r.h + gi->mb;
+            gi->last = lc->L->nitems;
+            if (pass == 1) {
+                int rh = gr.pos[gi->r1 - 1] + gr.size[gi->r1 - 1] - gr.pos[gi->r0], room = rh - gi->h;
+                if (room > 0) {
+                    if (gi->valign == AI_CENTER) shift_items(lc, gi->first, gi->last, 0, room / 2);
+                    else if (gi->valign == AI_END) shift_items(lc, gi->first, gi->last, 0, room);
+                    else if (gi->valign == AI_STRETCH && fh < 0 && !len_set(st->height))
+                        stretch_item(lc, gi->first, gi->last, y, gi->w, gi->h - gi->mt - gi->mb, room);
+                }
+            }
+        }
+        if (pass == 1) break;
+        /* row sizes */
+        int *rcmax = calloc((size_t)nr, sizeof(int));
+        if (!rcmax) break;
+        for (int i = 0; i < n; i++) if (it[i].r1 - it[i].r0 == 1) {
+            rmin[it[i].r0] = MAX(rmin[it[i].r0], it[i].h);
+            rcmax[it[i].r0] = MAX(rcmax[it[i].r0], it[i].h);
+        }
+        int target = defh >= 0 ? defh : -1;
+        int pct_base = defh;
+        grid_size_tracks(&gr, -1, pct_base, rmin, rcmax, false);
+        int sum = 0;
+        for (int r = 0; r < nr; r++) sum += gr.size[r] + (r ? rgap : 0);
+        if (target < 0 && minh > sum) target = minh;
+        if (target < 0 && maxh >= 0 && sum > maxh) target = maxh;
+        if (target >= 0) {
+            /* a definite height: flexible rows (or auto rows, with align-content normal) fill it */
+            for (int r = 0; r < nr; r++) gr.size[r] = 0;
+            grid_size_tracks(&gr, MAX(0, target - rgap * (nr - 1)), pct_base, rmin, rcmax, cs->align_content == 0);
+        }
+        /* items spanning rows: the last row they span grows to fit them */
+        for (int i = 0; i < n; i++) {
+            if (it[i].r1 - it[i].r0 <= 1) continue;
+            int have = rgap * (it[i].r1 - it[i].r0 - 1);
+            for (int r = it[i].r0; r < it[i].r1; r++) have += gr.size[r];
+            if (it[i].h > have) gr.size[it[i].r1 - 1] += it[i].h - have;
+        }
+        free(rcmax);
+        sum = 0;
+        for (int r = 0; r < nr; r++) sum += gr.size[r] + (r ? rgap : 0);
+        int y0 = cy, rspacing = 0;
+        if (target >= 0 && sum < target && cs->align_content) {
+            int fr = target - sum;
+            switch (cs->align_content - 1) {
+            case JC_CENTER: y0 += fr / 2; break;
+            case JC_END: y0 += fr; break;
+            case JC_BETWEEN: if (nr > 1) rspacing = fr / (nr - 1); break;
+            case JC_AROUND: rspacing = fr / nr; y0 += rspacing / 2; break;
+            case JC_EVENLY: rspacing = fr / (nr + 1); y0 += rspacing; break;
+            default: break;
+            }
+        }
+        for (int r = 0, y = y0; r < nr; r++) { gr.pos[r] = y; y += gr.size[r] + rgap + rspacing; }
+        /* stretched containers are laid out again with their row height */
+        bool again = false;
+        for (int i = 0; i < n && !again; i++) {
+            gitem_t *gi = &it[i];
+            if (!gi->n || gi->valign != AI_STRETCH || len_set(gi->n->st->height)) continue;
+            int rh = gr.pos[gi->r1 - 1] + gr.size[gi->r1 - 1] - gr.pos[gi->r0];
+            int d = gi->n->st->display;
+            if (rh > gi->h + 1 && (d == D_FLEX || d == D_GRID || d == D_INLINE_FLEX)) again = true;
+        }
+        if (again && lc->relayouts < MAX_RELAYOUTS) {
+            lc->relayouts++;
+            lrestore(lc, &sv);
+            continue;
+        }
+        /* move the items into their rows and align them */
+        for (int i = 0; i < n; i++) {
+            gitem_t *gi = &it[i];
+            int rh = gr.pos[gi->r1 - 1] + gr.size[gi->r1 - 1] - gr.pos[gi->r0];
+            int room = rh - gi->h, dy = gr.pos[gi->r0];
+            if (room > 0 && gi->n) {
+                if (gi->valign == AI_CENTER) dy += room / 2;
+                else if (gi->valign == AI_END) dy += room;
+            }
+            shift_items(lc, gi->first, gi->last, 0, dy);
+            if (room > 0 && gi->n && gi->valign == AI_STRETCH && !len_set(gi->n->st->height))
+                stretch_item(lc, gi->first, gi->last, dy + gi->mt, gi->w, gi->h - gi->mt - gi->mb, room);
+        }
+        break;
+    }
+    int h = 0;
+    if (nr > 0) h = gr.pos[nr - 1] + gr.size[nr - 1] - cy;
+    if (defh >= 0) h = MAX(h, defh);
+    free(gc.t);
+    free(gr.t);
+    free(buf);
+    free(it);
+    return h > 0 ? h : 0;
+}
+
 static int run_ifc(lctx_t *lc, web_node_t *container, web_node_t *from, web_node_t *to, int cx, int y, int cw, bool *any) {
     ifc_t f;
     ifc_init(&f, lc, container->st, cx, y, cw);
-    for (web_node_t *c = from; c != to; c = c->next) inline_node(&f, c, container->st);
+    /* (children of display:contents elements take their parent's text style) */
+    for (web_node_t *c = from; c && c != to; c = BT_NEXT(container, c))
+        inline_node(&f, c, c->parent && c->parent->type == WN_ELEM && c->parent->st ? c->parent->st : container->st);
     ifc_finish(&f);
     *any = f.lines > 0;
     return f.y - y;
@@ -1957,29 +3106,33 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
     bool first = true;
     int counter = 1;
     if (n->tag == T_OL) counter = attr_int(n, "start", 1, -100000, 1000000);
-    web_node_t *c = n->first;
+    web_node_t *c = BT_FIRST(n);
     while (c) {
-        if (c->type == WN_TEXT || (displayed(c) && !block_level(c) && !is_float(c))) {
-            /* a run of inline content: an anonymous block */
+        if (c->type == WN_TEXT || (displayed(c) && (out_of_flow(c) || (!block_level(c) && !is_float(c))))) {
+            /* a run of inline content: an anonymous block (boxes taken out of flow
+               stay in it: they are placed where they would have been) */
             web_node_t *e = c;
             bool content = false;
-            while (e && (e->type == WN_TEXT || !displayed(e) || (!block_level(e) && !is_float(e)))) {
-                if (e->type == WN_TEXT ? !ws_only(e) : displayed(e)) content = true;
-                e = e->next;
+            while (e && (e->type == WN_TEXT || !displayed(e) || out_of_flow(e) || (!block_level(e) && !is_float(e)))) {
+                if (e->type == WN_TEXT ? !ws_only(e) : (displayed(e) && !out_of_flow(e))) content = true;
+                e = BT_NEXT(n, e);
             }
             if (content) {
                 int gap = (first && ctop) ? 0 : collapse(pending, 0);
                 bool any;
                 int h = run_ifc(lc, n, c, e, cx, y + gap, cw, &any);
                 if (any) { y += gap + h; pending = 0; first = false; }
+            } else {
+                for (web_node_t *k = c; k && k != e; k = BT_NEXT(n, k))
+                    if (displayed(k) && out_of_flow(k)) abs_add(lc, k, cx, y + (pending > 0 ? pending : 0));
             }
             c = e;
             continue;
         }
-        if (c->type != WN_ELEM || !displayed(c)) { c = c->next; continue; }
+        if (c->type != WN_ELEM || !displayed(c)) { c = BT_NEXT(n, c); continue; }
         if (is_float(c)) {
             place_float(lc, c, cx, cw, y + (pending > 0 ? pending : 0));
-            c = c->next;
+            c = BT_NEXT(n, c);
             continue;
         }
         const web_style_t *st = c->st;
@@ -1990,7 +3143,7 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
             if (cy2 > y + gap) gap = cy2 - y;
         }
         int bx = cx, bw = cw;
-        if ((st->display == D_TABLE || st->overflow_hidden || st->display == D_FLEX) && lc->nfl > lc->flbase) {
+        if ((st->display == D_TABLE || st->overflow_hidden || st->display == D_FLEX || st->display == D_GRID) && lc->nfl > lc->flbase) {
             int lx, aw;
             fl_bounds(lc, y + gap, 1, cx, cw, &lx, &aw);
             bx = lx;
@@ -2016,7 +3169,7 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
             pending = r.mb;
             first = false;
         }
-        c = c->next;
+        c = BT_NEXT(n, c);
     }
     if (cbot) *trailing = pending;
     else { y += pending > 0 ? pending : 0; *trailing = 0; }
@@ -2025,16 +3178,33 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
 
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum) {
     const web_style_t *st = n->st;
+    int force_h = lc->force_h;          /* a border-box height decided by the parent (flex / grid / abs) */
+    lc->force_h = -1;
     memset(r, 0, sizeof *r);
     if (lc->depth > MAX_DEPTH || stack_low()) return 0;
     if (st->display == D_TABLE || st->display == D_INLINE_TABLE) return layout_table(lc, n, x, y, cbw, fw, r);
     bm_t b;
     box_metrics(st, cbw, &b);
-    int hp = b.pl + b.pr + b.bl + b.br;
+    if (n->tag == T_SVG) {
+        /* a replaced box */
+        int bw, bh;
+        int ml = b.ml;
+        if (fw < 0 && b.aml && b.amr && block_level(n)) {
+            int sw, sh;
+            svg_box(lc, n, cbw, &sw, &sh);
+            ml = (cbw - sw - b.pl - b.pr - b.bl - b.br) / 2;
+        }
+        svg_items(lc, n, cbw, &b, x + ml, y, &bw, &bh);
+        r->h = bh;
+        r->w = bw;
+        r->mb = b.mb;
+        return bh;
+    }
+    int hp = b.pl + b.pr + b.bl + b.br, vp = b.pt + b.pb + b.bt + b.bb;
     int w;
     bool spec = false;
     if (fw >= 0) { w = fw; spec = true; }
-    else if (st->width.u == U_PX || st->width.u == U_PCT) {
+    else if (len_set(st->width)) {
         w = rlen(st->width, cbw);
         if (st->border_box) w -= hp;
         spec = true;
@@ -2042,11 +3212,11 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         w = cbw - b.ml - b.mr - hp;
     }
     if (fw < 0) {
-        if (st->maxw.u != U_NONE) {
+        if (st->maxw.u != U_NONE && len_set(st->maxw)) {
             int mx = rlen(st->maxw, cbw) - (st->border_box ? hp : 0);
             if (mx >= 0 && w > mx) { w = mx; spec = true; }
         }
-        if (st->minw.u == U_PX || st->minw.u == U_PCT) {
+        if (len_set(st->minw)) {
             int mn = rlen(st->minw, cbw) - (st->border_box ? hp : 0);
             if (w < mn) w = mn;
         }
@@ -2067,7 +3237,8 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int first_item = lc->L->nitems;
     int dbgi = -1;
     if (web_layout_debug_boxes && item_add(lc, WI_BOX)) dbgi = lc->L->nitems - 1;
-    int bgi = (st->visibility_hidden || n == lc->skip_bg) ? -1 : reserve_bg(lc, st->bg);
+    /* (a masked background is an icon drawn through a mask: not a box of colour) */
+    int bgi = (st->visibility_hidden || n == lc->skip_bg || st->masked) ? -1 : reserve_bg(lc, st->bg);
     if (n->id) anchor_add(lc, n->id, y);
     if (st->display == D_LIST_ITEM) {
         if (lc->mk.on) emit_marker(lc, cy + font_ascent(lc->mk.font));
@@ -2079,15 +3250,53 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         lc->mk.x = cx;
         lc->mk.fs = st->fsize;
     }
+    /* heights: definite (specified, forced, or a percentage of a definite containing
+       block), min-height / max-height */
+    int parent_cbh = lc->cb_h;
+    int defh = -1;
+    if (force_h >= 0) defh = force_h - vp;
+    else if (st->height.u == U_PX) defh = st->height.v - (st->border_box ? vp : 0);
+    else if ((st->height.u == U_PCT || st->height.u == U_CALC) && parent_cbh >= 0)
+        defh = rlen(st->height, parent_cbh) - (st->border_box ? vp : 0);
+    else if (st->aspect_set && st->height.u == U_AUTO)
+        defh = (int)((int64_t)(st->border_box ? bw : w) * 1000 / st->aspect) - (st->border_box ? vp : 0);
+    int minh = 0, maxh = -1;
+    if (st->minh.u == U_PX || (len_set(st->minh) && parent_cbh >= 0))
+        minh = MAX(0, rlen(st->minh, parent_cbh) - (st->border_box ? vp : 0));
+    if (st->maxh.u == U_PX || (len_set(st->maxh) && parent_cbh >= 0))
+        maxh = MAX(0, rlen(st->maxh, parent_cbh) - (st->border_box ? vp : 0));
+    if (defh != -1) {
+        if (defh < 0) defh = 0;
+        if (force_h < 0) {
+            if (maxh >= 0 && defh > maxh) defh = maxh;
+            if (defh < minh) defh = minh;
+        }
+    }
+    bool is_cb = st->position != POS_STATIC;
+    int abs_mark = lc->nabs;
     int fmark = lc->nfl;
     bool root = n->parent && n->parent->type == WN_DOC;
-    bool bfc = st->overflow_hidden || fw >= 0 || st->display == D_FLEX || st->display == D_INLINE_FLEX;
+    /* overflow clipping (overflow:auto boxes only when they are small: bigger ones
+       grow, since a box cannot be scrolled here) */
+    int lim = defh >= 0 ? defh : maxh;
+    bool clips = (st->overflow_hidden || (st->ovf_scroll && lim >= 0 && lim < lc->vh)) && !root &&
+                 n->tag != T_BODY && n->tag != T_HTML;
+    int saved_clip = lc->cur_clip, my_clip = clips ? clip_add(lc) : 0;
+    if (my_clip) lc->cur_clip = my_clip;
+    bool grid = st->display == D_GRID;
+    bool flex = st->display == D_FLEX || st->display == D_INLINE_FLEX;
+    bool abspos = st->position == POS_ABSOLUTE || st->position == POS_FIXED;
+    bool bfc = st->overflow_hidden || fw >= 0 || flex || grid || abspos;
     bool ctop = !root && !bfc && b.pt == 0 && b.bt == 0;
-    bool cbot = !root && !bfc && b.pb == 0 && b.bb == 0 && st->height.u == U_AUTO;
+    bool cbot = !root && !bfc && b.pb == 0 && b.bb == 0 && st->height.u == U_AUTO && defh < 0 && minh == 0;
     int trailing = 0, ch;
     lc->depth++;
-    if (is_flex_row(st)) ch = flex_row(lc, n, cx, cy, w, st->height.u == U_PX ? st->height.v - (st->border_box ? b.pt + b.pb + b.bt + b.bb : 0) : -1);
+    lc->cb_h = defh;
+    if (grid) ch = grid_layout(lc, n, cx, cy, w, defh, minh, maxh);
+    else if (is_flex_row(st)) ch = flex_row(lc, n, cx, cy, w, defh >= 0 ? defh : minh);
+    else if (flex) ch = flex_col(lc, n, cx, cy, w, defh, minh, maxh);
     else ch = block_children(lc, n, cx, cy, w, ctop, cbot, &trailing);
+    lc->cb_h = parent_cbh;
     lc->depth--;
     if (st->display == D_LIST_ITEM && lc->mk.on && lc->mk.x == cx) emit_marker(lc, cy + font_ascent(lc->mk.font));
     /* contain the floats placed inside */
@@ -2096,19 +3305,66 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         if (fb > ch) { ch = fb; trailing = 0; }
     }
     lc->nfl = fmark;
-    if (st->height.u == U_PX) {
-        int sh = st->height.v - (st->border_box ? b.pt + b.pb + b.bt + b.bb : 0);
-        if (sh > ch || st->overflow_hidden) ch = sh > 0 ? sh : 0;
+    if (defh >= 0) {
+        /* (in normal flow, content taller than a specified height keeps its room: page fonts
+           are not the ones the page was made for) */
+        if (force_h >= 0 || clips || defh > ch || flex || grid || abspos) ch = defh;
+    } else {
+        if (ch < minh) ch = minh;
+        if (maxh >= 0 && ch > maxh) ch = maxh;
     }
     int bh = b.bt + b.pt + ch + b.pb + b.bb;
-    fill_bg(lc, bgi, bx, y, bw, bh);
+    lc->cur_clip = saved_clip;
+    if (my_clip && my_clip <= lc->L->nclips) {
+        web_clip_t *cr = &lc->L->clips[my_clip - 1];
+        cr->x = bx + b.bl; cr->y = y + b.bt; cr->w = bw - b.bl - b.br; cr->h = bh - b.bt - b.bb;
+    }
+    fill_bg_r(lc, bgi, bx, y, bw, bh, st);
+    int nb0 = lc->L->nitems;
     borders(lc, st, bx, y, bw, bh);
+    int nb1 = lc->L->nitems;
     if (dbgi >= 0) {
         web_item_t *dbg = &lc->L->items[dbgi];
         dbg->x = bx; dbg->y = y; dbg->w = bw; dbg->h = bh; dbg->node = n;
     }
-    if (st->position == POS_RELATIVE) {
-        int dx = st->left.u == U_PX ? st->left.v : 0, dy = st->top.u == U_PX ? st->top.v : 0;
+    /* positioned descendants waiting for this containing block (clipped by it) */
+    if (my_clip) lc->cur_clip = my_clip;
+    if (root) {
+        int vw = lc->vw, vh = lc->vh;
+        process_abs(lc, abs_mark, 0, 0, vw, vh, true);
+    } else if (is_cb && lc->nabs > abs_mark) {
+        process_abs(lc, abs_mark, bx + b.bl, y + b.bt, bw - b.bl - b.br, bh - b.bt - b.bb, false);
+    }
+    lc->cur_clip = saved_clip;
+    /* painting order */
+    {
+        const web_style_t *ps = n->parent && n->parent->type == WN_ELEM ? n->parent->st : NULL;
+        bool positioned = st->position != POS_STATIC;
+        bool fg_item = ps && (ps->display == D_FLEX || ps->display == D_INLINE_FLEX || ps->display == D_GRID);
+        bool zctx = st->z_set && (positioned || fg_item);
+        bool sc = root || zctx || st->isolate || len_set(st->tx) || len_set(st->ty);
+        web_item_t *its = lc->L->items;
+        if (sc) {
+            if (bgi >= 0) its[bgi].layer = INT16_MIN;
+            for (int i = nb0; i < nb1; i++) its[i].layer = INT16_MIN;
+            sort_layers(lc, first_item, lc->L->nitems);
+            int16_t me = positioned || zctx ? z_layer(st) : 0;
+            for (int i = first_item; i < lc->L->nitems; i++) its[i].layer = root ? 0 : me;
+        } else if (positioned) {
+            for (int i = first_item; i < lc->L->nitems; i++) if (its[i].layer == 0) its[i].layer = 1;
+        }
+    }
+    if (st->position == POS_RELATIVE || st->position == POS_STICKY) {
+        int dx = 0, dy = 0;
+        if (len_set(st->left)) dx = rlen(st->left, cbw);
+        else if (len_set(st->right)) dx = -rlen(st->right, cbw);
+        if (len_set(st->top) && (len_fixed(st->top) || parent_cbh >= 0)) dy = rlen(st->top, parent_cbh);
+        else if (len_set(st->bottom) && (len_fixed(st->bottom) || parent_cbh >= 0)) dy = -rlen(st->bottom, parent_cbh);
+        if (st->position == POS_STICKY) dx = dy = 0;
+        shift_items(lc, first_item, lc->L->nitems, dx, dy);
+    }
+    if (len_set(st->tx) || len_set(st->ty)) {
+        int dx = len_set(st->tx) ? rlen(st->tx, bw) : 0, dy = len_set(st->ty) ? rlen(st->ty, bh) : 0;
         shift_items(lc, first_item, lc->L->nitems, dx, dy);
     }
     r->h = bh;
@@ -2121,6 +3377,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
 void web_layout_free(web_layout_t *L) {
     free(L->items);
     free(L->anchors);
+    free(L->clips);
     wa_free(&L->ar);
     memset(L, 0, sizeof *L);
 }
@@ -2130,6 +3387,7 @@ void web_layout(web_page_t *pg, int width, int height) {
     uint32_t t0 = sys_uptime_ms();
     free(L->items);
     free(L->anchors);
+    free(L->clips);
     wa_free(&L->ar);
     memset(L, 0, sizeof *L);
     L->bg = 0xFFFFFFFFu;
@@ -2148,6 +3406,8 @@ void web_layout(web_page_t *pg, int width, int height) {
     lc.gen = ++g_gen;
     lc.link = -1;
     lc.last_base = INT_MIN;
+    lc.force_h = -1;
+    lc.cb_h = height;
     const web_style_t *hs = d->html->st;
     const web_style_t *bs = d->body && d->body->st ? d->body->st : NULL;
     if (COLOR_A(hs->bg)) L->bg = color_alpha(hs->bg, 255);
@@ -2156,18 +3416,44 @@ void web_layout(web_page_t *pg, int width, int height) {
     layout_box(&lc, d->html, 0, 0, width, -1, &r, 0);
     int h = r.h + (r.mb > 0 ? r.mb : 0);
     int w = width;
+    /* clipping rectangles intersected with the ones round them (parents come first) */
+    for (int i = 0; i < L->nclips; i++) {
+        web_clip_t *c = &L->clips[i];
+        int x0 = c->x, y0 = c->y, x1 = c->x + MAX(c->w, 0), y1 = c->y + MAX(c->h, 0);
+        if (c->parent > 0 && c->parent <= i) {
+            const web_clip_t *pc = &L->clips[c->parent - 1];
+            x0 = MAX(x0, pc->rx); y0 = MAX(y0, pc->ry);
+            x1 = MIN(x1, pc->rx + pc->rw); y1 = MIN(y1, pc->ry + pc->rh);
+        }
+        c->rx = x0; c->ry = y0; c->rw = MAX(0, x1 - x0); c->rh = MAX(0, y1 - y0);
+    }
     for (int i = 0; i < L->nitems; i++) {
         web_item_t *it = &L->items[i];
-        if (it->x + it->w > w && it->kind != WI_RECT) w = it->x + it->w;
-        if (it->y + it->h > h) h = it->y + it->h;
         if (it->kind == WI_CTRL && it->ref >= 0 && it->ref < pg->nctrls) {
             web_ctrl_t *c = &pg->ctrls[it->ref];
-            c->x = it->x; c->y = it->y; c->w = it->w; c->h = it->h;
+            c->x = it->x; c->y = it->y; c->w = it->w; c->h = it->h; c->fixed = it->fixed;
+            if (it->clip > 0 && it->clip <= L->nclips) {
+                const web_clip_t *cr = &L->clips[it->clip - 1];
+                if (it->y >= cr->ry + cr->rh || it->y + it->h <= cr->ry || it->x >= cr->rx + cr->rw ||
+                    it->x + it->w <= cr->rx) c->w = 0;      /* clipped away: cannot be clicked */
+            }
         }
+        if (it->fixed || it->kind == WI_PLACE || it->kind == WI_BOX) continue;
+        int ix = it->x, iy = it->y, ix1 = it->x + it->w, iy1 = it->y + it->h;
+        if (it->clip > 0 && it->clip <= L->nclips) {
+            const web_clip_t *cr = &L->clips[it->clip - 1];
+            ix = MAX(ix, cr->rx); iy = MAX(iy, cr->ry);
+            ix1 = MIN(ix1, cr->rx + cr->rw); iy1 = MIN(iy1, cr->ry + cr->rh);
+            if (ix1 <= ix || iy1 <= iy) continue;
+        }
+        /* (things pushed off to the left / top cannot be scrolled to) */
+        if (ix1 > w && it->kind != WI_RECT && ix1 > 0) w = ix1;
+        if (iy1 > h && ix1 > 0) h = iy1;
     }
     L->width = w;
     L->height = h;
     free(lc.fl);
+    free(lc.abs);
     L->ms = (int)(sys_uptime_ms() - t0);
 }
 

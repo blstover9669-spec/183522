@@ -726,7 +726,12 @@ static void set_attrs(parser_t *p, web_node_t *e, tag_tok_t *t) {
 static void start_tag(parser_t *p, tag_tok_t *t) {
     web_doc_t *d = p->d;
     int tag = tag_lookup(t->name);
-    if (tag == T_HTML) { ensure_html(p); return; }
+    if (tag == T_HTML) {
+        /* <html class=... lang=...>: the attributes go on the (possibly implied) root */
+        ensure_html(p);
+        if (!d->html->nattrs) set_attrs(p, d->html, t);
+        return;
+    }
     if (tag == T_HEAD) { ensure_head(p); return; }
     if (tag == T_BODY) {
         if (!d->body) {
