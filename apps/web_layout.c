@@ -1879,15 +1879,38 @@ static bool svg_viewbox(const web_node_t *n, float vb[4]) {
     return vb[2] > 0 && vb[3] > 0;
 }
 
+/* width="24" / "1.5em" / "50%" of an <svg>: px, -1 when not given (or a percentage without a base) */
+static int svg_attr_len(lctx_t *lc, const web_node_t *n, const char *name, int base) {
+    const char *a = web_attr(n, name);
+    if (!a || !*a) return -1;
+    char *e;
+    double v = strtod(a, &e);
+    if (e == a || v < 0 || v > 100000) return -1;
+    while (*e == ' ') e++;
+    if (*e == '%') return base > 0 ? (int)(v * base / 100) : -1;
+    if (!strncasecmp(e, "em", 2) || !strncasecmp(e, "rem", 3)) return (int)(v * n->st->fsize + 0.5);
+    if (!strncasecmp(e, "pt", 2)) v = v * 4 / 3;
+    return (int)(v * lc->zoom / 100 + 0.5);
+}
+
 static void svg_box(lctx_t *lc, const web_node_t *n, int cbw, int *ow, int *oh) {
     const web_style_t *st = n->st;
     int w = -1, h = -1;
     if (st->width.u == U_PX) w = st->width.v;
     else if (len_set(st->width) && cbw > 0) w = rlen(st->width, cbw);
     if (st->height.u == U_PX) h = st->height.v;
-    else if (len_set(st->height) && lc->cb_h >= 0) h = rlen(st->height, lc->cb_h);
-    if (w < 0) { const char *a = web_attr(n, "width"); if (a && *a && !strchr(a, '%')) w = atoi(a) * lc->zoom / 100; }
-    if (h < 0) { const char *a = web_attr(n, "height"); if (a && *a && !strchr(a, '%')) h = atoi(a) * lc->zoom / 100; }
+    else if (len_set(st->height)) {
+        /* a percentage of the containing block's height, else of a parent with a fixed one */
+        int base = lc->cb_h;
+        const web_style_t *ps = n->parent && n->parent->type == WN_ELEM ? n->parent->st : NULL;
+        if (base < 0 && ps && ps->height.u == U_PX) {
+            base = ps->height.v;
+            if (ps->border_box) base -= ps->bw[0] + ps->bw[2] + rlen(ps->padding[0], 0) + rlen(ps->padding[2], 0);
+        }
+        if (base >= 0) h = rlen(st->height, base);
+    }
+    if (w < 0) w = svg_attr_len(lc, n, "width", cbw);
+    if (h < 0) h = svg_attr_len(lc, n, "height", lc->cb_h);
     float vb[4];
     bool has_vb = svg_viewbox(n, vb);
     if (has_vb) {
