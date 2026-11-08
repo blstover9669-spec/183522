@@ -2028,7 +2028,8 @@ static void layout_abs(lctx_t *lc, const absbox_t *a, int cbx, int cby, int cbw,
     }
     if (w < 0) w = 0;
     int bw = w + hp, x;
-    if (L && R && wspec && b.aml && b.amr) x = cbx + left + (cbw - left - right - bw) / 2;
+    /* left + right + a width (or a max-width that made it narrower): auto margins centre */
+    if (L && R && b.aml && b.amr && bw < cbw - left - right) x = cbx + left + (cbw - left - right - bw) / 2;
     else if (L) x = cbx + left + b.ml;
     else if (R) x = cbx + cbw - right - b.mr - bw;
     else x = sx + b.ml;
