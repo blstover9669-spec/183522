@@ -62,6 +62,7 @@ enum icon_kind {
     ICON_SUCCESS,
     /* security */
     ICON_SHIELD,          /* SafetyShield */
+    ICON_GAMES,           /* the Games app: a gamepad */
     ICON_COUNT
 };
 

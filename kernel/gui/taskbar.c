@@ -461,12 +461,12 @@ static void draw_glow(surface_t *s, rect_t r, double level, uint32_t now, int id
             if (d < -2.5 || d > reach) continue;
             double behind = head - ring_a[y * RING_W + x];
             if (behind < 0) behind += 1;
-            double light = MIN(1.0, exp(-behind * 6.0) + exp(-(1 - behind) * 40.0));
+            double light = MIN(1.0, exp(-behind * 4.5) + exp(-(1 - behind) * 30.0));
             double core = CLAMP(1.4 - fabs(d + 0.3), 0.0, 1.0);
             double halo = d > 0 ? (1 - d / reach) * (1 - d / reach) : 0;
-            double a = e * (core * (0.5 + 0.5 * light) + halo * (0.25 + 0.6 * light));
+            double a = e * (core * (0.4 + 0.6 * light) + halo * (0.2 + 0.8 * light));
             if (a < 0.01) continue;
-            uint32_t c = color_mix(accent, COLOR_WHITE, (int)(light * 170));
+            uint32_t c = color_mix(accent, COLOR_WHITE, (int)(light * 200));
             gfx_pixel(s, r.x - HALO + x, sy, color_alpha(c, (int)(MIN(a, 1.0) * 255)));
         }
     }

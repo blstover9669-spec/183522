@@ -721,6 +721,34 @@ static void draw_shield(ic_t *c) {
     LINE(c, 28.5, 40.5, 44, 22.5, 5.2, w, true);
 }
 
+/* ---- apps -------------------------------------------------------------------------------- */
+/* Games: a white gamepad (D-pad and four buttons) on a violet tile */
+static void draw_games(ic_t *c) {
+    uint32_t w = COLOR_WHITE, pad = RGB(78, 52, 196);
+    uint32_t red = RGB(248, 88, 112), green = RGB(64, 196, 134), blue = RGB(64, 146, 248), yellow = RGB(250, 188, 56);
+    if (c->sm) {
+        RRG(c, 4, 4, 56, 56, 8, RGB(140, 104, 252), RGB(92, 60, 220));
+        RR(c, 8, 24, 48, 20, 8, w);
+        CIRC(c, 18, 42, 8, w); CIRC(c, 46, 42, 8, w);
+        R(c, 12, 32, 12, 4, pad); R(c, 16, 28, 4, 12, pad);
+        R(c, 40, 28, 4, 4, red); R(c, 44, 36, 4, 4, green);
+        return;
+    }
+    RRG(c, 4, 4, 56, 56, 12, RGB(140, 104, 252), RGB(88, 56, 214));
+    /* soft shadow, then the body: a rounded bar with two grips */
+    uint32_t sh = RGBA(30, 12, 80, 70);
+    RR(c, 10, 24, 44, 20, 10, sh); CIRC(c, 18.5, 42, 8.5, sh); CIRC(c, 45.5, 42, 8.5, sh);
+    RR(c, 10, 22, 44, 20, 10, w); CIRC(c, 18.5, 40, 8.5, w); CIRC(c, 45.5, 40, 8.5, w);
+    RR(c, 14, 30.25, 12, 4.5, 1.2, pad);
+    RR(c, 17.75, 26.5, 4.5, 12, 1.2, pad);
+    RR(c, 28, 27.5, 3.5, 2.5, 1.2, RGBA(78, 52, 196, 150));
+    RR(c, 32.5, 27.5, 3.5, 2.5, 1.2, RGBA(78, 52, 196, 150));
+    CIRC(c, 44, 27.8, 2.7, red);
+    CIRC(c, 48.6, 32.4, 2.7, green);
+    CIRC(c, 44, 37, 2.7, blue);
+    CIRC(c, 39.4, 32.4, 2.7, yellow);
+}
+
 /* ---- dispatch ----------------------------------------------------------------------------- */
 static void render(int kind, surface_t *s, int x, int y, int box, int final_size) {
     ic_t c = { s, x, y, box, box / 64.0, final_size < 24 };
@@ -753,6 +781,7 @@ static void render(int kind, surface_t *s, int x, int y, int box, int final_size
         draw_status(&c, kind);
         break;
     case ICON_SHIELD: draw_shield(&c); break;
+    case ICON_GAMES: draw_games(&c); break;
     default: break;
     }
 }
@@ -805,7 +834,7 @@ static const char *const names[ICON_COUNT] = {
     "folder-desktop", "folder-system", "folder-home", "text", "code", "image", "audio", "archive",
     "binary", "unknown", "log", "config", "note", "paint", "app", "disk", "computer", "trash", "gear",
     "service", "settings", "bell", "alarm", "clock", "search", "run", "pin", "terminal", "info",
-    "warning", "error", "question", "success", "shield",
+    "warning", "error", "question", "success", "shield", "games",
 };
 
 const char *icon_name(int kind) { return (kind >= 0 && kind < ICON_COUNT) ? names[kind] : "?"; }
