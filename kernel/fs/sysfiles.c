@@ -13,14 +13,20 @@
  *                               every start
  *   /system/ui/...              fonts, themes, wallpapers, UI settings
  *                               (kernel/gui/uifiles.c), loaded at startup
+ *   /system/apps/NAME.app       one small text file per bundled app (every app
+ *                               in the app registry: name, category, description,
+ *                               file types)
  *
  * An ISO start - and the first start of an installed drive whose files were not
  * copied - writes them from the built-in copies in the kernel. An installed drive
  * keeps them with all other files (the installer copies them along), so there
  * they are restored at startup. If any of them is missing the drive is not
- * complete: "No drive found" (kernel/gui/nodrive.c).
+ * complete: "No drive found" (kernel/gui/nodrive.c). The app files are checked
+ * at startup only: /system/apps missing, no app file in it or one bundled app's
+ * file missing is "System requirement fail" (kernel/gui/reqfail.c).
  */
 #include "kernel.h"
+#include <nova/app.h>
 #include "disk/diskfmt.h"
 #include "gui/bootscreen.h"
 #include "fs/lz.h"
@@ -48,6 +54,47 @@ static void boot_cfg(void) {
     kfree(old);
 }
 
+#define APPS_DIR "/system/apps"
+
+/* /system/apps/<app name>.app ('/' in a name would become '-') */
+static void app_file_path(const app_desc_t *a, char *out) {
+    char name[VFS_NAME_MAX - 4];
+    strlcpy(name, a->name, sizeof name);
+    for (char *p = name; *p; p++)
+        if (*p == '/') *p = '-';
+    snprintf(out, VFS_PATH_MAX, APPS_DIR "/%s.app", name);
+}
+
+static void seed_apps(void) {
+    vfs_mkdirs(APPS_DIR);
+    char path[VFS_PATH_MAX], buf[512];
+    for (int i = 0; i < app_count(); i++) {
+        const app_desc_t *a = app_get(i);
+        app_file_path(a, path);
+        int n = snprintf(buf, sizeof buf,
+                         "# NovaOS bundled app - NovaOS starts only if every bundled app has its file here.\n"
+                         "name=%s\ncategory=%s\ndescription=%s\nopens=%s\n",
+                         a->name, a->category ? a->category : "", a->description ? a->description : "",
+                         a->file_types ? a->file_types : "");
+        vfs_write_file(path, buf, (uint32_t)MIN(n, (int)sizeof buf - 1));
+    }
+}
+
+const char *sysfiles_apps_missing(void) {
+    static char what[VFS_PATH_MAX + 16];
+    if (!vfs_is_dir(APPS_DIR)) return APPS_DIR " is missing";
+    char path[VFS_PATH_MAX];
+    int found = 0;
+    what[0] = 0;
+    for (int i = 0; i < app_count(); i++) {
+        app_file_path(app_get(i), path);
+        if (vfs_exists(path) && !vfs_is_dir(path)) found++;
+        else if (!what[0]) snprintf(what, sizeof what, "%s is missing", path);
+    }
+    if (!found) return "0 apps found in " APPS_DIR;
+    return what[0] ? what : NULL;
+}
+
 void sysfiles_seed(void) {
     uint32_t t0 = g_ticks;
     vfs_mkdirs("/system/boot");
@@ -62,7 +109,9 @@ void sysfiles_seed(void) {
     vfs_write_file("/system/boot/stage2.bin", bootblob_stage2, (uint32_t)(bootblob_stage2_end - bootblob_stage2));
     boot_cfg();
     uifiles_seed();
-    klog("sysfiles: wrote the system files (kernel %u bytes, packed %u) in %u ms", klen, plen, g_ticks - t0);
+    seed_apps();
+    klog("sysfiles: wrote the system files (kernel %u bytes, packed %u, %d app files) in %u ms", klen, plen,
+         app_count(), g_ticks - t0);
 }
 
 void sysfiles_refresh(void) {

@@ -88,9 +88,16 @@ static struct {
     uint8_t *buf;
     uint32_t len, nsec, done, gen, crc, started;
     int slot;
+    int boot_status;          /* persist_boot_status()                         */
 } P = { .disk = -1, .newest = -1 };
 
 int persist_boot_disk(void) { return P.active ? P.disk : -1; }
+int persist_boot_status(void) { return P.boot_status; }
+
+/* a read of the installed drive at startup failed: the drive is not readable */
+static void read_failed(int r) {
+    if (P.boot_status == DISK_OK) P.boot_status = r;
+}
 bool persist_active(void) { return P.active; }
 
 static uint32_t capacity(void) { return P.active ? (P.hdr.persist_slot_sectors - 1) * 512 : 0; }
@@ -112,7 +119,12 @@ void persist_get_info(persist_info_t *o) {
 }
 
 static bool read_slot_header(int slot, persist_header_t *ph) {
-    if (disk_read(P.disk, slot_lba(slot), 1, ph) != DISK_OK) return false;
+    int r = disk_read(P.disk, slot_lba(slot), 1, ph);
+    if (r != DISK_OK) {
+        klog("persist: reading the header of slot %c failed: %s", 'A' + slot, disk_strerror(r));
+        read_failed(r);
+        return false;
+    }
     if (ph->magic0 != PERSIST_MAGIC0 || ph->magic1 != PERSIST_MAGIC1 || ph->version != PERSIST_VERSION) return false;
     if (crc32_buf(ph, 508) != ph->checksum) return false;
     if (ph->disk_id != P.hdr.disk_id || ph->length == 0 || ph->length > capacity()) return false;
@@ -129,6 +141,7 @@ static bool load_slot(int slot, const persist_header_t *ph) {
     bool ok = false;
     if (r != DISK_OK) {
         klog("persist: reading slot %c failed: %s", 'A' + slot, disk_strerror(r));
+        read_failed(r);
     } else if (crc32_buf(buf, ph->length) != ph->data_crc) {
         klog("persist: slot %c checksum mismatch", 'A' + slot);
     } else if ((r = vfs_deserialize(buf, ph->length)) != 0) {
@@ -172,6 +185,7 @@ bool persist_restore(void) {
     if (d < 0 && id) d = persist_find_disk(0, &P.hdr);
     if (d < 0) {
         klog("persist: installed disk (id %08x) not found - files will not be saved", id);
+        P.boot_status = DISK_ENODEV;
         return false;
     }
     P.active = true;

@@ -15,10 +15,11 @@ Character set (single byte, "NovaOS-1252"):
 Usage:  python3 tools/genfont.py [output.c]
         python3 tools/genfont.py --nodrive [kernel/gui/nodrive_font.c]
 
---nodrive renders the font of the "No drive found" screen (kernel/gui/nodrive.c):
-Liberation Sans Regular (an Arial-compatible face, SIL OFL 1.1), ASCII only. It
-is a separate, small table so that screen never depends on the files on the
-drive.
+--nodrive renders the fonts of the "No drive found" and "System requirement
+fail" screens (kernel/gui/nodrive.c, reqfail.c): Liberation Sans Regular (an
+Arial-compatible face, SIL OFL 1.1) at 30 px (titles) and 20 px (the reason),
+ASCII only. They are separate, small tables so those screens never depend on
+the files on the drive.
 """
 import sys
 from PIL import Image, ImageFont, ImageDraw
@@ -160,9 +161,11 @@ FONTS = [
     ("font_ui_huge",  [INTER + "Inter-Light.otf", DEJAVU + "DejaVuSans.ttf"],         52, 64, 51, None),
 ]
 
-# The "No drive found" screen: Liberation Sans Regular 30 px, ASCII (0x20-0x7E).
+# The "No drive found" / "System requirement fail" screens: Liberation Sans Regular
+# 30 px (titles) and 20 px (the reason line), ASCII (0x20-0x7E).
 NODRIVE = [
-    ("font_nodrive",  [LIBERATION + "LiberationSans-Regular.ttf"],               30, 36, 28, None),
+    ("font_nodrive",       [LIBERATION + "LiberationSans-Regular.ttf"],          30, 36, 28, None),
+    ("font_nodrive_small", [LIBERATION + "LiberationSans-Regular.ttf"],          20, 24, 19, None),
 ]
 
 def emit(out, fonts=FONTS, first=FIRST, last=LAST, header=None, include='"font_internal.h"'):
@@ -197,7 +200,8 @@ if __name__ == "__main__":
         path = args[1] if len(args) > 1 else "kernel/gui/nodrive_font.c"
         with open(path, "w") as fh:
             emit(fh, NODRIVE, 0x20, 0x7E,
-                 "/* Glyphs rendered from Liberation Sans Regular (SIL OFL 1.1) for the \"No drive found\" screen. */\n",
+                 "/* Glyphs rendered from Liberation Sans Regular (SIL OFL 1.1) for the \"No drive found\" and\n"
+                 "   \"System requirement fail\" screens. */\n",
                  '"gfx/font_internal.h"')
     else:
         path = args[0] if args else "kernel/gfx/font_data.c"

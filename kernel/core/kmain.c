@@ -96,15 +96,22 @@ void kmain(uint32_t magic, uint32_t mbi) {
     run_initcalls(INIT_DRIVER);
 
     /* Files before the animation: on an installed drive the saved files (and with
-       them /system/config/splash.cfg) replace the defaults first; an ISO start
-       writes the system files (kernel, boot files, UI files) into /system. Then
-       the drive check: without its System / home folders or a system file it is
-       "No drive found". NovaOS then loads its UI (fonts, themes, wallpapers, UI
+       them /system/config/splash.cfg) replace the defaults first - its COS:// drive
+       must be found, readable and at least 4 MB, else "System requirement fail";
+       an ISO start writes the system files (kernel, boot files, UI files, a file
+       per bundled app) into /system. Then the drive check: without its System /
+       home folders or a system file it is "No drive found"; then every bundled
+       app (the app registry) needs its file in /system/apps, else "System
+       requirement fail". NovaOS then loads its UI (fonts, themes, wallpapers, UI
        settings) from /system/ui. */
     vfs_init();
     vfs_populate_defaults();
-    if (!persist_restore()) sysfiles_seed();
+    apps_init();
+    bool restored = persist_restore();
+    reqfail_check_drive();
+    if (!restored) sysfiles_seed();
     nodrive_check_startup();
+    reqfail_check_apps();
     sysfiles_refresh();
     uifiles_load();
     persist_start();
@@ -118,8 +125,6 @@ void kmain(uint32_t magic, uint32_t mbi) {
     bool setup = !bar && bootsetup_wanted();
     if (setup) bootsetup_run();
 
-    if (bar) splash_progress(15, NULL);
-    apps_init();
     if (bar) splash_progress(45, NULL);
     theme_render_current_wallpaper();
     if (bar) splash_progress(75, NULL);

@@ -6,16 +6,21 @@
  *   bootsetup.c  "NovaOS Drive installation" (ISO boots, after the splash)
  *   nodrive.c    "No drive found" (the drive's System/home folders or the
  *                system files in /system are gone)
+ *   reqfail.c    "System requirement fail" (no readable COS:// drive of at
+ *                least 4 MB on an installed-drive boot, or a bundled app's file
+ *                in /system/apps is missing)
  *   sysfiles.c   the system files in /system (kernel, boot files, UI files):
  *                seeding from the built-in copies, the list of required files
  *                (kernel/fs/sysfiles.c)
  *   uifiles.c    loading the UI (fonts, wallpapers, themes, UI settings)
  *                from /system/ui at startup
  *
- * Boot order (kernel/core/kmain.c): splash background -> devices -> files
- * (installed drive: the saved files are restored; ISO: the system files are
- * written) -> drive check -> UI files loaded -> INIT_FS hooks -> splash animation -> [ISO: NovaOS Drive installation] ->
- * [installed: loading bar] apps, desktop -> desktop (-> ISO: save file screen).
+ * Boot order (kernel/core/kmain.c): splash background -> devices -> app
+ * registry -> files (installed drive: the saved files are restored, then the
+ * COS:// drive check; ISO: the system files are written) -> drive check (No drive
+ * found) -> bundle app check (/system/apps) -> UI files loaded -> INIT_FS hooks
+ * -> splash animation -> [ISO: NovaOS Drive installation] -> [installed: loading
+ * bar] desktop -> desktop (-> ISO: save file screen).
  */
 #ifndef BOOTSCREEN_H
 #define BOOTSCREEN_H
@@ -64,8 +69,22 @@ void bootsetup_after_desktop(void);
 void nodrive_check_startup(void);
 /* Black screen, Nova icon, "No drive found" - forever. `why`: the missing path. */
 void nodrive_show(const char *why) NORETURN;
-/* Liberation Sans 30 px, ASCII (nodrive_font.c, tools/genfont.py --nodrive). */
-extern const font_t font_nodrive;
+/* The black screen with the Nova icon, `title` and (if not NULL) `reason` under it,
+   forever - shared by "No drive found" and "System requirement fail". */
+void bootfail_screen(const char *title, const char *reason) NORETURN;
+/* Liberation Sans 30 px / 20 px, ASCII (nodrive_font.c, tools/genfont.py --nodrive). */
+extern const font_t font_nodrive, font_nodrive_small;
+
+/* ---- reqfail.c ----------------------------------------------------------------------- */
+/* After the saved files are restored: an installed-drive boot (boot=disk) needs its
+   COS:// drive found on the IDE controllers, read without errors and at least 4 MB,
+   else "System requirement fail" - forever. ISO boots pass. */
+void reqfail_check_drive(void);
+/* After the drive check: every bundled app needs its file in /system/apps. */
+void reqfail_check_apps(void);
+/* Black screen, Nova icon, "System requirement fail" and `reason` - forever.
+   `detail` only goes to the log. */
+void reqfail_show(const char *reason, const char *detail) NORETURN;
 
 /* ---- sysfiles.c (kernel/fs) ------------------------------------------------------------- */
 /* Write the system files into /system from the built-in copies (ISO boot / first boot). */
@@ -74,6 +93,9 @@ void sysfiles_seed(void);
 void sysfiles_refresh(void);
 /* NULL if the drive has all system files, else the first missing path. */
 const char *sysfiles_missing(void);
+/* NULL if /system/apps has the file of every bundled app (app registry), else what is
+   missing ("/system/apps is missing", "0 apps found in /system/apps", the path). */
+const char *sysfiles_apps_missing(void);
 
 /* ---- uifiles.c ---------------------------------------------------------------------------- */
 /* Write /system/ui (fonts, themes, wallpapers, UI settings) from the built-in copies. */

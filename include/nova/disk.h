@@ -77,6 +77,10 @@ typedef struct persist_info {
 
 bool persist_active(void);
 void persist_get_info(persist_info_t *out);
+/* Installed-drive boots (boot=disk): DISK_OK when the drive NovaOS started from was
+   found and read without errors at startup, DISK_ENODEV when it was not found (e.g. it
+   is on a SATA/AHCI controller), else the read error. DISK_OK on ISO boots. */
+int  persist_boot_status(void);
 /* Save the whole VFS to disk now (synchronous, normally well under a second).
    Returns DISK_OK (also when nothing changed), DISK_ENODEV when persistence is
    off, or an error. */
