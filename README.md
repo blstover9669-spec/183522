@@ -145,7 +145,7 @@ Start menu and on the desktop:
 | Accessories | **Notepad** | Plain text editor with find / replace, undo, zoom |
 | Accessories | **Sticky Notes** | Coloured notes that stay on your desktop |
 | Accessories | **Typing Tutor** | Touch-typing practice with live WPM and accuracy |
-| Internet | **Web Browser** | Tabs, address bar (a web address or a web search), back / forward / reload / home, padlock and certificate warnings, bookmarks bar, history, downloads into Downloads, find in page, zoom, page source; HTML and CSS pages, PNG / JPEG / GIF pictures and forms (no JavaScript) |
+| Internet | **Web Browser** | Tabs, address bar (a web address or a web search), back / forward / reload / home, padlock and certificate warnings, bookmarks bar, history, downloads into Downloads, find in page, zoom, page source; HTML and CSS pages (flexbox, grid, positioning), PNG / JPEG / GIF / SVG pictures and forms (no JavaScript) |
 | Graphics | **Paint** | Draw and edit pictures (BMP) |
 | Graphics | **Image Viewer** | View BMP (and PPM) pictures: zoom, fit, pan, folder browsing, slideshow |
 | Graphics | **Fractal Explorer** | Explore the Mandelbrot and Julia sets |
