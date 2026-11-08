@@ -296,7 +296,8 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
     for (int i = 0; i < L->nitems; i++) {
         const web_item_t *it = &L->items[i];
         int iy = it->fixed ? it->y + sy : it->y;     /* position:fixed: relative to the view */
-        if (iy >= y1 || iy + it->h <= y0 || it->x >= x1 || it->x + it->w <= x0) {
+        int ext = it->kind == WI_SHADOW ? it->ring : 0;   /* a shadow's blur reaches past its box */
+        if (iy - ext >= y1 || iy + it->h + ext <= y0 || it->x - ext >= x1 || it->x + it->w + ext <= x0) {
             if (o && o->nhl) while (hk < o->nhl && o->hl_item[hk] <= i) hk++;
             continue;
         }
@@ -342,6 +343,22 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
         case WI_SVG:
             web_svg_paint(pg, s, it->node, X, Y, it->w, it->h, it->color, 255 - it->alpha);
             break;
+        case WI_SHADOW: {
+            /* (black, as most are; the box's background covers the part under it) */
+            int sp = it->len, r = it->rad[0];
+            if (it->ring > 0) {
+                /* falling off from the box's edge over blur + spread (a wide blur is fainter) */
+                int bxw = it->w - 2 * sp, bxh = it->h - 2 * sp, ext = it->ring + MAX(sp, 0);
+                int a = (int)COLOR_A(it->color);
+                if (it->ring > 24) a = a * 24 / it->ring;
+                if (bxw > 0 && bxh > 0 && a > 0)
+                    gfx_shadow(s, X + sp, Y + sp, bxw, bxh, MIN(r, MIN(bxw, bxh) / 2), ext, a);
+            } else if (sp > 0) {
+                int16_t rad[4] = { (int16_t)(r + sp), (int16_t)(r + sp), (int16_t)(r + sp), (int16_t)(r + sp) };
+                paint_rrect(s, X, Y, it->w, it->h, rad, sp, it->color);      /* a hard ring */
+            }
+            break;
+        }
         case WI_CTRL:
             if (it->ref >= 0 && it->ref < pg->nctrls && pg->ctrls[it->ref].boxed) {
                 if (o && o->focus_ctrl == it->ref) gfx_rounded_rect(s, X - 1, Y - 1, it->w + 2, it->h + 2, 4, FOCUS_RING);

@@ -228,6 +228,8 @@ typedef struct web_style {
                                           0 auto, GSPAN + n = span n           */
     const char *garea;                 /* grid-area: <name>                 */
     const char *content;               /* ::before / ::after: generated text (NULL = none) */
+    struct { int16_t x, y, blur, spread; uint32_t color; } shadow[3];   /* box-shadow (outer) */
+    uint8_t  nshadow;
 } web_style_t;
 #define GSPAN 10000
 
@@ -288,7 +290,8 @@ typedef struct web_link { web_node_t *node; const char *href; const char *target
 /* ==== layout / display list ================================================= */
 enum { WI_RECT = 1, WI_TEXT, WI_IMAGE, WI_CTRL, WI_MARKER, WI_IMGALT, WI_BOX,   /* WI_BOX: debug only, not painted */
        WI_PLACE,                /* layout bookkeeping (where an absolutely positioned box was), not painted */
-       WI_SVG };                /* an inline <svg> (node), drawn from its shapes */
+       WI_SVG,                  /* an inline <svg> (node), drawn from its shapes */
+       WI_SHADOW };             /* box-shadow: x,y,w,h the box, ring = blur, ref = x/y offset, len = spread */
 typedef struct web_item {
     uint8_t  kind, deco, marker;
     uint8_t  fixed;           /* position:fixed - stays put when the page scrolls */

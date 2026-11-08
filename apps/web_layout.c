@@ -3310,6 +3310,14 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int first_item = lc->L->nitems;
     int dbgi = -1;
     if (web_layout_debug_boxes && item_add(lc, WI_BOX)) dbgi = lc->L->nitems - 1;
+    /* box shadows go under the background */
+    int shi = -1;
+    if (st->nshadow && !st->visibility_hidden) {
+        for (int k = st->nshadow - 1; k >= 0; k--) {
+            web_item_t *si = item_add(lc, WI_SHADOW);
+            if (si && shi < 0) shi = lc->L->nitems - 1;
+        }
+    }
     /* (a masked background is an icon drawn through a mask: not a box of colour) */
     int bgi = (st->visibility_hidden || n == lc->skip_bg || st->masked) ? -1 : reserve_bg(lc, st->bg);
     if (n->id) anchor_add(lc, n->id, y);
@@ -3388,6 +3396,21 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     }
     int bh = b.bt + b.pt + ch + b.pb + b.bb;
     lc->cur_clip = saved_clip;
+    if (shi >= 0) {
+        /* (the last layer is painted first) */
+        for (int k = st->nshadow - 1, i = shi; k >= 0 && i < lc->L->nitems; k--, i++) {
+            web_item_t *si = &lc->L->items[i];
+            if (si->kind != WI_SHADOW) break;
+            int sp = st->shadow[k].spread;
+            si->x = bx + st->shadow[k].x - sp; si->y = y + st->shadow[k].y - sp;
+            si->w = bw + 2 * sp; si->h = bh + 2 * sp;
+            si->ring = st->shadow[k].blur;
+            si->color = st->shadow[k].color;
+            si->len = sp;
+            si->ref = (st->shadow[k].x << 16) | (st->shadow[k].y & 0xFFFF);
+            if (has_radius(st)) set_radius(si, st, bw, bh);
+        }
+    }
     if (my_clip && my_clip <= lc->L->nclips) {
         web_clip_t *cr = &lc->L->clips[my_clip - 1];
         cr->x = bx + b.bl; cr->y = y + b.bt; cr->w = bw - b.bl - b.br; cr->h = bh - b.bt - b.bb;
@@ -3429,6 +3452,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         web_item_t *its = lc->L->items;
         if (sc) {
             if (bgi >= 0) its[bgi].layer = INT16_MIN;
+            for (int i = shi; shi >= 0 && i < lc->L->nitems && its[i].kind == WI_SHADOW; i++) its[i].layer = INT16_MIN;
             for (int i = nb0; i < nb1; i++) its[i].layer = INT16_MIN;
             sort_layers(lc, first_item, lc->L->nitems);
             int16_t me = positioned || zctx ? z_layer(st) : 0;
@@ -3522,7 +3546,7 @@ void web_layout(web_page_t *pg, int width, int height) {
                     it->x + it->w <= cr->rx) c->w = 0;      /* clipped away: cannot be clicked */
             }
         }
-        if (it->fixed || it->kind == WI_PLACE || it->kind == WI_BOX) continue;
+        if (it->fixed || it->kind == WI_PLACE || it->kind == WI_BOX || it->kind == WI_SHADOW) continue;
         int ix = it->x, iy = it->y, ix1 = it->x + it->w, iy1 = it->y + it->h;
         if (it->clip > 0 && it->clip <= L->nclips) {
             const web_clip_t *cr = &L->clips[it->clip - 1];

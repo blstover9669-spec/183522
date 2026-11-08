@@ -32,7 +32,7 @@ enum {
     P_ALIGN_SELF, P_JUSTIFY_SELF, P_JUSTIFY_ITEMS, P_ALIGN_CONTENT, P_ASPECT_RATIO,
     P_GRID_COLS, P_GRID_ROWS, P_GRID_AREAS, P_GRID_AUTO_COLS, P_GRID_AUTO_ROWS, P_GRID_AUTO_FLOW,
     P_GRID_COL_START, P_GRID_COL_END, P_GRID_ROW_START, P_GRID_ROW_END, P_GRID_AREA_NAME,
-    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT,
+    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT, P_BOX_SHADOW,
     P_LONGHAND_COUNT,
     /* shorthands (only used while parsing / for var()) */
     P_MARGIN, P_PADDING, P_BORDER, P_BORDER_TOP, P_BORDER_RIGHT, P_BORDER_BOTTOM, P_BORDER_LEFT,
@@ -114,7 +114,7 @@ static const struct { const char *name; int id; } prop_names[] = {
     {"border-inline-color", P_BORDER_INLINE_COLOR}, {"border-block-color", P_BORDER_BLOCK_COLOR},
     {"border-inline-style", P_BORDER_INLINE_STYLE}, {"border-block-style", P_BORDER_BLOCK_STYLE},
     {"-webkit-tap-highlight-color", P_IGNORED}, {"transition-behavior", P_IGNORED}, {"isolation", P_ISOLATION},
-    {"fill", P_FILL}, {"content", P_CONTENT}, {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
+    {"fill", P_FILL}, {"content", P_CONTENT}, {"box-shadow", P_BOX_SHADOW}, {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
 };
 
 static int prop_lookup(const char *s, size_t n) {
@@ -861,7 +861,7 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
         return;
     }
     case P_GRID_COLS: case P_GRID_ROWS: case P_GRID_AUTO_COLS: case P_GRID_AUTO_ROWS: case P_GRID_AREAS:
-    case P_TRANSFORM: case P_TRANSLATE: case P_CONTENT:
+    case P_TRANSFORM: case P_TRANSLATE: case P_CONTENT: case P_BOX_SHADOW:
         /* parsed when the style is computed (lengths need the element's font size) */
         v.t = CV_STR;
         v.raw = s;
@@ -2905,6 +2905,40 @@ static const char *content_value(cctx_t *cx, const web_node_t *n, const char *s,
     return wa_strndup(&cx->doc->ar, out, o);
 }
 
+/* box-shadow: up to three outer shadows (inset ones are not drawn) */
+static void apply_shadow(cctx_t *cx, web_style_t *st, const web_style_t *ps, const char *s, size_t n) {
+    st->nshadow = 0;
+    if (n >= 4 && !strncasecmp(s, "none", 4)) return;
+    const char *p = s, *e = s + n;
+    while (p < e && st->nshadow < 3) {
+        const char *ls = p;
+        int depth = 0;
+        while (p < e && (depth || *p != ',')) { if (*p == '(') depth++; else if (*p == ')') depth--; p++; }
+        const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
+        int c = split_components(ls, (size_t)(p - ls), cs, cl, false);
+        if (p < e) p++;
+        int len[4], nl = 0;
+        uint32_t col = 0xFF000000u;
+        bool inset = false, bad = false;
+        for (int i = 0; i < c; i++) {
+            cval_t v;
+            if (cl[i] == 5 && !strncasecmp(cs[i], "inset", 5)) { inset = true; continue; }
+            if (!parse_component(cs[i], cl[i], &v)) { bad = true; break; }
+            if (v.t == CV_COLOR) col = v.color;
+            else if (v.t == CV_KW && v.kw == K_CURRENTCOLOR) col = st->color;
+            else if ((v.t == CV_LEN || v.t == CV_NUM) && nl < 4) len[nl++] = to_px(cx, st, ps, &v, 0, false);
+            else { bad = true; break; }
+        }
+        if (bad || inset || nl < 2 || !COLOR_A(col)) continue;
+        int k = st->nshadow++;
+        st->shadow[k].x = (int16_t)CLAMP(len[0], -2000, 2000);
+        st->shadow[k].y = (int16_t)CLAMP(len[1], -2000, 2000);
+        st->shadow[k].blur = (int16_t)CLAMP(nl > 2 ? len[2] : 0, 0, 200);
+        st->shadow[k].spread = (int16_t)CLAMP(nl > 3 ? len[3] : 0, -200, 200);
+        st->shadow[k].color = col;
+    }
+}
+
 static uint8_t ai_of(int kw) {
     switch (kw) {
     case K_CENTER: return AI_CENTER;
@@ -3319,6 +3353,13 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         break;
     case P_GRID_AREA_NAME:
         st->garea = v->t == CV_STR && v->raw ? wa_strndup(&cx->doc->ar, v->raw, (size_t)v->f) : NULL;
+        break;
+    case P_BOX_SHADOW:
+        if (initial) st->nshadow = 0;
+        else if (inherit) {
+            memcpy(st->shadow, ps->shadow, sizeof st->shadow);
+            st->nshadow = ps->nshadow;
+        } else if (v->t == CV_STR && v->raw) apply_shadow(cx, st, ps, v->raw, (size_t)v->f);
         break;
     case P_CONTENT:
         if (initial || inherit) st->content = NULL;
