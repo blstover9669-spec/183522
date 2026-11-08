@@ -777,6 +777,87 @@ static surface_t *svg_render(const web_doc_t *doc, const web_node_t *n, int w, i
     return s;
 }
 
+/* ---- SVG files as images ------------------------------------------------------------------------ */
+static const web_node_t *find_svg(const web_node_t *n) {
+    for (const web_node_t *c = n; c;) {
+        if (c->type == WN_ELEM && c->tag == T_SVG) return c;
+        if (c->first) c = c->first;
+        else { while (c && !c->next) c = c->parent; if (c) c = c->next; }
+    }
+    return NULL;
+}
+
+static float svg_len_attr(const web_node_t *n, const char *name) {
+    const char *a = web_attr(n, name);
+    if (!a || strchr(a, '%')) return -1;
+    float v;
+    const char *p = a;
+    if (!sv_num(&p, &v)) return -1;
+    while (*p == ' ') p++;
+    if (!strncmp(p, "pt", 2)) v = v * 4 / 3;
+    else if (!strncmp(p, "em", 2)) v *= 16;
+    return v;
+}
+
+bool web_svg_sniff(const uint8_t *data, uint32_t len) {
+    uint32_t n = len < 2048 ? len : 2048;
+    for (uint32_t i = 0; i + 4 <= n; i++)
+        if (data[i] == '<' && (data[i + 1] | 0x20) == 's' && (data[i + 2] | 0x20) == 'v' && (data[i + 3] | 0x20) == 'g') return true;
+    return false;
+}
+
+/* An SVG document drawn at its natural size (its own <style> sheets apply). */
+surface_t *web_svg_decode(const uint8_t *data, uint32_t len) {
+    web_doc_t *d = web_parse_html((const char *)data, len > (4u << 20) ? (4u << 20) : len, WEB_CS_UTF8);
+    if (!d) return NULL;
+    surface_t *s = NULL;
+    const web_node_t *svg = find_svg(d->root);
+    if (svg) {
+        float w = svg_len_attr(svg, "width"), h = svg_len_attr(svg, "height"), vb[4] = { 0 };
+        const char *v = web_attr(svg, "viewbox"), *p = v;
+        bool has_vb = v && sv_num(&p, &vb[0]) && sv_num(&p, &vb[1]) && sv_num(&p, &vb[2]) && sv_num(&p, &vb[3]) && vb[2] > 0 && vb[3] > 0;
+        if (w <= 0 && h > 0 && has_vb) w = h * vb[2] / vb[3];
+        if (h <= 0 && w > 0 && has_vb) h = w * vb[3] / vb[2];
+        if (w <= 0 || h <= 0) { if (has_vb) { w = vb[2]; h = vb[3]; } else { w = 300; h = 150; } }
+        int iw = (int)CLAMP(w + 0.5f, 1.0f, 2048.0f), ih = (int)CLAMP(h + 0.5f, 1.0f, 2048.0f);
+        /* class / element rules of the file's own <style> blocks (fills) */
+        web_sheet_t *sheets[8];
+        int ns = 0;
+        for (web_node_t *n = d->root; n && ns < 8;) {
+            if (n->type == WN_ELEM && n->tag == T_STYLE && n->first && n->first->type == WN_TEXT)
+                sheets[ns++] = web_css_parse(n->first->text, (size_t)n->first->len, 1);
+            if (n->first) n = n->first;
+            else { while (n && !n->next) n = n->parent; if (n) n = n->next; }
+        }
+        web_cascade_t c = { sheets, ns, iw, ih, 100 };
+        web_style_doc(d, &c);
+        s = svg_render(d, svg, iw, ih, 0xFF000000u);
+        for (int i = 0; i < ns; i++) web_css_free(sheets[i]);
+        if (s) {
+            /* transparent pixels take their neighbours' colour, so that scaling the image
+               does not blend in the black of "nothing" (dark fringes) */
+            for (int pass = 0; pass < 2; pass++)
+                for (int y = 0; y < s->h; y++)
+                    for (int x = 0; x < s->w; x++) {
+                        uint32_t *px = &s->pixels[(size_t)y * s->pitch + x];
+                        if (COLOR_A(*px)) continue;
+                        uint32_t r = 0, g = 0, b = 0, k = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++) {
+                                int xx = x + dx, yy = y + dy;
+                                if (xx < 0 || yy < 0 || xx >= s->w || yy >= s->h) continue;
+                                uint32_t q = s->pixels[(size_t)yy * s->pitch + xx];
+                                if (!COLOR_A(q) && !(q & 0x00FFFFFFu)) continue;
+                                r += COLOR_R(q); g += COLOR_G(q); b += COLOR_B(q); k++;
+                            }
+                        if (k) *px = RGBA(r / k, g / k, b / k, 0);
+                    }
+        }
+    }
+    web_doc_free(d);
+    return s;
+}
+
 /* ---- cache ------------------------------------------------------------------------------------- */
 typedef struct svgc { const web_node_t *n; int w, h; uint32_t color; surface_t *s; uint32_t used; } svgc_t;
 typedef struct web_svgcache { svgc_t e[256]; int n; uint32_t tick; const web_doc_t *doc; } web_svgcache_t;

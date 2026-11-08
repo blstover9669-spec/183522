@@ -373,6 +373,9 @@ int  web_hit_ctrl(web_page_t *pg, int x, int y);
    color = its currentColor. web_svg_free_cache drops the cache (page freed / replaced). */
 void web_svg_paint(web_page_t *pg, surface_t *s, const web_node_t *n, int x, int y, int w, int h, uint32_t color, int opacity);
 void web_svg_free_cache(web_page_t *pg);
+/* SVG files used as images: does it look like one / draw it at its natural size. */
+bool web_svg_sniff(const uint8_t *data, uint32_t len);
+surface_t *web_svg_decode(const uint8_t *data, uint32_t len);
 /* Draw one form control at (x, y) of s (used by web_paint). */
 void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, bool focused, bool caret);
 /* Replace a control's value (len < 0: strlen). */

@@ -906,5 +906,6 @@ surface_t *web_image_decode(const uint8_t *data, uint32_t len) {
     if (data[0] == 0xFF && data[1] == 0xD8) return web_jpeg_decode(data, len);
     if (!memcmp(data, "GIF8", 4)) return web_gif_decode(data, len);
     if (data[0] == 'B' && data[1] == 'M') return image_decode(data, len);
+    if (web_svg_sniff(data, len)) return web_svg_decode(data, len);
     return NULL;
 }

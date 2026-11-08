@@ -104,6 +104,35 @@ static void draw_text_item(surface_t *s, const web_item_t *it, int X, int Y, boo
     if (it->deco & DECO_OVERLINE) gfx_fill_rect(s, X, Y, it->w, th, it->color);
 }
 
+/* bilinear scaling of an image with transparency (colours weighted by alpha, so that
+   transparent pixels do not darken the edges) */
+static surface_t *scale_alpha(const surface_t *src, int w, int h) {
+    surface_t *d = surface_create_alpha(w, h);
+    if (!d) return NULL;
+    for (int y = 0; y < h; y++) {
+        int vy = (int)(((int64_t)y * src->h * 256 + src->h * 128) / h) - 128;
+        if (vy < 0) vy = 0;
+        int y0 = MIN(vy >> 8, src->h - 1), y1 = MIN(y0 + 1, src->h - 1), wy = vy & 255;
+        for (int x = 0; x < w; x++) {
+            int vx = (int)(((int64_t)x * src->w * 256 + src->w * 128) / w) - 128;
+            if (vx < 0) vx = 0;
+            int x0 = MIN(vx >> 8, src->w - 1), x1 = MIN(x0 + 1, src->w - 1), wx = vx & 255;
+            uint32_t c[4] = { src->pixels[(size_t)y0 * src->pitch + x0], src->pixels[(size_t)y0 * src->pitch + x1],
+                              src->pixels[(size_t)y1 * src->pitch + x0], src->pixels[(size_t)y1 * src->pitch + x1] };
+            int wt[4] = { (256 - wx) * (256 - wy), wx * (256 - wy), (256 - wx) * wy, wx * wy };
+            uint64_t r = 0, g = 0, b = 0, a = 0;
+            for (int k = 0; k < 4; k++) {
+                uint64_t aw = (uint64_t)COLOR_A(c[k]) * (uint64_t)wt[k];
+                r += COLOR_R(c[k]) * aw; g += COLOR_G(c[k]) * aw; b += COLOR_B(c[k]) * aw; a += aw;
+            }
+            uint32_t out = 0;
+            if (a) out = RGBA((uint32_t)(r / a), (uint32_t)(g / a), (uint32_t)(b / a), (uint32_t)(a >> 16));
+            d->pixels[(size_t)y * d->pitch + x] = out;
+        }
+    }
+    return d;
+}
+
 static void draw_image(web_page_t *pg, surface_t *s, const web_item_t *it, int X, int Y) {
     if (it->ref < 0 || it->ref >= pg->nimgs) return;
     web_image_t *im = &pg->imgs[it->ref];
@@ -117,7 +146,9 @@ static void draw_image(web_page_t *pg, surface_t *s, const web_item_t *it, int X
         if (!im->scaled || im->scaled->w != it->w || im->scaled->h != it->h) {
             if (im->scaled) surface_destroy(im->scaled);
             im->scaled = NULL;
-            if ((int64_t)it->w * it->h <= 16 * 1024 * 1024) im->scaled = surface_scaled(im->surf, it->w, it->h);
+            if ((int64_t)it->w * it->h <= 16 * 1024 * 1024)
+                im->scaled = (im->surf->flags & SURF_ALPHA) && (it->w > im->surf->w || it->h > im->surf->h)
+                             ? scale_alpha(im->surf, it->w, it->h) : surface_scaled(im->surf, it->w, it->h);
         }
         if (!im->scaled) {
             gfx_blit_scaled(s, X, Y, it->w, it->h, im->surf, 0, 0, im->surf->w, im->surf->h, false);

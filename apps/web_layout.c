@@ -1049,6 +1049,16 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
     bm_t b;
     box_metrics(st, 0, &b);
     int mbp = b.bl + b.br + b.pl + b.pr;
+    if (n->tag == T_IMG || (n->ctl >= 0 && n->tag != T_BUTTON && n->ctl < lc->pg->nctrls) || n->tag == T_SVG) {
+        /* replaced elements: their own width */
+        int w, h;
+        if (n->tag == T_IMG) { image_box(lc, n, 0, &w, &h); if (st->width.u == U_PCT) w = 0; }
+        else if (n->tag == T_SVG) svg_box(lc, n, 0, &w, &h);
+        else { ctrl_box(lc, &lc->pg->ctrls[n->ctl], st, 0, &w, &h); mbp = 0; }
+        *mn = *mx = MAX(0, w + mbp + b.ml + b.mr);
+        n->mgen = lc->gen; n->minw = *mn; n->maxw = *mx;
+        return;
+    }
     lc->depth++;
     if (lc->depth > MAX_DEPTH) { *mn = *mx = 0; }
     else if (st->display == D_TABLE || st->display == D_INLINE_TABLE) {
