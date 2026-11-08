@@ -14,7 +14,10 @@
  * it from a timer and keep the GUI responsive. Order of writes: stage 2,
  * kernel, files, storage headers, verify (read back + compare), and only then
  * the install header and the MBR - an interrupted installation never leaves
- * a disk that tries to boot a half-written system.
+ * a disk that tries to boot a half-written system. install_cancel() stops a
+ * job between slices and clears the MBR, the install header and the drive
+ * signature, so a disk that held an older installation does not try to boot
+ * either.
  */
 #include "kernel.h"
 #include <nova/disk.h>
@@ -400,6 +403,28 @@ int install_step(install_job_t *j, uint32_t budget_ms) {
         }
     } while (g_ticks - t0 < budget_ms);
     return 0;
+}
+
+int install_cancel(install_job_t *j) {
+    if (!j) return DISK_EINVAL;
+    if (j->phase == PH_DONE) return DISK_EBUSY;
+    int pct = install_progress(j) / 10, r = DISK_OK;
+    if (j->phase != PH_STAGE2 || j->pos > 0) {        /* something was written */
+        memset(j->verify, 0, 2 * 512);
+        /* the signature first: the ISO's GRUB menu stops booting the disk by default even
+           if the boot record cannot be cleared */
+        int rs = disk_write(j->disk, DISK_SIG_LBA, 1, j->verify);
+        int rb = disk_write(j->disk, 0, 2, j->verify);              /* MBR + install header */
+        int rf = disk_flush(j->disk);
+        r = rs ? rs : rb ? rb : rf;
+    }
+    j->phase = PH_FAILED;
+    snprintf(j->error, sizeof j->error, "The installation was cancelled.");
+    if (r) klog("install: cancelled at %d%% on disk %d - clearing the boot record failed: %s", pct, j->disk,
+                disk_strerror(r));
+    else klog("install: cancelled at %d%% on disk %d - boot record, install header and drive signature cleared",
+              pct, j->disk);
+    return r;
 }
 
 int install_progress(const install_job_t *j) {

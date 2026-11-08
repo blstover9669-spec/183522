@@ -39,9 +39,9 @@ extern __typeof__(osaver_boot_prompt) osaver_boot_prompt __attribute__((weak));
 #define MOVE_MS     650       /* icon: middle -> top */
 #define FADE_MS     260
 #define FRAME_MS    14
-#define DONE_MS     3200      /* finish text before the restart */
 
-enum { E_NONE = 0, E_SIZE = 1 /* + index */, E_INSTALL = 40, E_CONTINUE, E_PREV, E_NEXT };
+enum { E_NONE = 0, E_SIZE = 1 /* + index */, E_INSTALL = 40, E_CONTINUE, E_PREV, E_NEXT,
+       E_CANCEL = 60, E_HOWTO, E_RESTART, E_TAB /* + 0 VM, 1 USB */ };
 enum { F_SIZES, F_INSTALL, F_CONTINUE };
 enum { A_NONE, A_INSTALL, A_CONTINUE };
 
@@ -63,6 +63,12 @@ static struct {
     int mx, my, buttons, acc_x, acc_y;
     rect_t logo, title, drive, label, panel, head, rows[MAX_SIZES], install, cont, prev, next, bar;
     bool shown, continued;
+    /* progress screen: Cancel; finished screen: text, buttons, tutorial (tabs VM / USB) */
+    rect_t cancel, msg, howto, restart, tut, tabs[2];
+    const font_t *msg_font;
+    int fid;                   /* element with the keyboard focus there, E_NONE = none */
+    int tab;
+    bool tut_open;
 } B;
 
 static int K(double v) { return (int)lround(v * B.k); }
@@ -127,6 +133,8 @@ static void layout(void) {
     B.cont = rect_make(bx, mid + K(8), bw, bh);
     int barw = MIN(w - K(120), K(720)), barh = MAX(26, K(34));
     B.bar = rect_make((w - barw) / 2, K(64), barw, barh);
+    int cw = MAX(K(160), font_text_width(FONT_UI_LARGE, "Cancel") + K(56));
+    B.cancel = rect_make((w - cw) / 2, B.bar.y + barh + K(28), cw, bh);
 }
 
 /* ---- drawing ----------------------------------------------------------------------------------- */
@@ -401,6 +409,13 @@ static int handle(const input_event_t *ev, bool *dirty, int *adx, int *ady) {
     return A_NONE;
 }
 
+/* Wait for the next interrupt unless input is already queued. */
+static void idle(void) {
+    __asm__ volatile("cli");
+    if (input_pending()) __asm__ volatile("sti");
+    else __asm__ volatile("sti; hlt");
+}
+
 static int interact(void) {
     B.hover = hit(B.mx, B.my);
     draw_scene();
@@ -421,13 +436,35 @@ static int interact(void) {
         }
         if (dirty) { draw_scene(); show_all(true); }
         else if (ox != B.mx || oy != B.my) show_pointer_move(ox, oy);
-        __asm__ volatile("cli");
-        if (input_pending()) __asm__ volatile("sti");
-        else __asm__ volatile("sti; hlt");
+        idle();
     }
 }
 
 /* ---- the installation ------------------------------------------------------------------------------- */
+#define DONE_TEXT   "Your drive has been installed and ready to have files savable"
+#define HOWTO_TEXT  "How to start your drive"
+#define TUT_ITEMS   4
+
+/* The tutorial of the finished screen: tab 0 "VM" (VirtualBox), tab 1 "USB". */
+typedef struct { const char *text; bool warn; } tut_item_t;
+static const char *const tut_tabs[2] = { "VM", "USB" };
+static const char *const tut_heads[2] = { "Starting your drive in VirtualBox", "NovaOS and USB sticks" };
+static const tut_item_t tut_items[2][TUT_ITEMS] = {
+    { { "Click Restart: the boot menu of the ISO starts your drive by itself after 2 seconds, even with "
+        "NovaOS.iso still attached.", false },
+      { "To start without the ISO: power off the VM, open Settings > Storage, select the optical drive with "
+        "NovaOS.iso, choose \"Remove Disk from Virtual Drive\" and start the VM.", false },
+      { "Keep the hard disk on the IDE controller: NovaOS does not find hard disks on SATA, SCSI or NVMe "
+        "controllers.", false },
+      { "To reinstall, pick NovaOS 2.5 Developer Preview in the boot menu within those 2 seconds.", false } },
+    { { "NovaOS only reads IDE hard disks, so the installed drive can't run from a USB stick.", false },
+      { "What works: write NovaOS.iso to a USB stick with balenaEtcher or Rufus (DD mode) and boot a PC with "
+        "legacy BIOS/CSM from it with its boot menu key (often F12). NovaOS runs from the ISO and nothing is "
+        "saved.", false },
+      { "On a real computer choose Continue ISO, never Install: Install erases that computer's hard disk.", true },
+      { "NovaOS has only been tested in virtual machines.", false } },
+};
+
 static void draw_bar(surface_t *s, int permille) {
     rect_t b = B.bar;
     gfx_blit_rect(s, b.x - 4, b.y - 4, B.base, b.x - 4, b.y - 4, b.w + 8, b.h + 8);
@@ -468,14 +505,239 @@ static void wait_click_or_key(void) {
                 if (up) { B.buttons = buttons; return; }
             }
         }
-        __asm__ volatile("cli");
-        if (input_pending()) __asm__ volatile("sti");
-        else __asm__ volatile("sti; hlt");
+        idle();
     }
 }
 
-/* Install to B.disk with the chosen size. Restarts the computer when it worked;
-   returns after showing the error when it did not. */
+/* Part of B.scene to the screen, with the pointer if it is over that part. */
+static void show_rect(rect_t r) {
+    rect_t c = cursor_rect(B.mx, B.my, CURSOR_ARROW);
+    bool pointer = rect_overlaps(r, c);
+    if (pointer) r = rect_union(r, c);
+    r = rect_intersect(r, screen());
+    if (rect_empty(r)) return;
+    gfx_blit_rect(wm_backbuf, r.x, r.y, B.scene, r.x, r.y, r.w, r.h);
+    if (pointer) cursor_draw(wm_backbuf, B.mx, B.my, CURSOR_ARROW);
+    present_rect(r);
+}
+
+static int hit_list(const rect_t *rs, const int *ids, int n, int x, int y) {
+    for (int i = 0; i < n; i++)
+        if (rect_contains(rs[i], x, y)) return ids[i];
+    return E_NONE;
+}
+
+/* Pointer and keys of the progress and finished screens (elements rs/ids): returns the
+   element clicked (pressed and released on it), else E_NONE. A pressed key ends the
+   polling and comes back in *key / *mods (0: none). *dirty: hover or press changed. */
+static int poll_input(const rect_t *rs, const int *ids, int n, bool *dirty, int *key, int *mods) {
+    input_event_t ev;
+    int adx = 0, ady = 0, clicked = E_NONE;
+    *key = 0;
+    while (clicked == E_NONE && !*key && input_pop(&ev)) {
+        if (ev.type == IN_MOUSE) {
+            if (ev.buttons == B.buttons) { adx += ev.dx; ady += ev.dy; continue; }
+            motion(adx + ev.dx, ady + ev.dy);
+            adx = ady = 0;
+            int was = B.buttons, h = hit_list(rs, ids, n, B.mx, B.my);
+            B.buttons = ev.buttons;
+            if ((ev.buttons & 1) && !(was & 1)) {
+                B.pressed = h;
+                *dirty = true;
+            } else if (!(ev.buttons & 1) && (was & 1)) {
+                if (B.pressed != E_NONE && B.pressed == h) clicked = h;
+                B.pressed = E_NONE;
+                *dirty = true;
+            }
+        } else if (ev.type == IN_KEY && ev.pressed) {
+            *key = ev.key;
+            *mods = ev.mods;
+        }
+    }
+    if (adx || ady) motion(adx, ady);
+    int h = hit_list(rs, ids, n, B.mx, B.my);
+    if (h != B.hover) { B.hover = h; *dirty = true; }
+    return clicked;
+}
+
+/* Tab / Shift+Tab: the next element of ids gets the keyboard focus. */
+static void cycle_fid(const int *ids, int n, bool back) {
+    int cur = -1;
+    for (int i = 0; i < n; i++) if (ids[i] == B.fid) cur = i;
+    if (cur < 0) cur = back ? 0 : n - 1;
+    B.fid = ids[(cur + (back ? n - 1 : 1)) % n];
+    B.focus_visible = true;
+}
+
+/* -- progress: the bar at the top, Cancel under it -- */
+static void draw_progress(surface_t *s, int permille) {
+    gfx_blit(s, 0, 0, B.base);
+    draw_bar(s, permille);
+    draw_button(s, B.cancel, "Cancel", false, true, E_CANCEL, B.fid == E_CANCEL);
+}
+
+/* -- finished: the text, "How to start your drive" (the tutorial) and Restart -- */
+static int tut_pad(void) { return K(20); }
+static int tut_indent(void) { return K(20); }
+static int tut_tab_h(void) { return MAX(28, K(34)); }
+
+/* Height of a tab's text (heading + items) wrapped to textw. */
+static int tut_body_height(int t, int textw) {
+    int h = font_height(FONT_UI_BOLD) + K(10);
+    for (int i = 0; i < TUT_ITEMS; i++) h += (i ? K(8) : 0) + font_wrap_height(FONT_UI, tut_items[t][i].text, textw);
+    return h;
+}
+
+static void layout_done(void) {
+    B.msg_font = font_text_width(FONT_UI_TITLE, DONE_TEXT) <= B.w - 64 ? FONT_UI_TITLE : FONT_UI_LARGE;
+    int mh = font_height(B.msg_font), bh = MAX(32, K(44)), gap = K(16);
+    int bw1 = font_text_width(FONT_UI_LARGE, HOWTO_TEXT) + K(56);
+    int bw2 = MAX(K(170), font_text_width(FONT_UI_LARGE, "Restart") + K(56));
+    int top = B.bar.y + B.bar.h, avail = B.h - top;
+    B.howto = B.tut = B.tabs[0] = B.tabs[1] = rect_make(0, 0, 0, 0);
+    if (!B.tut_open) {
+        int y = top + (avail - (mh + K(32) + bh)) / 2, row = bw1 + gap + bw2;
+        B.msg = rect_make(16, y, B.w - 32, mh);
+        B.howto = rect_make((B.w - row) / 2, y + mh + K(32), bw1, bh);
+        B.restart = rect_make(B.howto.x + bw1 + gap, B.howto.y, bw2, bh);
+        return;
+    }
+    /* the tutorial between the text and Restart; its size fits the longer tab */
+    int pw = MIN(B.w - 32, K(780)), pad = tut_pad(), textw = pw - 2 * pad - tut_indent();
+    int ph = pad + tut_tab_h() + K(18) + MAX(tut_body_height(0, textw), tut_body_height(1, textw)) + pad;
+    int y = top + MAX(K(10), (avail - (mh + K(20) + ph + K(20) + bh)) / 2);
+    B.msg = rect_make(16, y, B.w - 32, mh);
+    B.tut = rect_make((B.w - pw) / 2, y + mh + K(20), pw, ph);
+    int tw = MAX(K(120), font_text_width(FONT_UI_BOLD, "USB") + K(60));
+    for (int i = 0; i < 2; i++) B.tabs[i] = rect_make(B.tut.x + pw / 2 - tw + i * tw, B.tut.y + pad, tw, tut_tab_h());
+    B.restart = rect_make((B.w - bw2) / 2, B.tut.y + ph + K(20), bw2, bh);
+}
+
+static void draw_tutorial(surface_t *s) {
+    rect_t p = B.tut, t0 = B.tabs[0];
+    gfx_fill_rounded_rect(s, p.x, p.y, p.w, p.h, K(16), RGBA(255, 255, 255, 12));
+    gfx_rounded_rect(s, p.x, p.y, p.w, p.h, K(16), RGBA(255, 255, 255, 34));
+    /* the tabs: a segmented control at the top */
+    int rad = t0.h / 2, tw = 2 * t0.w;
+    gfx_fill_rounded_rect(s, t0.x, t0.y, tw, t0.h, rad, RGBA(255, 255, 255, 16));
+    gfx_rounded_rect(s, t0.x, t0.y, tw, t0.h, rad, RGBA(255, 255, 255, 40));
+    for (int i = 0; i < 2; i++) {
+        rect_t r = B.tabs[i];
+        bool on = B.tab == i, hov = B.hover == E_TAB + i;
+        if (on)
+            gfx_fill_rounded_gradient_v(s, r.x + 2, r.y + 2, r.w - 4, r.h - 4, rad - 2, color_shade(C_ACCENT, 18),
+                                        color_shade(C_ACCENT, -10));
+        else if (hov)
+            gfx_fill_rounded_rect(s, r.x + 2, r.y + 2, r.w - 4, r.h - 4, rad - 2, RGBA(255, 255, 255, 30));
+        if (B.fid == E_TAB + i && B.focus_visible)
+            gfx_rounded_rect(s, r.x - 1, r.y - 1, r.w + 2, r.h + 2, rad + 1, RGBA(170, 205, 255, 230));
+        draw_text_center(s, r, tut_tabs[i], on || hov ? COLOR_WHITE : C_DIM, FONT_UI_BOLD);
+    }
+    int pad = tut_pad(), ind = tut_indent(), x = p.x + pad, textw = p.w - 2 * pad - ind;
+    int y = t0.y + t0.h + K(18), lh = font_height(FONT_UI);
+    gfx_text(s, x, y, tut_heads[B.tab], C_TEXT, FONT_UI_BOLD);
+    y += font_height(FONT_UI_BOLD) + K(10);
+    for (int i = 0; i < TUT_ITEMS; i++) {
+        const tut_item_t *it = &tut_items[B.tab][i];
+        if (i) y += K(8);
+        if (it->warn) {
+            int g = MIN(lh, MAX(12, K(16)));
+            ui_draw_glyph(s, UI_GLYPH_WARNING, x, y + (lh - g) / 2, g, C_WARN);
+        } else {
+            gfx_fill_circle_aa(s, x + K(6), y + lh / 2.0, MAX(2.0, K(2.6)), C_DIM);
+        }
+        y += gfx_text_wrapped(s, rect_make(x + ind, y, textw, p.y + p.h - y), it->text, it->warn ? C_WARN : C_TEXT,
+                              FONT_UI);
+    }
+}
+
+static void draw_done(void) {
+    surface_t *s = B.scene;
+    gfx_blit(s, 0, 0, B.base);
+    draw_bar(s, 1000);
+    draw_text_center(s, B.msg, DONE_TEXT, C_TEXT, B.msg_font);
+    if (B.tut_open) draw_tutorial(s);
+    else draw_button(s, B.howto, HOWTO_TEXT, false, true, E_HOWTO, B.fid == E_HOWTO);
+    draw_button(s, B.restart, "Restart", true, true, E_RESTART, B.fid == E_RESTART);
+}
+
+static int done_elements(rect_t *rs, int *ids) {
+    int n = 0;
+    if (B.tut_open) {
+        for (int i = 0; i < 2; i++) { rs[n] = B.tabs[i]; ids[n++] = E_TAB + i; }
+    } else {
+        rs[n] = B.howto; ids[n++] = E_HOWTO;
+    }
+    rs[n] = B.restart; ids[n++] = E_RESTART;
+    return n;
+}
+
+/* The drive is installed: stays here until Restart, which restarts the computer into it. */
+static void finished(void) {
+    B.tut_open = false;
+    B.tab = 0;
+    B.hover = B.pressed = B.fid = E_NONE;
+    layout_done();
+    surface_t *from = surface_clone(wm_backbuf);
+    draw_done();
+    static const note_t chime[] = { { 784, 90 }, { 988, 90 }, { 1319, 180 } };
+    sys_play_notes(chime, 3);
+    if (from) splash_crossfade(from, B.scene, FADE_MS);
+    surface_destroy(from);
+    show_all(true);
+    klog("bootsetup: finished screen (%s, Restart)", HOWTO_TEXT);
+    for (;;) {
+        rect_t rs[3];
+        int ids[3], n = done_elements(rs, ids), key = 0, mods = 0, ox = B.mx, oy = B.my;
+        bool dirty = false;
+        int a = poll_input(rs, ids, n, &dirty, &key, &mods);
+        if (key) {
+            dirty = true;
+            B.focus_visible = true;
+            if (key == KEY_TAB) cycle_fid(ids, n, mods & MOD_SHIFT);
+            else if (key == KEY_ENTER || key == KEY_SPACE) a = B.fid;
+            else if ((key == KEY_LEFT || key == KEY_RIGHT) && B.tut_open) a = E_TAB + (key == KEY_RIGHT);
+        }
+        if (a == E_RESTART) {
+            klog("bootsetup: Restart - restarting into the installed drive");
+            gfx_blit(wm_backbuf, 0, 0, B.scene);
+            present_rect(screen());
+            sys_reboot();
+        }
+        if (a == E_HOWTO) {
+            B.tut_open = true;
+            if (B.fid == E_HOWTO) B.fid = E_TAB;
+            layout_done();
+            klog("bootsetup: %s (%s tab)", HOWTO_TEXT, tut_tabs[B.tab]);
+        } else if ((a == E_TAB || a == E_TAB + 1) && B.tab != a - E_TAB) {
+            B.tab = a - E_TAB;
+            if (B.fid == E_TAB || B.fid == E_TAB + 1) B.fid = a;
+            klog("bootsetup: tutorial %s tab", tut_tabs[B.tab]);
+        }
+        if (a != E_NONE) {
+            dirty = true;
+            n = done_elements(rs, ids);
+            B.hover = hit_list(rs, ids, n, B.mx, B.my);
+        }
+        if (dirty) { draw_done(); show_all(true); }
+        else if (ox != B.mx || oy != B.my) show_pointer_move(ox, oy);
+        idle();
+    }
+}
+
+/* Back to the NovaOS Drive installation screen (after Cancel or a failed installation). */
+static void back_to_setup(surface_t *setup_base) {
+    surface_t *from = surface_clone(wm_backbuf);
+    B.base = setup_base;
+    B.hover = B.pressed = B.fid = E_NONE;
+    draw_scene();
+    if (from) splash_crossfade(from, B.scene, FADE_MS);
+    surface_destroy(from);
+}
+
+/* Install to B.disk with the chosen size. When it worked the finished screen follows (its
+   Restart restarts the computer); returns to the NovaOS Drive installation screen when the
+   installation failed or was cancelled. */
 static void run_install(void) {
     uint64_t bytes = install_size_bytes(B.sel);
     const disk_info_t *d = disk_get(B.disk);
@@ -483,41 +745,68 @@ static void run_install(void) {
     char err[160] = "";
     install_job_t *job = install_begin_sized(B.disk, bytes, true, err, sizeof err);
 
-    /* the screen changes to a progress bar at the top (on the plain background) */
-    surface_t *prog = surface_create(B.w, B.h);
-    if (!prog) { install_free(job); return; }
+    /* the screen changes to a progress bar at the top (on the plain background), Cancel under it */
+    surface_t *prog = surface_create(B.w, B.h), *frame = surface_create(B.w, B.h);
+    if (!prog || !frame) {
+        surface_destroy(prog);
+        surface_destroy(frame);
+        install_free(job);
+        return;
+    }
     surface_t *bg = splash_background();
     if (bg) gfx_blit(prog, 0, 0, bg);
     else gfx_gradient_v(prog, 0, 0, B.w, B.h, SPLASH_BG_TOP, SPLASH_BG_BOTTOM);
     surface_t *saved_base = B.base;
     B.base = prog;                     /* draw_bar restores from B.base */
-    surface_t *frame = surface_clone(prog);
-    if (frame) {
-        draw_bar(frame, 0);
-        splash_crossfade(B.scene, frame, FADE_MS);
-    }
-    int result = job ? 0 : DISK_EINVAL, shown = -1;
+    /* no keyboard focus on Cancel until Tab: the Enter that started the installation
+       (or its key repeat) must not cancel it */
+    B.hover = B.pressed = B.fid = E_NONE;
+    draw_progress(frame, 0);
+    splash_crossfade(B.scene, frame, FADE_MS);
+    gfx_blit(B.scene, 0, 0, frame);
+    surface_destroy(frame);
+    B.hover = rect_contains(B.cancel, B.mx, B.my) ? E_CANCEL : E_NONE;
+    draw_progress(B.scene, 0);
+    show_all(true);
+
+    static const int cancel_id[] = { E_CANCEL };
+    int result = job ? 0 : DISK_EINVAL, shown = 0;
+    bool cancel = false;
     uint32_t t0 = g_ticks;
     while (job && result == 0) {
         result = install_step(job, 25);
-        int p = result == 1 ? 1000 : install_progress(job);
-        if (p / 10 != shown / 10 || result) {
+        if (result) break;
+        int p = install_progress(job), key = 0, mods = 0, ox = B.mx, oy = B.my;
+        bool dirty = false;
+        int a = poll_input(&B.cancel, cancel_id, 1, &dirty, &key, &mods);
+        if (key == KEY_ESCAPE || ((key == KEY_ENTER || key == KEY_SPACE) && B.fid == E_CANCEL)) a = E_CANCEL;
+        else if (key == KEY_TAB) { B.fid = E_CANCEL; B.focus_visible = true; dirty = true; }
+        if (a == E_CANCEL) { cancel = true; break; }
+        if (dirty) {
             shown = p;
-            draw_bar(wm_backbuf, p);
-            present_rect(rect_make(B.bar.x - 4, B.bar.y - 4, B.bar.w + 8, B.bar.h + 8));
+            draw_progress(B.scene, p);
+            show_all(true);
+            continue;
         }
-        input_event_t ev;
-        while (input_pop(&ev)) {}       /* nothing to click while it installs */
+        if (p / 10 != shown / 10) {
+            shown = p;
+            draw_bar(B.scene, p);
+            show_rect(rect_make(B.bar.x - 4, B.bar.y - 4, B.bar.w + 8, B.bar.h + 8));
+        }
+        if (ox != B.mx || oy != B.my) show_pointer_move(ox, oy);
+    }
+    if (cancel) {
+        klog("bootsetup: Cancel at %d%% - stopping the installation", install_progress(job) / 10);
+        install_cancel(job);
+        install_free(job);
+        back_to_setup(saved_base);
+        surface_destroy(prog);
+        return;
     }
     if (result == 1) {
-        klog("bootsetup: drive installed in %u ms - restarting into it", g_ticks - t0);
+        klog("bootsetup: drive installed in %u ms", g_ticks - t0);
         install_free(job);
-        draw_message(wm_backbuf, "Your drive has been installed and ready to have files savable", NULL, 0);
-        present_rect(screen());
-        static const note_t chime[] = { { 784, 90 }, { 988, 90 }, { 1319, 180 } };
-        sys_play_notes(chime, 3);
-        boot_sleep_until(g_ticks + DONE_MS);
-        sys_reboot();
+        finished();                    /* does not return: Restart */
     }
     char why[200];
     snprintf(why, sizeof why, "%s", job ? install_error(job) : err);
@@ -525,16 +814,13 @@ static void run_install(void) {
     klog("bootsetup: installation failed: %s", why);
     install_free(job);
     sys_beep(220, 200);
+    gfx_blit(wm_backbuf, 0, 0, B.base);
+    draw_bar(wm_backbuf, shown);
     draw_message(wm_backbuf, "The drive could not be installed", why, C_WARN);
     draw_text_center(wm_backbuf, rect_make(0, B.h - K(80), B.w, font_height(FONT_UI)), "Click to go back", C_DIM, FONT_UI);
     present_rect(screen());
     wait_click_or_key();
-    B.base = saved_base;
-    surface_t *from = surface_clone(wm_backbuf);
-    draw_scene();
-    if (from) splash_crossfade(from, B.scene, FADE_MS);
-    surface_destroy(from);
-    surface_destroy(frame);
+    back_to_setup(saved_base);
     surface_destroy(prog);
 }
 

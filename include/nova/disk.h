@@ -114,6 +114,12 @@ int            install_size_default(int disk);         /* largest that fits, -1 
 /* Do up to `budget_ms` of work. Returns 0 while running, 1 when finished,
    or a negative DISK_E* error (see install_error()). Call from a timer. */
 int            install_step(install_job_t *job, uint32_t budget_ms);
+/* Cancel an installation that has not finished (between install_step calls): the boot
+   record (MBR), the install header and the drive signature in sector 2047 are cleared, so
+   the disk no longer looks like an installed NovaOS - neither the BIOS nor the ISO's GRUB
+   menu tries to start the half-written system. Returns DISK_OK or the write error
+   (DISK_EBUSY: already finished, nothing undone). install_free() the job afterwards. */
+int            install_cancel(install_job_t *job);
 int            install_progress(const install_job_t *job);     /* 0 .. 1000            */
 const char    *install_phase(const install_job_t *job);        /* "Copying system..."  */
 const char    *install_error(const install_job_t *job);
