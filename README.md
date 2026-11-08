@@ -7,9 +7,10 @@ graphical desktop, written from scratch in C and assembly.
 
 NovaOS is a small 32-bit x86 operating system. Nothing in it comes from Linux,
 BSD or any other OS: the kernel, drivers, window manager, widget toolkit,
-font renderer, icons and all 30 apps are freestanding C and NASM written for
+font renderer, icons and all 33 apps are freestanding C and NASM written for
 this project. It boots from a CD image (via GRUB) straight into a desktop with
-windows, a taskbar, a Start menu, background services and apps, and runs in
+windows, a Start menu, rounded "islands" along the bottom edge (Start button,
+running apps, an app rectangle, clock), background services and apps, and runs in
 **VirtualBox** and QEMU. The **Installer** app copies it onto a virtual hard
 disk, which then boots NovaOS on its own and keeps your files across
 restarts.
@@ -69,9 +70,13 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
   (Inter + DejaVu Sans Mono), rounded windows and soft drop shadows
 * Window manager: move, resize, maximize, minimize, snap to screen edges,
   Alt+Tab, z-order, focus
-* Taskbar with pinned apps, window buttons, volume icon, live clock and
-  calendar; Start menu with categories, recent items and search over apps,
-  files and commands; Run dialog (Win+R) with autocomplete
+* No taskbar: separate rounded islands at the bottom - the Start button, one
+  icon button per running app (title on hover), the fixed app rectangle in
+  the middle (Settings, Welcome, Files: a click darkens the icon and shows a
+  spinner until the app is open, then its outline glows with a light running
+  round it) and a live clock with a calendar; Start menu with categories,
+  recent items and search over apps, files and commands; Run dialog (Win+R)
+  with autocomplete
 * Desktop icons for apps and files, desktop context menus (Open / Open With
   / Rename / Delete / Properties, New Folder / New Text File, wallpaper, dark
   mode), boot splash, first-run Welcome tour
@@ -83,7 +88,7 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
   sliders, progress bars, list boxes, scroll bars, dropdowns, tabs, menu bars,
   context menus, message / input / file dialogs, notifications
 * File associations with user-changeable defaults, Open With and Properties
-  dialogs, taskbar pinning
+  dialogs
 
 **System**
 
@@ -119,7 +124,8 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
 
 ## The apps
 
-30 apps, all in the Start menu and on the desktop:
+33 apps. The ten games are only inside **Games**; every other app is in the
+Start menu and on the desktop:
 
 | Category | App | What it does |
 |---|---|---|
@@ -145,16 +151,17 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
 | Graphics | **Fractal Explorer** | Explore the Mandelbrot and Julia sets |
 | Multimedia | **Piano** | Play with the mouse or keyboard, chords and instruments on a sound card, built-in songs, recording |
 | Development | **Widget Gallery** | Every UI toolkit widget in one window |
-| Games | **Solitaire** | Klondike: drag and drop, auto-play, hints, undo |
-| Games | **Chess** | Full legal-move chess against the computer or a friend |
-| Games | **Tetris** | Falling blocks with hold, ghost piece and levels |
-| Games | **Minesweeper** | Beginner, intermediate and expert boards |
-| Games | **2048** | Slide and merge the tiles |
-| Games | **Snake** | Eat the apples, don't bite your tail |
-| Games | **Breakout** | Smash the bricks with ball and paddle |
-| Games | **Pong** | Beat the computer to 10 points |
-| Games | **Memory Match** | Find the matching pairs |
-| Games | **Tic-Tac-Toe** | Against an unbeatable computer or a friend |
+| Games | **Games** | All the games in one window (icon and name) - click one to play it |
+| inside Games | **Solitaire** | Klondike: drag and drop, auto-play, hints, undo |
+| inside Games | **Chess** | Full legal-move chess against the computer or a friend |
+| inside Games | **Tetris** | Falling blocks with hold, ghost piece and levels |
+| inside Games | **Minesweeper** | Beginner, intermediate and expert boards |
+| inside Games | **2048** | Slide and merge the tiles |
+| inside Games | **Snake** | Eat the apples, don't bite your tail |
+| inside Games | **Breakout** | Smash the bricks with ball and paddle |
+| inside Games | **Pong** | Beat the computer to 10 points |
+| inside Games | **Memory Match** | Find the matching pairs |
+| inside Games | **Tic-Tac-Toe** | Against an unbeatable computer or a friend |
 
 ## Running NovaOS in VirtualBox (step by step)
 
@@ -333,13 +340,17 @@ mouse.
 
 * Double-click desktop icons, or open the **Start menu** (bottom-left button,
   Windows key or Ctrl+Esc) and type to search apps, files and commands.
+  The games are in **Games**.
+* The rectangle in the middle of the bottom edge opens Settings, Welcome and
+  Files with one click. Right of the Start button there is a button for each
+  running app: click it to bring the app to the front or minimize it,
+  hover for its title, right-click for a menu.
 * Drag windows by the title bar; drag to the top edge to maximize or to the
-  left / right edge to snap. Right-click a Start menu entry or a taskbar
-  button to pin the app to the taskbar.
+  left / right edge to snap.
 * Right-click the desktop for new folders / text files, wallpapers and dark
   mode; right-click a file to open it with another app, rename, delete it or
-  see its properties. The clock opens a calendar; the speaker icon mutes all
-  sound.
+  see its properties. The clock (bottom right) opens a calendar; Settings >
+  Sound turns all sound on and off.
 * **Files** opens files with their default app; change the app for a file
   type in *Properties -> Change...* or with `assoc txt Notepad` in the
   Terminal.
@@ -443,12 +454,12 @@ kernel/      arch (GDT/IDT/PIC/PIT/FPU), core (boot info, heap, log, panic, powe
              AC'97, Sound Blaster 16, PC speaker, software mixer),
              disk (installer back end, file persistence),
              gfx (surfaces, primitives, text, images, generated fonts),
-             gui (window manager, compositor, desktop, taskbar, Start menu,
-             widgets, dialogs, theme, icon library), fs (VFS), lib (libc/libm),
+             gui (window manager, compositor, desktop, bottom islands, Start
+             menu, widgets, dialogs, theme, icon library), fs (VFS), lib (libc/libm),
              services (service manager, syslog, command registry, built-in
              daemons), shell (file associations, Open With / Properties / Run
              dialogs, pins, recent items)
-apps/        the 30 applications (each file registers itself with REGISTER_APP)
+apps/        the 33 applications (each file registers itself with REGISTER_APP)
 include/     public API (nova.h and nova/*.h) and the libc headers
 tools/       shot.py (headless QEMU test driver), wavcheck.py (notes in a WAV
              recording), collage.py (all-apps picture), genfont.py, gensyms.py

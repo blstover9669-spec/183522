@@ -72,6 +72,11 @@ tools/shot.py --kernel build/kernel.elf --out shots ready shot:desktop \
     click:28,744 wait:0.5 shot:startmenu key:esc \
     dclick:53,45 wait:1 shot:about
 
+# the app rectangle: click Files - dark icon with a spinner until its window is
+# open, then the glowing outline with a light running round it; Alt+F4 fades it out
+tools/shot.py --kernel build/kernel.elf --out shots ready click:560,744 move:300,650 shot:spinner \
+    wait:1 shot:glow key:alt-f4 wait:0.15 shot:glow-fading
+
 # launch your app at boot and test its keyboard handling
 tools/shot.py --kernel build-notepad/kernel.elf --cmdline "autorun=Notepad" --out shots-notepad \
     ready wait:0.5 type:"Hello world\n" key:ctrl-a wait:0.3 shot:typed
@@ -365,11 +370,20 @@ tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Web_Browser:http://10
 
 ### Finding coordinates
 
-* Screen is 1024x768; the taskbar is the bottom 48 px (Start button at about
-  (28, 744), clock at the right).
+* Screen is 1024x768. There is no taskbar: the bottom 48 px hold separate
+  islands (y = 724..764): the Start button at about (28, 744); the running
+  apps' buttons right of it, 40 px apart, the first at about (78, 744) (they
+  shrink when many apps run; hovering shows the window title above); the app
+  rectangle in the middle - Settings (464, 744), Welcome (512, 744), Files
+  (560, 744); the clock box at the right (about (900, 744), click: calendar).
 * Desktop icons sit in an 88x92 grid starting at (10, 10), column-major,
   sorted by app name; the icon image is centred at about (cell_x + 44,
-  cell_y + 32).
+  cell_y + 32). The games are not on the desktop (they are inside Games,
+  whose icon is at about (54, 594)); About is first, at (53, 45).
+* Games (`autorun=Games`, 592x240 client, `WIN_CENTER`): the game with index
+  i in name order (2048, Breakout, Chess, Memory Match, Minesweeper, Pong,
+  Snake, Solitaire, Tetris, Tic-Tac-Toe) has its icon at about
+  (288 + 112 * (i % 5), 309 + 104 * (i / 5)), e.g. Tetris at (624, 413).
 * A window created with `WIN_CENTER` and client size `cw x ch` has its frame at
   `x = (1024 - (cw + 2)) / 2`, `y = (720 - (ch + 33)) / 2`; the client area
   starts 1 px right and 32 px below the frame's top-left corner. The close

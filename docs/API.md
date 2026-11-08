@@ -175,10 +175,15 @@ REGISTER_APP(.name = "Notepad", .category = CAT_ACCESSORIES, .description = "...
 * Flags: `APP_HIDDEN` (not on desktop or Start menu - still launchable by
   name), `APP_NO_DESKTOP` (Start menu only), `APP_SINGLE` (launching again
   focuses the existing window instead).
+* Category `CAT_GAMES`: the app is listed only inside the **Games** app
+  (`apps/games.c`: icon + name, a click starts it) - not on the desktop, in
+  the Start menu or in its search. It still runs normally, gets its
+  running-app button and can be launched by name.
 * `draw_icon(s, x, y, size)`: draw the icon into the `size`x`size` box at
   `(x, y)` on a **transparent** surface. It is rendered at 2x and downsampled
-  (anti-aliased) and cached per size; sizes used: 18 (title bar), 22
-  (taskbar), 32 (Start menu), 48 (desktop). Draw relative to `size`. If
+  (anti-aliased) and cached per size; sizes used: 18 (title bar), 24
+  (running-app buttons), 28 (the app rectangle), 32 (Start menu), 48
+  (desktop, Games). Draw relative to `size`. If
   `NULL`, a coloured tile with the first letter is generated.
 
 Registry functions:
@@ -205,7 +210,7 @@ Sizes are of the **client area**; the frame adds a 32 px title bar
 (`WIN_TITLE_H`) and 1 px border (`WIN_BORDER`). Windows are placed cascading
 from the top-left unless `WIN_CENTER`. A window created while your app is
 running (in `launch` or any of your callbacks) belongs to your app (title-bar
-and taskbar icon).
+icon and the app's button next to the Start button).
 
 | Flag | Meaning |
 |---|---|
@@ -214,10 +219,10 @@ and taskbar icon).
 | `WIN_CENTER` | centre on screen |
 | `WIN_CONFIRM_CLOSE` | X / Alt+F4 send `EV_CLOSE_REQUEST`; call `win_close()` yourself (e.g. after "Save changes?") |
 | `WIN_TOPMOST` | above normal windows |
-| `WIN_NO_TASKBAR` | no taskbar button |
+| `WIN_NO_TASKBAR` | no running-app button (next to the Start button), not in Alt+Tab |
 | `WIN_FRAMELESS` | no decorations; client = whole window |
 | `WIN_POPUP` | frameless menu-like window above everything, closed by any click outside it |
-| `WIN_DIALOG` | no min/max buttons, no taskbar button |
+| `WIN_DIALOG` | no min/max buttons, no running-app button |
 | `WIN_HIDDEN` | create invisible; `win_show()` later |
 | `WIN_NO_SHADOW` | no drop shadow |
 
@@ -237,7 +242,7 @@ bool  win_is_focused(w), win_is_minimized(w), win_is_maximized(w);
 bool  win_is_valid(w);      /* safe on stale pointers: is this window still open? */
 void  win_set_cursor(w, CURSOR_IBEAM);          /* shape while over the client area */
 void  win_set_fullscreen(w, true); bool win_is_fullscreen(w);  /* games, slideshows: no frame,
-                                                   whole screen, taskbar hidden while active */
+                                                   whole screen, bottom islands hidden while active */
 void  win_post_event(w, intptr_t data);         /* deliver EV_USER later from the main loop */
 window_t *win_create_dialog(window_t *owner, title, cw, ch, flags);
 ```
@@ -247,18 +252,22 @@ window_t *win_create_dialog(window_t *owner, title, cw, ch, flags);
 * **Dialogs:** `win_create_dialog(owner, ...)` centres over the owner and makes
   it modal-lite: clicks on the owner beep and focus the dialog. Closing the
   owner closes its dialogs (their callbacks are *not* called).
-* Enumeration (task managers, taskbars): `int win_list(window_t **out, int max)`
+* Enumeration (task managers, the running-app buttons): `int win_list(window_t **out, int max)`
   (normal app windows, bottom to top), `win_get_focused()`, `win_get_app(w)`,
   `win_id(w)` / `win_find_by_id(id)` (ids are never reused - store ids, not
   pointers, across callbacks), `win_flags(w)`, `win_get_owner(w)`.
 * Screen: `screen_width()`, `screen_height()`, `screen_work_height()` (above
-  the 48 px taskbar), `surface_t *screen_capture(void)` (free with
+  the bottom 48 px, which hold the Start button, the running apps, the app
+  rectangle and the clock), `surface_t *screen_capture(void)` (free with
   `surface_destroy`).
 
 Built-in window behaviour: drag by title bar; double-click title toggles
 maximize; drag to the top edge = maximize, to the left/right edge = snap to
-half screen (resizable windows); Alt+Tab cycles, Alt+F4 closes, the taskbar
-button minimizes/restores, right-click a taskbar button for a menu.
+half screen (resizable windows); Alt+Tab cycles, Alt+F4 closes. There is no
+taskbar: right of the Start button each running app has an icon button (one
+per app, minimized ones included; the window title shows on hover) - click
+it to focus / restore / minimize the app, right-click it for Restore /
+Minimize / Maximize / Close. Maximized windows end above the bottom 48 px.
 
 ---
 
@@ -577,7 +586,7 @@ const theme_t *theme_get(void);
    derived colours: window_bg, window_text, window_border, panel_bg, title_active/inactive,
    title_text(_inactive), button_bg/hover/pressed/border/text, field_bg/border/text,
    selection_bg/text, disabled_text, accent_hover, accent_text, menu_bg/text/hover/separator,
-   taskbar_bg/text/hover/active, desktop_text, scrollbar_bg/thumb, link */
+   taskbar_bg/text/hover/active (the bottom islands), desktop_text, scrollbar_bg/thumb, link */
 void theme_set_dark(bool);  void theme_set_accent(uint32_t);  void theme_set_shadows(bool);
 void theme_set_wallpaper(int index);  void theme_set_wallpaper_color(uint32_t);
 void theme_set_wallpaper_image(const surface_t *img);   /* copied, scaled to cover */
@@ -715,7 +724,7 @@ u32 ctime, u32 size, data}`. A self-test at boot round-trips the tree.
   error sound: two short falling tones, non-blocking; error message boxes and
   error notifications play it by themselves - see section 11; calls less than
   300 ms apart play once), `sys_sound_enabled()` /
-  `sys_set_sound_enabled()` (taskbar toggle). Polyphonic notes with
+  `sys_set_sound_enabled()` (Settings > Sound). Polyphonic notes with
   instruments: `sound_note(freq, ms, volume, waveform)`; the output device:
   `sys_sound_device_name()`.
 * Power: `sys_reboot()`, `sys_shutdown()` (ACPI S5 from the DSDT, then the
@@ -928,7 +937,7 @@ with `syslog_first_seq() .. syslog_last_seq()` + `syslog_get(seq, &e)` and
 
 | Service | Display name | API |
 |---|---|---|
-| `notifyd` | Notifications | `int notify(title, body, ICON_*)` slides a toast in above the taskbar (stacks, newest at the bottom, auto-dismiss after 5 s - paused while hovered - click to dismiss); `notify_dismiss(id)`, `notify_history_count/get/clear` (last 50). Returns 0 when notifyd is stopped (still recorded). Toasts raised while the screensaver runs wait until it is dismissed. |
+| `notifyd` | Notifications | `int notify(title, body, ICON_*)` slides a toast in at the bottom right, above the clock box (stacks, newest at the bottom, auto-dismiss after 5 s - paused while hovered - click to dismiss); `notify_dismiss(id)`, `notify_history_count/get/clear` (last 50). Returns 0 when notifyd is stopped (still recorded). Toasts raised while the screensaver runs wait until it is dismissed. |
 | `logd` | System Log | writes the syslog to `/system/log/syslog` |
 | `screensaver` | Screensaver | the chosen screensaver style full screen after N idle seconds (default 300). `screensaver_set_timeout(s)` (persisted in `/system/config/screensaver`, 0 = never), `screensaver_get_timeout`, `screensaver_activate`, `screensaver_dismiss`, `screensaver_active`. Any key, click or mouse movement dismisses it; that input is swallowed, so a click never reaches the window underneath. Command line `screensaver=SECONDS` overrides the timeout for one boot (it is not saved). Styles (`#include <nova/screensaver.h>`): Nova Drop, Original (starfield + aurora with a clock), Bubbles, Bouncing App Logos, Lines; `screensaver_get_style` / `screensaver_set_style` (persisted as `style=` in the same file, Settings > Styles), `screensaver_style_count/name`, and `ss_anim_create(style, w, h, preview)` / `ss_anim_frame` / `ss_anim_interval` / `ss_anim_destroy` to draw a style into any surface (live previews). |
 | `safetyshield` | SafetyShield | scans every file in the OS automatically every minute; a scan that catches something (risk above Safe) shows the notification "SafetyShield detected a threat in your system". Detection rules are inactive for now (everything is Safe); add them to `rules[]` in `kernel/services/safetyshield.c`. `#include <nova/safetyshield.h>`: `safetyshield_scan`, `safetyshield_status`, `safetyshield_total_files`, `safetyshield_recent_count/get` (the last scan's files and risks), `safetyshield_risk_name/description/color`, `safetyshield_generation`. Settings > SafetyShield shows it all. |
@@ -983,7 +992,7 @@ Built-in commands:
 | `logs [SERVICE] [-n LINES]` | the system log, or one service's entries |
 | `open PATH\|APP [-w APP]` | `shell_open`, or open with a given app |
 | `assoc [EXT [APP\|--reset]]` | list file types / show or change the default app |
-| `pin [APP]`, `unpin APP`, `recent [clear]` | taskbar pins, recent items |
+| `pin [APP]`, `unpin APP`, `recent [clear]` | the pin list (kept, no longer shown), recent items |
 | `run [TEXT]` | Run dialog, or do what it would do with TEXT |
 | `locate NAME`, `sysmon`, `screensaver [now\|off\|SECONDS]`, `commands [NAME]` | file search, monitor sample, screensaver, list commands |
 
@@ -1040,13 +1049,13 @@ register with `REGISTER_FILETYPE(..., ICON_*)` shows its icon and your app's
 badge there too. The Terminal's `open FILE` and the Run dialog also go
 through `shell_open`.
 
-**Taskbar pins** (persisted in `/system/config/pinned`, one app name per line;
+**Pins** (persisted in `/system/config/pinned`, one app name per line;
 default Files, Terminal, Notepad - missing apps are skipped):
 `shell_pin_count()`, `shell_pin_get(i)`, `shell_is_pinned(app)`,
-`shell_set_pinned(app, on)`. Pinned buttons sit right of the Start button
-(click: start the app, or focus / minimise its window; a dot marks running
-apps). Right-click a pin, a taskbar button or a Start menu entry to pin or
-unpin.
+`shell_set_pinned(app, on)`. The taskbar is gone and pins are no longer
+shown or offered in menus; the list is only kept (the `pin` / `unpin`
+commands, OSaver codes). The bottom of the screen has instead the buttons
+of the running apps and the fixed app rectangle (Settings, Welcome, Files).
 
 **Recent items** (persisted in `/system/config/recent`, newest first, 16):
 every `app_launch` records the file it opened or the app (`"app:Name"`);
@@ -1079,8 +1088,9 @@ Kinds: folders (`ICON_FOLDER`, `_DOCUMENTS`, `_PICTURES`, `_MUSIC`,
 `_CONFIG`, `ICON_NOTE`, `ICON_PAINT`), objects (`ICON_APP`, `ICON_DISK`,
 `ICON_COMPUTER`, `ICON_TRASH`, `ICON_GEAR`, `ICON_SERVICE`, `ICON_SETTINGS`,
 `ICON_BELL`, `ICON_ALARM`, `ICON_CLOCK`, `ICON_SEARCH`, `ICON_RUN`, `ICON_PIN`,
-`ICON_TERMINAL`) and status (`ICON_INFO`, `ICON_WARNING`, `ICON_ERROR`,
-`ICON_QUESTION`, `ICON_SUCCESS`).
+`ICON_TERMINAL`), status (`ICON_INFO`, `ICON_WARNING`, `ICON_ERROR`,
+`ICON_QUESTION`, `ICON_SUCCESS`), `ICON_SHIELD` (SafetyShield) and
+`ICON_GAMES` (the Games app's gamepad).
 
 * `icon_for_path(path)`: special folders under /home/user (Documents,
   Pictures, Music, Downloads, Desktop, the home folder itself), /system,
@@ -1110,8 +1120,8 @@ kHz on AC'97, 44.1 kHz on SB16) is streamed to the first card found:
 The boot log says which one is used (`audio: output Intel ICH AC'97, 48000
 Hz, 8 voices, volume 80%`). Everything is non-blocking: the drivers refill
 their DMA rings from the 1 kHz timer interrupt (about 40 ms ahead), and the
-stream stops after 2 s of silence. The global on/off switch (taskbar speaker
-icon, `sys_set_sound_enabled`) applies to everything below.
+stream stops after 2 s of silence. The global on/off switch (Settings >
+Sound, `sys_set_sound_enabled`) applies to everything below.
 
 ```c
 /* a C major chord on the piano voice, 1.5 s */
