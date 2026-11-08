@@ -48,6 +48,13 @@ const app_desc_t *app_find(const char *name) {
     return NULL;
 }
 
+/* The Games app (apps/games.c) bundles every game: apps in CAT_GAMES are listed
+   only inside it - not on the desktop, in the Start menu or its search. */
+bool app_in_games(const app_desc_t *a) {
+    if (!a || !a->category || strcasecmp(a->category, CAT_GAMES) || !strcasecmp(a->name, "Games")) return false;
+    return app_find("Games") != NULL;      /* bundled only while the Games app is there */
+}
+
 int app_window_count(const app_desc_t *app) {
     int n = 0;
     for (window_t *w = wm_bottom; w; w = w->above)

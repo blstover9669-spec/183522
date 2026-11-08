@@ -1,4 +1,5 @@
-/* desktop.c - the desktop: wallpaper plus icons for every app and for files in ~/Desktop. */
+/* desktop.c - the desktop: wallpaper plus icons for the apps (the games are inside Games)
+   and for files in ~/Desktop. */
 #include "wm_internal.h"
 
 #define CELL_W 88
@@ -63,7 +64,7 @@ static void rebuild(void) {
     nicons = 0;
     for (int i = 0; i < app_count(); i++) {
         const app_desc_t *a = app_get(i);
-        if (a->flags & (APP_HIDDEN | APP_NO_DESKTOP)) continue;
+        if ((a->flags & (APP_HIDDEN | APP_NO_DESKTOP)) || app_in_games(a)) continue;
         add_icon(a, a->name, false);
     }
     vfs_dirent_t ents[64];
@@ -283,7 +284,6 @@ static void icon_menu(int item, void *ctx) {
     (void)ctx;
     if (target_app) {
         if (item == 0) app_launch(target_app, NULL);
-        else if (item == 1) shell_set_pinned(target_app->name, !shell_is_pinned(target_app->name));
         return;
     }
     file_action(item);
@@ -294,7 +294,7 @@ static void show_icon_menu(window_t *win, int i, int x, int y) {
     strlcpy(target_name, d->name, sizeof target_name);
     target_app = d->app;
     if (d->app)
-        ui_popup_menu(win, x, y, shell_is_pinned(d->app->name) ? "Open|Unpin from taskbar" : "Open|Pin to taskbar", icon_menu, NULL);
+        ui_popup_menu(win, x, y, "Open", icon_menu, NULL);
     else
         ui_popup_menu(win, x, y, "Open|Open With...|-|Rename...|Delete|-|Properties", icon_menu, NULL);
 }

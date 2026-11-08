@@ -1,27 +1,63 @@
-/* taskbar.c - bottom taskbar: Start button, window buttons, sound toggle, clock + calendar. */
+/*
+ * taskbar.c - the bottom of the screen. There is no taskbar: separate rounded
+ * "islands" float in the bottom wm_taskbar_h (48) px, which maximized windows
+ * and the desktop leave free:
+ *
+ *   [Start] [running apps]        [Settings Welcome Files]        [label  clock]
+ *
+ *  - Start: the Start button (Start menu).
+ *  - running apps: one icon button per running app (minimized ones too; the
+ *    button goes when the app closes). Click focuses / restores / minimizes,
+ *    right-click opens a menu, the window title shows on hover. Hidden while
+ *    no app runs.
+ *  - the app rectangle, centred: Settings, Welcome, Files - icons only, and
+ *    fixed (it cannot be dragged, its icons cannot be dragged, reordered or
+ *    removed). A click darkens the icon and shows a spinner in it until the
+ *    app's window is open; while the app is open its outline glows (the glow
+ *    grows in, a light keeps running round it, and it fades out when the app
+ *    closes). A window timer drives this and repaints only this island.
+ *  - the clock (click: calendar) with the "Developer version 2.5" label.
+ *
+ * Each island is its own frameless topmost window with rounded corners, so
+ * whatever lies between them stays visible and clickable. The pin data
+ * (shell_pin_*) is kept but no longer shown.
+ */
 #include "wm_internal.h"
 
-window_t *g_taskbar_win;
-static surface_t *tb_bg;         /* blurred + tinted wallpaper strip */
+#define ISLAND_H    40
+#define ISLAND_R    12
+#define ISLAND_GAP  6            /* between islands, and to the screen edges */
+#define START_W     44
+#define PAD         4            /* running apps: padding round the buttons */
+#define BTN_W       36
+#define BTN_MIN_W   28
+#define BTN_GAP     4
+#define BTN_ICON    24
+#define MAX_GROUPS  32
+#define NDOCK       3            /* the app rectangle */
+#define SLOT_W      40
+#define SLOT_H      32
+#define SLOT_GAP    8
+#define SLOT_R      9
+#define DOCK_PAD    8
+#define DOCK_ICON   28
+#define HALO        5            /* the glow reaches this far outside a slot */
+#define CLOCK_TXT_W 80
+#define FRAME_MS    33           /* animation frame interval */
+#define DARKEN_MS   140          /* the icon darkens, then the app starts */
+#define GLOW_IN_MS  520
+#define GLOW_OUT_MS 420
+#define LIGHT_MS    2200         /* one trip of the light round the outline */
+#define SPIN_MS     850          /* one turn of the spinner */
+#define LAUNCH_TIMEOUT_MS 8000
 
-#define START_W 48
-#define BTN_MAXW 200
-#define CLOCK_W 96
-#define TRAY_W 34
-#define SHOWDESK_W 8
-
-#define PIN_W 40
-#define MAX_PINNED 16
-#define HIT_PIN(i) (-10 - (i))     /* hit codes of pinned app buttons */
-
-typedef struct { window_t *win; rect_t r; } tbtn_t;
-static tbtn_t btns[64];
-static int nbtns;
-typedef struct { const app_desc_t *app; rect_t r; } tpin_t;
-static tpin_t pinbtns[MAX_PINNED];
-static int npinbtns;
-static int hover_btn = -1;       /* -1 none, -2 start, -3 clock, -4 sound, -5 show desktop, >=0 task, <=-10 pin */
-static int pressed_btn = -1000;
+enum { BAR_START, BAR_APPS, BAR_DOCK, BAR_CLOCK, NBARS };
+static window_t *bars[NBARS];
+static bool bars_hidden;          /* a fullscreen window is active */
+static bool apps_shown;           /* the running-apps island has buttons */
+static surface_t *tb_bg;          /* blurred + tinted wallpaper strip behind the islands */
+static bool hover_start, hover_clock;
+static int hover_btn = -1, hover_slot = -1;
 static int last_minute = -1;
 
 /* box blur of a strip (horizontal + vertical passes) */
@@ -61,8 +97,10 @@ static void blur(surface_t *s, int radius) {
     kfree(tmp);
 }
 
+/* The islands show the wallpaper blurred and tinted in the old taskbar colours
+   (white in light mode, dark in dark mode): one strip, each island takes its part. */
 void taskbar_wallpaper_changed(void) {
-    if (!g_taskbar_win) return;
+    if (!bars[BAR_START]) return;
     int w = screen_width(), h = wm_taskbar_h;
     if (!tb_bg || tb_bg->w != w || tb_bg->h != h) {
         surface_destroy(tb_bg);
@@ -82,156 +120,432 @@ void taskbar_wallpaper_changed(void) {
     } else {
         gfx_clear(tb_bg, RGB(30, 30, 40));
     }
-    const theme_t *t = theme_get();
-    gfx_fill_rect(tb_bg, 0, 0, w, h, t->taskbar_bg);
-    gfx_hline(tb_bg, 0, 0, w, t->dark ? RGBA(255, 255, 255, 30) : RGBA(255, 255, 255, 160));
-    gfx_hline(tb_bg, 0, 1, w, t->dark ? RGBA(255, 255, 255, 10) : RGBA(0, 0, 0, 12));
-    win_invalidate(g_taskbar_win);
+    gfx_fill_rect(tb_bg, 0, 0, w, h, theme_get()->taskbar_bg);
+    for (int i = 0; i < NBARS; i++) win_invalidate(bars[i]);
 }
 
-static rect_t start_rect(void) { return rect_make(6, 4, START_W - 4, wm_taskbar_h - 8); }
-static rect_t clock_rect(void) { return rect_make(screen_width() - SHOWDESK_W - CLOCK_W - 4, 4, CLOCK_W, wm_taskbar_h - 8); }
-static rect_t sound_rect(void) { rect_t c = clock_rect(); return rect_make(c.x - TRAY_W - 2, 4, TRAY_W, wm_taskbar_h - 8); }
-static rect_t showdesk_rect(void) { return rect_make(screen_width() - SHOWDESK_W, 0, SHOWDESK_W, wm_taskbar_h); }
-
-static void layout_pins(void) {
-    npinbtns = 0;
-    int n = MIN(shell_pin_count(), MAX_PINNED);
-    for (int i = 0; i < n; i++) {
-        const app_desc_t *a = app_find(shell_pin_get(i));
-        if (!a) continue;
-        pinbtns[npinbtns].app = a;
-        pinbtns[npinbtns].r = rect_make(START_W + 8 + npinbtns * (PIN_W + 2), 4, PIN_W, wm_taskbar_h - 8);
-        npinbtns++;
-    }
-}
-
-static int pins_end(void) { return npinbtns ? START_W + 8 + npinbtns * (PIN_W + 2) + 6 : START_W + 4; }
-
-static void layout_buttons(void) {
-    window_t *list[64];
-    int n = win_list(list, 64);
-    if (n > 64) n = 64;
-    layout_pins();
-    int x0 = pins_end() + 6, x1 = sound_rect().x - 8;
-    int avail = x1 - x0;
-    int bw = n ? MIN(BTN_MAXW, avail / n - 4) : BTN_MAXW;
-    if (bw < 44) bw = 44;
-    nbtns = 0;
-    for (int i = 0; i < n; i++) {
-        int x = x0 + i * (bw + 4);
-        if (x + bw > x1) break;
-        btns[nbtns].win = list[i];
-        btns[nbtns].r = rect_make(x, 4, bw, wm_taskbar_h - 8);
-        nbtns++;
-    }
-}
-
-static void draw_speaker(surface_t *s, int x, int y, uint32_t c, bool on) {
-    point_t p[6] = { { x, y + 5 }, { x + 4, y + 5 }, { x + 9, y + 1 }, { x + 9, y + 15 }, { x + 4, y + 11 }, { x, y + 11 } };
-    gfx_fill_polygon(s, p, 6, c);
-    if (on) {
-        rect_t old = s->clip;
-        surface_set_clip(s, rect_intersect(old, rect_make(x + 11, y - 4, 16, 26)));
-        gfx_circle_aa(s, x + 9, y + 8, 4.5, 1.3, color_alpha(c, 220));
-        gfx_circle_aa(s, x + 9, y + 8, 8, 1.3, color_alpha(c, 160));
-        s->clip = old;
-    } else {
-        gfx_line_aa(s, x + 12, y + 5, x + 18, y + 11, c);
-        gfx_line_aa(s, x + 18, y + 5, x + 12, y + 11, c);
-    }
-}
+/* ---- geometry ------------------------------------------------------------------------ */
+static int island_y(void) { return screen_height() - wm_taskbar_h + (wm_taskbar_h - ISLAND_H) / 2; }
+static int apps_x(void) { return ISLAND_GAP + START_W + ISLAND_GAP; }
+static int dock_w(void) { return 2 * DOCK_PAD + NDOCK * SLOT_W + (NDOCK - 1) * SLOT_GAP; }
+static int dock_x(void) { return (screen_width() - dock_w()) / 2; }
 
 /* "Developer version 2.5" on developer editions (NOVA_EDITION "Developer Preview"), else NULL */
 static const char *developer_label(void) {
     return strstr(NOVA_EDITION, "Developer") ? "Developer version " NOVA_VERSION : NULL;
 }
 
-static void taskbar_paint(window_t *win, const event_t *ev) {
-    (void)ev;
-    const char *dev_label = developer_label();
+static int clock_w(void) {
+    const char *l = developer_label();
+    return 12 + (l ? font_text_width(FONT_UI, l) + 14 : 0) + CLOCK_TXT_W + 10;
+}
+
+static void island_bg(window_t *w) {
+    surface_t *s = win_surface(w);
+    const theme_t *t = theme_get();
+    if (tb_bg) gfx_blit_rect(s, 0, 0, tb_bg, w->frame.x, w->frame.y - (screen_height() - wm_taskbar_h), w->cw, w->ch);
+    else gfx_clear(s, color_alpha(t->taskbar_bg, 255));
+    gfx_rounded_rect(s, 0, 0, w->cw, w->ch, ISLAND_R, t->dark ? RGBA(255, 255, 255, 30) : RGBA(0, 0, 0, 26));
+}
+
+static void set_visible(window_t *w, bool on) {
+    if (!w || w->visible == on) return;
+    wm_invalidate_window(w);
+    w->visible = on;
+    w->need_paint = true;
+    wm_invalidate_window(w);
+}
+
+/* ---- hover title ----------------------------------------------------------------------- */
+static window_t *tip_win;
+static char tip_text[160];
+static rect_t tip_anchor;
+
+static void tip_handler(window_t *w, const event_t *ev) {
+    if (ev->type != EV_PAINT) return;
+    surface_t *s = win_surface(w);
+    const theme_t *t = theme_get();
+    gfx_clear(s, t->menu_bg);
+    gfx_rounded_rect(s, 0, 0, s->w, s->h, 6, color_mix(t->menu_bg, t->window_border, 140));
+    gfx_text_ellipsis(s, 10, (s->h - font_height(FONT_UI)) / 2, s->w - 20, tip_text, t->menu_text, FONT_UI);
+}
+
+static void tip_hide(void) {
+    if (tip_win && win_is_valid(tip_win)) win_close(tip_win);
+    tip_win = NULL;
+    tip_text[0] = 0;
+}
+
+/* show text centred above r (screen coordinates) */
+static void tip_show(const char *text, rect_t r) {
+    if (!text || !*text || bars_hidden) { tip_hide(); return; }
+    if (tip_win && win_is_valid(tip_win) && !strcmp(text, tip_text) && r.x == tip_anchor.x && r.y == tip_anchor.y) return;
+    tip_hide();
+    strlcpy(tip_text, text, sizeof tip_text);
+    tip_anchor = r;
+    int w = MIN(font_text_width(FONT_UI, tip_text) + 20, 420), h = font_height(FONT_UI) + 10;
+    const app_desc_t *saved = wm_current_app;
+    wm_current_app = NULL;
+    tip_win = wm_create_ex("title", w, h, WIN_FRAMELESS | WIN_NO_TASKBAR, LAYER_POPUP);
+    wm_current_app = saved;
+    if (!tip_win) return;
+    tip_win->radius = 6;
+    win_set_event_handler(tip_win, tip_handler);
+    win_move(tip_win, CLAMP(r.x + r.w / 2 - w / 2, 4, screen_width() - w - 4), r.y - h - 8);
+}
+
+/* ---- running apps ---------------------------------------------------------------------- */
+typedef struct {
+    const app_desc_t *app;      /* NULL: a window without an app - it has its own button */
+    int win_id;                 /* that window (app == NULL) */
+    int key;                    /* the oldest window's id: keeps the order stable */
+    int nwins;
+    window_t *top;              /* topmost window */
+    bool active, all_min;
+} group_t;
+
+static group_t groups[MAX_GROUPS];
+static int ngroups, nshown, btn_w = BTN_W;
+
+static void build_groups(void) {
+    window_t *list[64];
+    int n = MIN(win_list(list, 64), 64);
+    ngroups = 0;
+    for (int i = 0; i < n; i++) {
+        window_t *w = list[i];
+        group_t *g = NULL;
+        for (int k = 0; k < ngroups && !g && w->app; k++)
+            if (groups[k].app == w->app) g = &groups[k];
+        if (!g) {
+            if (ngroups == MAX_GROUPS) continue;
+            g = &groups[ngroups++];
+            *g = (group_t){ .app = w->app, .win_id = w->id, .key = w->id, .all_min = true };
+        }
+        g->nwins++;
+        g->key = MIN(g->key, w->id);
+        g->top = w;                                   /* win_list is bottom to top */
+        if (!w->minimized) {
+            g->all_min = false;
+            if (wm_focused == w || (wm_focused && wm_focused->owner == w)) g->active = true;
+        }
+    }
+    for (int a = 1; a < ngroups; a++)                 /* oldest app first */
+        for (int b = a; b > 0 && groups[b - 1].key > groups[b].key; b--) {
+            group_t t = groups[b];
+            groups[b] = groups[b - 1];
+            groups[b - 1] = t;
+        }
+}
+
+/* buttons shrink when space runs out before the app rectangle */
+static void layout_apps(void) {
+    build_groups();
+    int avail = dock_x() - ISLAND_GAP - apps_x();
+    btn_w = BTN_W;
+    if (ngroups && 2 * PAD + ngroups * (BTN_W + BTN_GAP) - BTN_GAP > avail)
+        btn_w = MAX(BTN_MIN_W, (avail - 2 * PAD + BTN_GAP) / ngroups - BTN_GAP);
+    nshown = ngroups;
+    while (nshown && 2 * PAD + nshown * (btn_w + BTN_GAP) - BTN_GAP > avail) nshown--;
+}
+
+static int apps_w(void) { return nshown ? 2 * PAD + nshown * (btn_w + BTN_GAP) - BTN_GAP : 2 * PAD + BTN_W; }
+static rect_t btn_rect(int i) { return rect_make(PAD + i * (btn_w + BTN_GAP), PAD, btn_w, ISLAND_H - 2 * PAD); }
+
+static int btn_at(int x, int y) {
+    for (int i = 0; i < nshown; i++)
+        if (rect_contains(btn_rect(i), x, y)) return i;
+    return -1;
+}
+
+/* the windows of a button (an app's, or the one window), bottom to top */
+static int group_windows(const app_desc_t *app, int win_id, window_t **out, int max) {
+    window_t *list[64];
+    int n = MIN(win_list(list, 64), 64), k = 0;
+    for (int i = 0; i < n && k < max; i++)
+        if (app ? list[i]->app == app : list[i]->id == win_id) out[k++] = list[i];
+    return k;
+}
+
+static void group_title(const group_t *g, char *buf, size_t n) {
+    if (g->app && g->nwins > 1) snprintf(buf, n, "%s (%d windows)", g->app->name, g->nwins);
+    else strlcpy(buf, g->top->title[0] ? g->top->title : g->app ? g->app->name : "Window", n);
+}
+
+/* like the old window buttons: the active app minimizes, any other comes to the front */
+static void group_click(const group_t *g) {
+    window_t *ws[64];
+    int n = group_windows(g->app, g->win_id, ws, 64);
+    for (int i = 0; i < n; i++) {
+        if (g->active) win_minimize(ws[i]);
+        else win_focus(ws[i]);                       /* restores; the topmost ends up focused */
+    }
+}
+
+static const app_desc_t *menu_app;
+static int menu_win_id;
+
+static void apps_menu_cb(int item, void *ctx) {
+    (void)ctx;
+    window_t *ws[64];
+    int n = group_windows(menu_app, menu_win_id, ws, 64);
+    if (!n) return;
+    window_t *top = ws[n - 1];
+    for (int i = 0; i < n; i++) {
+        window_t *w = ws[i];
+        if (item == 0) win_focus(w);
+        else if (item == 1) win_minimize(w);
+        else if (item == 4) {
+            if (w->flags & WIN_CONFIRM_CLOSE) { event_t ev = { .type = EV_CLOSE_REQUEST }; wm_send(w, &ev); }
+            else win_close(w);
+        }
+    }
+    if (item == 2) {
+        if (top->maximized) win_restore(top);
+        else { win_focus(top); win_maximize(top); }
+    }
+}
+
+static void apps_menu(int i) {
+    const group_t *g = &groups[i];
+    window_t *ws[64];
+    int n = group_windows(g->app, g->win_id, ws, 64);
+    if (!n) return;
+    menu_app = g->app;
+    menu_win_id = g->win_id;
+    char items[96];
+    snprintf(items, sizeof items, "Restore|Minimize|%s|-|%s", ws[n - 1]->maximized ? "Restore size" : "Maximize",
+             n > 1 ? "Close all windows" : "Close");
+    ui_popup_menu(bars[BAR_APPS], btn_rect(i).x, -4, items, apps_menu_cb, NULL);
+}
+
+static void paint_apps(window_t *win) {
+    island_bg(win);
     surface_t *s = win_surface(win);
     const theme_t *t = theme_get();
-    if (tb_bg) gfx_blit(s, 0, 0, tb_bg);
-    layout_buttons();
-
-    /* start button */
-    rect_t sr = start_rect();
-    if (hover_btn == -2 || startmenu_is_open())
-        gfx_fill_rounded_rect(s, sr.x, sr.y, sr.w, sr.h, 6, startmenu_is_open() ? t->taskbar_active : t->taskbar_hover);
-    ui_draw_logo(s, sr.x + (sr.w - 28) / 2, sr.y + (sr.h - 28) / 2, 28);
-
-    /* pinned apps */
-    for (int i = 0; i < npinbtns; i++) {
-        rect_t r = pinbtns[i].r;
-        if (hover_btn == HIT_PIN(i)) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 6, t->taskbar_hover);
-        app_draw_icon(s, pinbtns[i].app, r.x + (r.w - 24) / 2, r.y + (r.h - 24) / 2 - 1, 24);
-        if (app_window_count(pinbtns[i].app) > 0)
-            gfx_fill_circle_aa(s, r.x + r.w / 2.0, r.y + r.h - 2.5, 2, color_alpha(t->taskbar_text, 150));
-    }
-    if (npinbtns) gfx_vline(s, pins_end() - 2, 12, wm_taskbar_h - 24, color_alpha(t->taskbar_text, 50));
-
-    /* window buttons */
-    for (int i = 0; i < nbtns; i++) {
-        window_t *w = btns[i].win;
-        rect_t r = btns[i].r;
-        bool active = w == wm_focused && !w->minimized;
-        if (active) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 6, t->taskbar_active);
-        else if (hover_btn == i) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 6, t->taskbar_hover);
-        int ix = r.x + 8;
-        if (w->app) app_draw_icon(s, w->app, ix, r.y + (r.h - 22) / 2, 22);
-        else default_icon(s, ix, r.y + (r.h - 22) / 2, 22, w->title);
-        if (r.w > 60) {
-            uint32_t tc = w->minimized ? color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 100) : t->taskbar_text;
-            gfx_text_ellipsis(s, ix + 30, r.y + (r.h - font_height(FONT_UI)) / 2, r.w - 46, w->title, tc, FONT_UI);
-        }
-        /* indicator bar */
-        int iw = active ? 18 : 8;
+    for (int i = 0; i < nshown; i++) {
+        const group_t *g = &groups[i];
+        rect_t r = btn_rect(i);
+        if (r.x + r.w > s->w) break;
+        if (g->active) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 8, t->taskbar_active);
+        else if (hover_btn == i) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, 8, t->taskbar_hover);
+        int ix = r.x + (r.w - BTN_ICON) / 2, iy = r.y + (r.h - BTN_ICON) / 2 - 1;
+        const surface_t *img = g->app ? app_icon(g->app, BTN_ICON) : NULL;
+        if (img) gfx_blit_alpha(s, ix, iy, img, g->all_min ? 130 : 255);   /* minimized: faded */
+        else default_icon(s, ix, iy, BTN_ICON, g->top->title);
+        int iw = g->active ? 14 : 6;
         gfx_fill_rounded_rect(s, r.x + (r.w - iw) / 2, r.y + r.h - 3, iw, 3, 1,
-                              active ? t->accent : color_alpha(t->taskbar_text, 110));
+                              g->active ? t->accent : color_alpha(t->taskbar_text, 110));
     }
+}
 
-    /* sound toggle */
-    rect_t so = sound_rect();
-    if (hover_btn == -4) gfx_fill_rounded_rect(s, so.x, so.y, so.w, so.h, 6, t->taskbar_hover);
-    draw_speaker(s, so.x + 8, so.y + (so.h - 17) / 2, t->taskbar_text, sys_sound_enabled());
+/* ---- the app rectangle ----------------------------------------------------------------- */
+static const char *const dock_names[NDOCK] = { "Settings", "Welcome", "Files" };
 
-    /* clock */
-    rect_t cr = clock_rect();
-    if (hover_btn == -3) gfx_fill_rounded_rect(s, cr.x, cr.y, cr.w, cr.h, 6, t->taskbar_hover);
+typedef struct {
+    const app_desc_t *app;
+    bool launching;             /* dark icon + spinner */
+    bool launched;              /* app_launch() done, waiting for its window */
+    uint32_t t0;                /* when it was clicked */
+    int min_id;                 /* the new window has a higher id */
+    double glow;                /* 0..1: grows while the app is open, shrinks once it closed */
+} dslot_t;
+
+static dslot_t dock[NDOCK];
+static int dock_timer;
+static uint32_t dock_tick;      /* g_ticks of the last animation step */
+/* per pixel of a slot's glow box: distance to the outline, position round it (0..1) */
+#define RING_W (SLOT_W + 2 * HALO)
+#define RING_H (SLOT_H + 2 * HALO)
+static float ring_d[RING_W * RING_H], ring_a[RING_W * RING_H];
+
+static void ring_init(void) {
+    double cx = RING_W / 2.0, cy = RING_H / 2.0, hx = SLOT_W / 2.0 - SLOT_R, hy = SLOT_H / 2.0 - SLOT_R;
+    for (int y = 0; y < RING_H; y++)
+        for (int x = 0; x < RING_W; x++) {
+            double px = fabs(x + 0.5 - cx) - hx, py = fabs(y + 0.5 - cy) - hy;
+            double ox = MAX(px, 0.0), oy = MAX(py, 0.0);
+            double a = atan2(y + 0.5 - cy, x + 0.5 - cx) / (2 * M_PI);
+            ring_d[y * RING_W + x] = (float)(sqrt(ox * ox + oy * oy) + MIN(MAX(px, py), 0.0) - SLOT_R);
+            ring_a[y * RING_W + x] = (float)(a < 0 ? a + 1 : a);
+        }
+}
+
+static rect_t slot_rect(int i) { return rect_make(DOCK_PAD + i * (SLOT_W + SLOT_GAP), (ISLAND_H - SLOT_H) / 2, SLOT_W, SLOT_H); }
+
+static int slot_at(int x, int y) {
+    for (int i = 0; i < NDOCK; i++)
+        if (rect_contains(slot_rect(i), x, y)) return i;
+    return -1;
+}
+
+/* Has the app a window (with an id above min_id)? opened: also fully faded in. */
+static bool app_window(const app_desc_t *a, int min_id, bool opened) {
+    if (!a) return false;
+    for (window_t *w = wm_bottom; w; w = w->above) {
+        if (w->app != a || w->closing || w->layer != LAYER_NORMAL || w->id <= min_id) continue;
+        if ((w->flags & (WIN_DIALOG | WIN_NO_TASKBAR)) || (!w->visible && !w->minimized)) continue;
+        if (opened && (w->minimized || w->opacity < 255)) continue;
+        return true;
+    }
+    return false;
+}
+
+static void dock_animate(void) {
+    if (!bars[BAR_DOCK]) return;
+    if (!dock_timer) {
+        dock_tick = g_ticks;
+        dock_timer = win_set_timer(bars[BAR_DOCK], FRAME_MS);
+    }
+    win_invalidate(bars[BAR_DOCK]);
+}
+
+static void dock_launch(dslot_t *d) {
+    d->launched = true;
+    int maxid = 0;
+    for (window_t *w = wm_bottom; w; w = w->above) maxid = MAX(maxid, w->id);
+    d->min_id = maxid;
+    app_launch(d->app, NULL);
+    if (!app_window(d->app, d->min_id, false)) d->launching = false;   /* no new window: the spinner ends at once */
+}
+
+static void dock_click(int i) {
+    dslot_t *d = &dock[i];
+    if (!d->app || d->launching) return;
+    /* launching would only focus the open window: do that, no spinner */
+    if ((d->app->flags & APP_SINGLE) && app_window(d->app, 0, false)) { app_launch(d->app, NULL); return; }
+    d->launching = true;
+    d->launched = false;
+    d->t0 = g_ticks;
+    dock_animate();
+}
+
+/* advance the animations; true while any still runs */
+static bool dock_step(void) {
+    uint32_t now = g_ticks;
+    double dt = MIN((double)(now - dock_tick), 50.0);   /* smooth after a long frame (an app starting) */
+    dock_tick = now;
+    bool anim = false;
+    for (int i = 0; i < NDOCK; i++) {
+        dslot_t *d = &dock[i];
+        if (!d->app) continue;
+        if (d->launching) {
+            if (!d->launched) { if (now - d->t0 >= DARKEN_MS) dock_launch(d); }
+            else if (app_window(d->app, d->min_id, true) || now - d->t0 > LAUNCH_TIMEOUT_MS) d->launching = false;
+        }
+        if (!d->launching) {
+            if (app_window(d->app, 0, false)) d->glow = MIN(1.0, d->glow + dt / GLOW_IN_MS);
+            else d->glow = MAX(0.0, d->glow - dt / GLOW_OUT_MS);
+        }
+        if (d->launching || d->glow > 0) anim = true;
+    }
+    return anim;
+}
+
+/* start the frame timer when an app of the rectangle opened or closed */
+static void dock_check(void) {
+    for (int i = 0; i < NDOCK; i++)
+        if (dock[i].launching || dock[i].glow > 0 || app_window(dock[i].app, 0, false)) { dock_animate(); return; }
+}
+
+/* the glowing outline: a soft accent halo and a brighter light travelling round it */
+static void draw_glow(surface_t *s, rect_t r, double level, uint32_t now, int idx) {
+    uint32_t accent = theme_get()->accent;
+    double e = level * level * (3 - 2 * level);                     /* smoothstep */
+    double head = fmod(now / (double)LIGHT_MS + idx * 0.31, 1.0);
+    double reach = 1.0 + (HALO - 1) * e;                            /* the halo grows in, shrinks out */
+    for (int y = 0; y < RING_H; y++) {
+        int sy = r.y - HALO + y;
+        if (sy < 0 || sy >= s->h) continue;
+        for (int x = 0; x < RING_W; x++) {
+            double d = ring_d[y * RING_W + x];
+            if (d < -2.5 || d > reach) continue;
+            double behind = head - ring_a[y * RING_W + x];
+            if (behind < 0) behind += 1;
+            double light = MIN(1.0, exp(-behind * 6.0) + exp(-(1 - behind) * 40.0));
+            double core = CLAMP(1.4 - fabs(d + 0.3), 0.0, 1.0);
+            double halo = d > 0 ? (1 - d / reach) * (1 - d / reach) : 0;
+            double a = e * (core * (0.5 + 0.5 * light) + halo * (0.25 + 0.6 * light));
+            if (a < 0.01) continue;
+            uint32_t c = color_mix(accent, COLOR_WHITE, (int)(light * 170));
+            gfx_pixel(s, r.x - HALO + x, sy, color_alpha(c, (int)(MIN(a, 1.0) * 255)));
+        }
+    }
+}
+
+/* a white arc with a fading tail, turning */
+static void draw_spinner(surface_t *s, double cx, double cy, double rad, double th, double head, int alpha) {
+    int x0 = (int)(cx - rad - th) - 1, x1 = (int)(cx + rad + th) + 1, y0 = (int)(cy - rad - th) - 1, y1 = (int)(cy + rad + th) + 1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            double dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+            double cov = th / 2 + 0.5 - fabs(sqrt(dx * dx + dy * dy) - rad);
+            if (cov <= 0) continue;
+            double a = atan2(dy, dx) / (2 * M_PI);
+            double behind = head - a;
+            behind -= floor(behind);
+            if (behind > 0.78) continue;                           /* the gap */
+            double f = 1 - behind / 0.78;
+            gfx_pixel(s, x, y, RGBA(255, 255, 255, (int)(alpha * MIN(cov, 1.0) * (0.2 + 0.8 * f))));
+        }
+}
+
+static void paint_dock(window_t *win) {
+    island_bg(win);
+    surface_t *s = win_surface(win);
+    const theme_t *t = theme_get();
+    uint32_t now = g_ticks;
+    for (int i = 0; i < NDOCK; i++) {
+        dslot_t *d = &dock[i];
+        rect_t r = slot_rect(i);
+        if (d->glow > 0) draw_glow(s, r, d->glow, now, i);
+        if (hover_slot == i && !d->launching) gfx_fill_rounded_rect(s, r.x, r.y, r.w, r.h, SLOT_R, t->taskbar_hover);
+        if (!d->app) continue;
+        int ix = r.x + (r.w - DOCK_ICON) / 2, iy = r.y + (r.h - DOCK_ICON) / 2;
+        const surface_t *img = app_icon(d->app, DOCK_ICON);
+        if (img) gfx_blit_alpha(s, ix, iy, img, 255);
+        if (d->launching) {
+            /* the icon turns dark (its own shape), a spinner appears inside it */
+            double p = MIN(1.0, (now - d->t0) / (double)DARKEN_MS);
+            int dark = (int)(165 * p);
+            for (int y = 0; img && y < img->h; y++)
+                for (int x = 0; x < img->w; x++) {
+                    int a = COLOR_A(surface_row(img, y)[x]) * dark / 255;
+                    if (a) gfx_pixel(s, ix + x, iy + y, RGBA(0, 0, 0, a));
+                }
+            draw_spinner(s, r.x + r.w / 2.0, r.y + r.h / 2.0, 8.5, 2.6, fmod(now / (double)SPIN_MS, 1.0), (int)(255 * p));
+        }
+    }
+}
+
+/* ---- Start button and clock -------------------------------------------------------------- */
+static void paint_start(window_t *win) {
+    island_bg(win);
+    surface_t *s = win_surface(win);
+    const theme_t *t = theme_get();
+    bool open = startmenu_is_open();
+    if (hover_start || open) gfx_fill_rounded_rect(s, 3, 3, s->w - 6, s->h - 6, 9, open ? t->taskbar_active : t->taskbar_hover);
+    ui_draw_logo(s, (s->w - 28) / 2, (s->h - 28) / 2, 28);
+}
+
+static void paint_clock(window_t *win) {
+    island_bg(win);
+    surface_t *s = win_surface(win);
+    const theme_t *t = theme_get();
+    if (hover_clock) gfx_fill_rounded_rect(s, 3, 3, s->w - 6, s->h - 6, 9, t->taskbar_hover);
     datetime_t dt;
     sys_datetime(&dt);
     last_minute = dt.minute;
     char tbuf[16], dbuf[32];
     snprintf(tbuf, sizeof tbuf, "%02d:%02d", dt.hour, dt.minute);
     snprintf(dbuf, sizeof dbuf, "%d %.3s %d", dt.day, sys_month_name(dt.month), dt.year);
-    int fh = font_height(FONT_UI);
-    /* with the developer label below them, time and date move up a little */
-    int ty = dev_label ? 1 : cr.y + cr.h / 2 - fh + 1, dy = dev_label ? 15 : cr.y + cr.h / 2 + 1;
-    gfx_text_aligned(s, rect_make(cr.x, ty, cr.w - 8, fh), tbuf, t->taskbar_text, FONT_UI_BOLD, ALIGN_RIGHT);
-    gfx_text_aligned(s, rect_make(cr.x, dy, cr.w - 8, fh), dbuf, color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 60), FONT_UI, ALIGN_RIGHT);
-
-    /* show desktop sliver */
-    rect_t sd = showdesk_rect();
-    gfx_vline(s, sd.x, 10, wm_taskbar_h - 20, color_alpha(t->taskbar_text, 60));
-    if (hover_btn == -5) gfx_fill_rect(s, sd.x + 1, 0, sd.w - 1, sd.h, t->taskbar_hover);
-
-    /* developer editions: "Developer version 2.5" at the bottom right, drawn last so
-       it is always in front (also over the clock); black, white in dark mode */
-    if (dev_label) {
-        int lw = font_text_width(FONT_UI, dev_label), lh = font_height(FONT_UI);
-        gfx_text(s, sd.x - 12 - lw, wm_taskbar_h - lh, dev_label, t->dark ? COLOR_WHITE : COLOR_BLACK, FONT_UI);
-    }
-}
-
-static int hit(int x, int y) {
-    if (rect_contains(start_rect(), x, y) || (x < START_W + 4)) return -2;
-    if (rect_contains(clock_rect(), x, y)) return -3;
-    if (rect_contains(sound_rect(), x, y)) return -4;
-    if (rect_contains(showdesk_rect(), x, y)) return -5;
-    for (int i = 0; i < npinbtns; i++) if (rect_contains(pinbtns[i].r, x, y)) return HIT_PIN(i);
-    for (int i = 0; i < nbtns; i++) if (rect_contains(btns[i].r, x, y)) return i;
-    return -1;
+    int fh = font_height(FONT_UI), tx = s->w - 10 - CLOCK_TXT_W;
+    gfx_text_aligned(s, rect_make(tx, s->h / 2 - fh + 1, CLOCK_TXT_W, fh), tbuf, t->taskbar_text, FONT_UI_BOLD, ALIGN_RIGHT);
+    gfx_text_aligned(s, rect_make(tx, s->h / 2 + 1, CLOCK_TXT_W, fh), dbuf,
+                     color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 60), FONT_UI, ALIGN_RIGHT);
+    /* developer editions: "Developer version 2.5", drawn last so it is always in
+       front of the time; black, white in dark mode */
+    const char *label = developer_label();
+    if (label) gfx_text(s, 12, (s->h - fh) / 2, label, t->dark ? COLOR_WHITE : COLOR_BLACK, FONT_UI);
 }
 
 /* ---- calendar popup ------------------------------------------------------------------ */
@@ -324,119 +638,135 @@ static void show_calendar(void) {
 }
 
 /* ---- events -------------------------------------------------------------------------- */
-static void task_menu_cb(int item, void *ctx) {
-    window_t *w = win_find_by_id((int)(intptr_t)ctx);
-    if (!w) return;
-    if (item == 6 && w->app) { shell_set_pinned(w->app->name, !shell_is_pinned(w->app->name)); return; }
-    switch (item) {
-    case 0: win_focus(w); break;
-    case 1: win_minimize(w); break;
-    case 2: if (w->maximized) win_restore(w); else { win_focus(w); win_maximize(w); } break;
-    case 4: if (w->flags & WIN_CONFIRM_CLOSE) { event_t ev = { .type = EV_CLOSE_REQUEST }; wm_send(w, &ev); } else win_close(w); break;
-    default: break;
+static void update_tip(void) {
+    char buf[160];
+    if (hover_btn >= 0 && hover_btn < nshown) {
+        rect_t r = btn_rect(hover_btn);
+        group_title(&groups[hover_btn], buf, sizeof buf);
+        tip_show(buf, rect_make(bars[BAR_APPS]->frame.x + r.x, bars[BAR_APPS]->frame.y, r.w, r.h));
+    } else if (hover_slot >= 0 && dock[hover_slot].app) {
+        rect_t r = slot_rect(hover_slot);
+        tip_show(dock[hover_slot].app->name, rect_make(bars[BAR_DOCK]->frame.x + r.x, bars[BAR_DOCK]->frame.y, r.w, r.h));
+    } else {
+        tip_hide();
     }
 }
 
-/* topmost normal window of an app (not its dialogs), or NULL */
-static window_t *app_top_window(const app_desc_t *a) {
-    for (window_t *w = wm_top; w; w = w->below)
-        if (w->app == a && !w->closing && w->layer == LAYER_NORMAL && !w->owner && w->visible) return w;
-    return NULL;
+static void set_hover(int b, int x, int y) {
+    bool hs = b == BAR_START, hc = b == BAR_CLOCK;
+    int hb = -1, hsl = -1;
+    if (b == BAR_APPS) { layout_apps(); hb = btn_at(x, y); }
+    if (b == BAR_DOCK) hsl = slot_at(x, y);
+    if (hs != hover_start) { hover_start = hs; win_invalidate(bars[BAR_START]); }
+    if (hc != hover_clock) { hover_clock = hc; win_invalidate(bars[BAR_CLOCK]); }
+    if (hb != hover_btn) { hover_btn = hb; win_invalidate(bars[BAR_APPS]); }
+    if (hsl != hover_slot) { hover_slot = hsl; win_invalidate(bars[BAR_DOCK]); }
+    update_tip();
 }
 
-static void pin_click(const app_desc_t *a) {
-    window_t *w = app_top_window(a);
-    if (!w) { app_launch(a, NULL); return; }
-    if (w == wm_focused && !w->minimized) win_minimize(w);
-    else win_focus(w);
-}
-
-static const app_desc_t *pin_menu_app;
-static void pin_menu_cb(int item, void *ctx) {
-    (void)ctx;
-    const app_desc_t *a = pin_menu_app;
-    if (!a) return;
-    if (item == 0) app_launch(a, NULL);
-    else if (item == 2) shell_set_pinned(a->name, false);
-}
-
-static void show_desktop(void) {
-    bool any = false;
-    for (window_t *w = wm_bottom; w; w = w->above)
-        if (w->layer == LAYER_NORMAL && !w->closing && w->visible && !w->minimized) { any = true; break; }
-    for (window_t *w = wm_bottom; w; w = w->above) {
-        if (w->layer != LAYER_NORMAL || w->closing || !w->visible) continue;
-        if (any) win_minimize(w); else if (w->minimized) win_restore(w);
+static void bar_click(int b, const event_t *ev) {
+    if (b == BAR_START) {
+        if (ev->button == MOUSE_LEFT && !startmenu_just_closed()) startmenu_toggle();
+    } else if (b == BAR_CLOCK) {
+        if (ev->button == MOUSE_LEFT) show_calendar();
+    } else if (b == BAR_DOCK) {
+        int i = slot_at(ev->x, ev->y);
+        if (i >= 0 && ev->button == MOUSE_LEFT) dock_click(i);   /* fixed: no drag, no menu */
+    } else {
+        layout_apps();
+        int i = btn_at(ev->x, ev->y);
+        if (i < 0) return;
+        if (ev->button == MOUSE_LEFT) group_click(&groups[i]);
+        else if (ev->button == MOUSE_RIGHT) apps_menu(i);
     }
 }
 
-static void taskbar_handler(window_t *win, const event_t *ev) {
+static void bar_handler(window_t *win, const event_t *ev) {
+    int b = -1;
+    for (int i = 0; i < NBARS; i++)
+        if (bars[i] == win) b = i;
+    if (b < 0) return;
     switch (ev->type) {
     case EV_PAINT:
-        taskbar_paint(win, ev);
+        if (b == BAR_START) paint_start(win);
+        else if (b == BAR_APPS) paint_apps(win);
+        else if (b == BAR_DOCK) paint_dock(win);
+        else paint_clock(win);
         break;
-    case EV_MOUSE_MOVE: {
-        int h = hit(ev->x, ev->y);
-        if (h != hover_btn) { hover_btn = h; win_invalidate(win); }
+    case EV_MOUSE_MOVE:
+        set_hover(b, ev->x, ev->y);
         break;
-    }
     case EV_MOUSE_LEAVE:
-        if (hover_btn != -1) { hover_btn = -1; win_invalidate(win); }
+        set_hover(-1, 0, 0);
         break;
-    case EV_MOUSE_DOWN: {
-        int h = hit(ev->x, ev->y);
-        pressed_btn = h;
-        if (ev->button == MOUSE_RIGHT && h >= 0 && h < nbtns) {
-            window_t *w = btns[h].win;
-            rect_t r = btns[h].r;
-            char items[160];
-            snprintf(items, sizeof items, "%s%s", w->maximized ? "Restore|Minimize|Restore size|-|Close" : "Restore|Minimize|Maximize|-|Close",
-                     !w->app || (w->app->flags & APP_HIDDEN) ? "" : shell_is_pinned(w->app->name) ? "|-|Unpin from taskbar" : "|-|Pin to taskbar");
-            ui_popup_menu(win, r.x, -4, items, task_menu_cb, (void *)(intptr_t)w->id);
-            break;
-        }
-        if (ev->button == MOUSE_RIGHT && h <= HIT_PIN(0) && h > HIT_PIN(npinbtns)) {
-            int i = HIT_PIN(0) - h;
-            pin_menu_app = pinbtns[i].app;
-            ui_popup_menu(win, pinbtns[i].r.x, -4, "Open new window|-|Unpin from taskbar", pin_menu_cb, NULL);
-            break;
-        }
-        if (ev->button != MOUSE_LEFT) break;
-        if (h == -2) { if (!startmenu_just_closed()) startmenu_toggle(); }
-        else if (h == -3) show_calendar();
-        else if (h == -4) { sys_set_sound_enabled(!sys_sound_enabled()); if (sys_sound_enabled()) sys_beep(880, 40); win_invalidate(win); }
-        else if (h == -5) show_desktop();
-        else if (h <= HIT_PIN(0) && h > HIT_PIN(npinbtns)) pin_click(pinbtns[HIT_PIN(0) - h].app);
-        else if (h >= 0 && h < nbtns) {
-            window_t *w = btns[h].win;
-            if (w == wm_focused && !w->minimized) win_minimize(w);
-            else win_focus(w);
+    case EV_MOUSE_DOWN:
+        tip_hide();
+        bar_click(b, ev);
+        break;
+    case EV_TIMER:
+        if (b == BAR_DOCK && ev->timer_id == dock_timer) {
+            bool anim = dock_step();
+            win_invalidate(win);
+            if (!anim) { win_kill_timer(win, dock_timer); dock_timer = 0; }
+        } else if (b == BAR_CLOCK) {
+            datetime_t dt;
+            sys_datetime(&dt);
+            if (dt.minute != last_minute) win_invalidate(win);
         }
         break;
-    }
-    case EV_TIMER: {
-        datetime_t dt;
-        sys_datetime(&dt);
-        if (dt.minute != last_minute) win_invalidate(win);
-        break;
-    }
     default:
         break;
     }
 }
 
+bool taskbar_owns(const window_t *w) {
+    if (!w) return false;
+    if (w == tip_win) return true;
+    for (int i = 0; i < NBARS; i++)
+        if (bars[i] == w) return true;
+    return false;
+}
+
+void taskbar_set_hidden(bool hide) {
+    if (!bars[BAR_START] || bars_hidden == hide) return;
+    bars_hidden = hide;
+    for (int i = 0; i < NBARS; i++) set_visible(bars[i], !hide && (i != BAR_APPS || apps_shown));
+    if (hide) tip_hide();
+}
+
+/* windows changed (opened, closed, focused, renamed, ...) */
 void taskbar_refresh(void) {
-    if (g_taskbar_win) win_invalidate(g_taskbar_win);
+    if (!bars[BAR_START]) return;
+    layout_apps();
+    window_t *aw = bars[BAR_APPS];
+    if (nshown && aw->cw != apps_w()) win_resize(aw, apps_w(), ISLAND_H);
+    win_move(aw, apps_x(), island_y());
+    apps_shown = nshown > 0;
+    set_visible(aw, apps_shown && !bars_hidden);
+    if (hover_btn >= nshown) hover_btn = -1;
+    dock_check();
+    for (int i = 0; i < NBARS; i++) win_invalidate(bars[i]);
+    if (tip_win) update_tip();      /* the hovered app's title may have changed */
 }
 
 void taskbar_init(void) {
+    static const char *const titles[NBARS] = { "Start", "Running apps", "Apps", "Clock" };
+    int xs[NBARS] = { ISLAND_GAP, apps_x(), dock_x(), screen_width() - ISLAND_GAP - clock_w() };
+    int ws[NBARS] = { START_W, 2 * PAD + BTN_W, dock_w(), clock_w() };
     const app_desc_t *saved = wm_current_app;
     wm_current_app = NULL;
-    g_taskbar_win = wm_create_ex("Taskbar", screen_width(), wm_taskbar_h, WIN_FRAMELESS | WIN_NO_TASKBAR | WIN_NO_SHADOW, LAYER_TOPMOST);
+    for (int i = 0; i < NBARS; i++) {
+        bars[i] = wm_create_ex(titles[i], ws[i], ISLAND_H,
+                               WIN_FRAMELESS | WIN_NO_TASKBAR | WIN_NO_SHADOW | (i == BAR_APPS ? WIN_HIDDEN : 0), LAYER_TOPMOST);
+        if (!bars[i]) kpanic("cannot create the bottom bar");
+        bars[i]->radius = ISLAND_R;
+        win_move(bars[i], xs[i], island_y());
+        win_set_event_handler(bars[i], bar_handler);
+    }
     wm_current_app = saved;
-    if (!g_taskbar_win) kpanic("cannot create taskbar");
-    win_move(g_taskbar_win, 0, screen_height() - wm_taskbar_h);
-    win_set_event_handler(g_taskbar_win, taskbar_handler);
-    win_set_timer(g_taskbar_win, 1000);
+    for (int i = 0; i < NDOCK; i++) dock[i].app = app_find(dock_names[i]);
+    ring_init();
+    win_set_timer(bars[BAR_CLOCK], 1000);
     taskbar_wallpaper_changed();
+    taskbar_refresh();
 }

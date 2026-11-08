@@ -71,7 +71,7 @@ static void build_rows(void) {
             const app_desc_t *a = NULL;
             if (!strncmp(it, "app:", 4)) {
                 a = app_find(it + 4);
-                if (!a || (a->flags & APP_HIDDEN)) continue;
+                if (!a || (a->flags & APP_HIDDEN) || app_in_games(a)) continue;   /* games: only inside Games */
             }
             if (!shown) add_row(ROW_HEADER, "Recent", NULL, -1, &y);
             strlcpy(row_paths[npaths], it, VFS_PATH_MAX);
@@ -89,7 +89,7 @@ static void build_rows(void) {
             bool header_added = false;
             for (int i = 0; i < app_count() && nrows < 250; i++) {
                 const app_desc_t *a = app_get(i);
-                if (a->flags & APP_HIDDEN) continue;
+                if ((a->flags & APP_HIDDEN) || app_in_games(a)) continue;
                 const char *ac = a->category ? a->category : "Other";
                 if (strcasecmp(ac, cats[c])) continue;
                 if (!header_added) { add_row(ROW_HEADER, cats[c], NULL, -1, &y); header_added = true; }
@@ -103,7 +103,7 @@ static void build_rows(void) {
         int nf = 0;
         for (int i = 0; i < app_count() && nf < 200; i++) {
             const app_desc_t *a = app_get(i);
-            if (a->flags & APP_HIDDEN) continue;
+            if ((a->flags & APP_HIDDEN) || app_in_games(a)) continue;
             int rk = app_rank(a);
             if (rk < 0) continue;
             int j = nf++;
@@ -340,7 +340,6 @@ static void ctx_cb(int item, void *ctx) {
     const app_desc_t *a = ctx_app;
     if (a) {
         if (item == 0) { startmenu_close(); app_launch(a, NULL); }
-        else if (item == 1) shell_set_pinned(a->name, !shell_is_pinned(a->name));
         return;
     }
     if (!ctx_path[0]) return;
@@ -364,7 +363,7 @@ static void show_ctx(window_t *w, int r, int x, int y) {
     if (rows[r].pidx >= 0 && !rows[r].app) strlcpy(ctx_path, row_paths[rows[r].pidx], sizeof ctx_path);
     rect_t c = win_client_rect(w);
     if (ctx_app)
-        ui_popup_menu_nested(w, c.x + x, c.y + y, shell_is_pinned(ctx_app->name) ? "Open|Unpin from taskbar" : "Open|Pin to taskbar", ctx_cb, NULL);
+        ui_popup_menu_nested(w, c.x + x, c.y + y, "Open", ctx_cb, NULL);
     else
         ui_popup_menu_nested(w, c.x + x, c.y + y, "Open|Open With...|Open file location|-|Properties", ctx_cb, NULL);
 }
@@ -439,7 +438,7 @@ static void sm_handler(window_t *win, const event_t *ev) {
     case EV_CLOSE:
         closed_serial = wm_click_serial;
         sm_win = NULL;
-        if (g_taskbar_win) win_invalidate(g_taskbar_win);
+        taskbar_refresh();      /* the Start button's highlight */
         break;
     default:
         break;
@@ -463,7 +462,7 @@ void startmenu_open(void) {
     sm_win->radius = 10;
     win_set_event_handler(sm_win, sm_handler);
     win_move(sm_win, 8, screen_height() - wm_taskbar_h - h - 8);
-    if (g_taskbar_win) win_invalidate(g_taskbar_win);
+    taskbar_refresh();
 }
 
 void startmenu_close(void) {

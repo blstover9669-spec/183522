@@ -104,11 +104,14 @@ rect_t    cursor_rect(int x, int y, int shape);
 extern int wm_cursor_shape;
 
 /* desktop / shell */
-extern window_t *g_desktop_win, *g_taskbar_win;
+extern window_t *g_desktop_win;
 extern surface_t *g_wallpaper;               /* rendered wallpaper, screen size */
 void      theme_render_current_wallpaper(void);
 void      desktop_wallpaper_changed(void);
 void      taskbar_wallpaper_changed(void);
+/* the bottom islands (taskbar.c): Start, running apps, app rectangle, clock */
+bool      taskbar_owns(const window_t *w);   /* an island or its hover title: never focused */
+void      taskbar_set_hidden(bool hide);     /* hidden while a fullscreen window is active */
 void      startmenu_open(void);
 void      shell_autorun(void);
 bool      startmenu_just_closed(void);
@@ -116,6 +119,7 @@ void      shell_note_launch(const app_desc_t *app, const char *arg);   /* kernel
 
 /* apps */
 void      app_icon_cache_clear(void);
+bool      app_in_games(const app_desc_t *a);   /* a CAT_GAMES app: listed only inside Games */
 void      default_icon(surface_t *s, int x, int y, int size, const char *name);
 
 /* misc */

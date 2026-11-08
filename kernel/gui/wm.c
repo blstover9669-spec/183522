@@ -98,7 +98,7 @@ void wm_invalidate_client_rect(window_t *w, rect_t r) {
 
 int screen_width(void) { return scr_w; }
 int screen_height(void) { return scr_h; }
-int screen_work_height(void) { return scr_h - wm_taskbar_h; }
+int screen_work_height(void) { return scr_h - wm_taskbar_h; }   /* above the bottom islands */
 uint32_t wm_frame_serial(void) { return frame_serial; }
 
 /* ---- rounded corner masks --------------------------------------------------------- */
@@ -513,7 +513,7 @@ static void resize_client(window_t *w, int cw, int ch) {
 /* ---- focus ------------------------------------------------------------------------- */
 static bool focusable(const window_t *w) {
     return w && drawn(w) && (w->layer == LAYER_NORMAL || w->layer == LAYER_DESKTOP ||
-                             (w->layer == LAYER_TOPMOST && w != g_taskbar_win));
+                             (w->layer == LAYER_TOPMOST && !taskbar_owns(w)));
 }
 
 void wm_focus(window_t *w) {
@@ -539,14 +539,10 @@ void wm_focus(window_t *w) {
     wm_taskbar_changed();
 }
 
-/* The taskbar hides while a fullscreen window is active. */
+/* The bottom islands (Start, running apps, app rectangle, clock) hide while a
+   fullscreen window is active. */
 void wm_update_taskbar_visibility(void) {
-    if (!g_taskbar_win) return;
-    bool hide = wm_focused && wm_focused->fullscreen && drawn(wm_focused);
-    if (g_taskbar_win->visible == !hide) return;
-    g_taskbar_win->visible = !hide;
-    g_taskbar_win->need_paint = true;
-    wm_invalidate_window(g_taskbar_win);
+    taskbar_set_hidden(wm_focused && wm_focused->fullscreen && drawn(wm_focused));
 }
 
 static void focus_next(window_t *except) {
@@ -1116,7 +1112,7 @@ static void mouse_down(int button) {
         return;
     }
     int ht = hit_test(w, wm_mouse_x, wm_mouse_y);
-    if (w->layer == LAYER_NORMAL || w->layer == LAYER_DESKTOP || (w->layer == LAYER_TOPMOST && w != g_taskbar_win))
+    if (w->layer == LAYER_NORMAL || w->layer == LAYER_DESKTOP || (w->layer == LAYER_TOPMOST && !taskbar_owns(w)))
         wm_focus(w);
     else if (w->layer == LAYER_POPUP)
         wm_raise(w);
