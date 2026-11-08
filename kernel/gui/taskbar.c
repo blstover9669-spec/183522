@@ -319,6 +319,7 @@ static void apps_menu(int i) {
 }
 
 static void paint_apps(window_t *win) {
+    layout_apps();                      /* never paint from a stale window list */
     island_bg(win);
     surface_t *s = win_surface(win);
     const theme_t *t = theme_get();
