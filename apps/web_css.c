@@ -32,7 +32,7 @@ enum {
     P_ALIGN_SELF, P_JUSTIFY_SELF, P_JUSTIFY_ITEMS, P_ALIGN_CONTENT, P_ASPECT_RATIO,
     P_GRID_COLS, P_GRID_ROWS, P_GRID_AREAS, P_GRID_AUTO_COLS, P_GRID_AUTO_ROWS, P_GRID_AUTO_FLOW,
     P_GRID_COL_START, P_GRID_COL_END, P_GRID_ROW_START, P_GRID_ROW_END, P_GRID_AREA_NAME,
-    P_ISOLATION, P_MASK_IMAGE,
+    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT,
     P_LONGHAND_COUNT,
     /* shorthands (only used while parsing / for var()) */
     P_MARGIN, P_PADDING, P_BORDER, P_BORDER_TOP, P_BORDER_RIGHT, P_BORDER_BOTTOM, P_BORDER_LEFT,
@@ -114,7 +114,7 @@ static const struct { const char *name; int id; } prop_names[] = {
     {"border-inline-color", P_BORDER_INLINE_COLOR}, {"border-block-color", P_BORDER_BLOCK_COLOR},
     {"border-inline-style", P_BORDER_INLINE_STYLE}, {"border-block-style", P_BORDER_BLOCK_STYLE},
     {"-webkit-tap-highlight-color", P_IGNORED}, {"transition-behavior", P_IGNORED}, {"isolation", P_ISOLATION},
-    {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
+    {"fill", P_FILL}, {"content", P_CONTENT}, {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
 };
 
 static int prop_lookup(const char *s, size_t n) {
@@ -861,7 +861,7 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
         return;
     }
     case P_GRID_COLS: case P_GRID_ROWS: case P_GRID_AUTO_COLS: case P_GRID_AUTO_ROWS: case P_GRID_AREAS:
-    case P_TRANSFORM: case P_TRANSLATE:
+    case P_TRANSFORM: case P_TRANSLATE: case P_CONTENT:
         /* parsed when the style is computed (lengths need the element's font size) */
         v.t = CV_STR;
         v.raw = s;
@@ -977,6 +977,8 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
             if (parse_component(cs[0], cl[0], &v) && (v.t == CV_INHERIT || v.t == CV_INITIAL)) {
                 out_add(o, P_FONT_SIZE, &v, imp); out_add(o, P_FONT_WEIGHT, &v, imp);
                 out_add(o, P_FONT_STYLE, &v, imp); out_add(o, P_LINE_HEIGHT, &v, imp);
+                if (v.t == CV_INITIAL) { v.t = CV_STR; v.kw = 0; }
+                out_add(o, P_FONT_FAMILY, &v, imp);
             }
             return;   /* system fonts (caption, menu ...) */
         }
@@ -1161,6 +1163,7 @@ struct compound {
     uint8_t  ncls, nattrs, nnot, nis;
     attrsel_t *attrs;
     uint16_t pseudo;
+    uint8_t  pe;              /* ::before (1) / ::after (2) */
     int16_t  nth_a, nth_b;
     subsel_t *nots;           /* :not(...) - none may match */
     subsel_t *iss;            /* :is(...) / :where(...) - one must match */
@@ -1174,6 +1177,7 @@ typedef struct rule {
     decl_t  *decls;
     int      ndecls;
     int      media;           /* index into the sheet's media list, -1 = always */
+    uint8_t  pe;              /* the rule styles ::before (1) / ::after (2) */
 } rule_t;
 
 typedef struct idx_node { const char *key; int rule; struct idx_node *next; } idx_node_t;
@@ -1388,9 +1392,13 @@ static bool parse_compound(web_sheet_t *sh, const char **pp, const char *end, co
             const char *nm = read_ident(sh, &p, end, true);
             if (!nm) return false;
             any = true;
-            if (elem || !strcmp(nm, "before") || !strcmp(nm, "after") || !strcmp(nm, "first-line") ||
-                !strcmp(nm, "first-letter")) {
-                c->pseudo |= PS_NEVER;        /* generated content is not supported */
+            if (!strcmp(nm, "before") || !strcmp(nm, "after")) {
+                c->pe = nm[0] == 'b' ? 1 : 2;     /* generated content */
+                *spec += 1;
+                continue;
+            }
+            if (elem || !strcmp(nm, "first-line") || !strcmp(nm, "first-letter")) {
+                c->pseudo |= PS_NEVER;        /* other pseudo-elements: not supported */
                 if (elem && strcmp(nm, "before") && strcmp(nm, "after") && strcmp(nm, "first-line") &&
                     strcmp(nm, "first-letter") && strcmp(nm, "placeholder") && strcmp(nm, "selection") &&
                     strcmp(nm, "marker") && strcmp(nm, "backdrop") && strncmp(nm, "-webkit-", 8) &&
@@ -1711,7 +1719,7 @@ static void add_rules(web_sheet_t *sh, const char *sel, const char *sele, decl_t
         uint32_t spec;
         if (parse_selector(sh, s, p, &parts, &np, &spec)) {
             bool never = false;
-            for (int i = 0; i < np; i++) if (parts[i].pseudo & PS_NEVER) never = true;
+            for (int i = 0; i < np; i++) if ((parts[i].pseudo & PS_NEVER) || (parts[i].pe && i < np - 1)) never = true;
             if (!never) {
                 if (sh->nrules >= sh->cap) {
                     int nc = sh->cap ? sh->cap * 2 : 256;
@@ -1728,6 +1736,7 @@ static void add_rules(web_sheet_t *sh, const char *sel, const char *sele, decl_t
                 r->decls = decls;
                 r->ndecls = nd;
                 r->media = media;
+                r->pe = parts[np - 1].pe;
                 index_rule(sh, sh->nrules);
                 sh->nrules++;
             }
@@ -2033,11 +2042,11 @@ bool web_css_media(const char *query, int vw, int vh) {
 
 /* ---- matching ----------------------------------------------------------------------------------- */
 static web_node_t *prev_elem(const web_node_t *n) {
-    for (web_node_t *p = n->prev; p; p = p->prev) if (p->type == WN_ELEM) return p;
+    for (web_node_t *p = n->prev; p; p = p->prev) if (p->type == WN_ELEM && !p->pseudo) return p;
     return NULL;
 }
 static web_node_t *next_elem(const web_node_t *n) {
-    for (web_node_t *p = n->next; p; p = p->next) if (p->type == WN_ELEM) return p;
+    for (web_node_t *p = n->next; p; p = p->next) if (p->type == WN_ELEM && !p->pseudo) return p;
     return NULL;
 }
 
@@ -2103,7 +2112,7 @@ static bool compound_match(const compound_t *c, const web_node_t *n) {
         if ((ps & (PS_LAST | PS_ONLY)) && next_elem(n)) return false;
         if ((ps & PS_LINK) && !((n->tag == T_A || n->tag == T_AREA) && web_attr(n, "href"))) return false;
         if ((ps & PS_ROOT) && n->tag != T_HTML) return false;
-        if ((ps & PS_EMPTY) && n->first) return false;
+        if ((ps & PS_EMPTY) && n->first && !(n->first->pseudo && (!n->first->next || n->first->next->pseudo))) return false;
         if ((ps & PS_CHECKED) && !web_attr(n, "checked") && !web_attr(n, "selected")) return false;
         if ((ps & PS_DISABLED) && !web_attr(n, "disabled")) return false;
         if ((ps & PS_ENABLED) && web_attr(n, "disabled")) return false;
@@ -2150,7 +2159,7 @@ static const char ua_css[] =
     "ol,p,ul,center,dir,hr,menu,pre,article,aside,footer,header,hgroup,main,nav,section,figure,"
     "figcaption,details,summary,legend,dialog,search,optgroup,xmp,plaintext,listing{display:block}"
     "li{display:list-item}"
-    "head,script,style,title,meta,link,base,template,noembed,param,datalist,area,map,svg,math,canvas,"
+    "head,script,style,title,meta,link,base,template,noembed,param,datalist,area,map,math,canvas,"
     "video,audio,object,embed,iframe,source,track,rp,frame,col,colgroup,dialog:not([open]),[hidden],"
     "input[type=hidden],option,select optgroup{display:none}"
     "table{display:table;border-spacing:2px;box-sizing:border-box}"
@@ -2190,6 +2199,11 @@ static const char ua_css[] =
     "nobr{white-space:nowrap}"
     "textarea{white-space:pre-wrap}"
     "button,input,select,textarea{display:inline-block;font-size:13px}"
+    "button{padding:1px 6px;border:1px solid #767676;border-radius:3px;background-color:#efefef;color:#000;"
+    "text-align:center;white-space:nowrap}"
+    "input,textarea,select{border:1px solid #767676;background-color:#fff;color:#000}"
+    "select,input[type=submit],input[type=reset],input[type=button]{border-radius:3px;background-color:#efefef}"
+    "select{background-color:#fff}textarea{font-family:monospace}"
     "noscript{display:block}"
     "details:not([open])>:not(summary){display:none}summary{display:block}";
 
@@ -2209,6 +2223,8 @@ typedef struct cctx {
     bool *media_ok[64];       /* per author sheet, then UA last */
     mdecl_t *m;
     int nm, mcap;
+    mdecl_t *mp[2];           /* declarations for ::before / ::after */
+    int nmp[2], mpcap[2];
     int root_fs;
     uint32_t body_link;       /* <body link=...> */
     bool has_body_link;
@@ -2226,6 +2242,19 @@ static void m_add(cctx_t *cx, const decl_t *d, uint64_t key) {
     cx->m[cx->nm].d = d;
     cx->m[cx->nm].key = key;
     cx->nm++;
+}
+
+static void mp_add(cctx_t *cx, int k, const decl_t *d, uint64_t key) {
+    if (cx->nmp[k] >= cx->mpcap[k]) {
+        int nc = cx->mpcap[k] ? cx->mpcap[k] * 2 : 32;
+        mdecl_t *nm = realloc(cx->mp[k], sizeof(mdecl_t) * nc);
+        if (!nm) return;
+        cx->mp[k] = nm;
+        cx->mpcap[k] = nc;
+    }
+    cx->mp[k][cx->nmp[k]].d = d;
+    cx->mp[k][cx->nmp[k]].key = key;
+    cx->nmp[k]++;
 }
 
 static int mcmp(const void *a, const void *b) {
@@ -2267,14 +2296,22 @@ static void match_sheet(cctx_t *cx, web_sheet_t *sh, int origin, int sheet_no, c
                accept it through its first class */
             if (r->media >= 0 && mok && !mok[r->media]) continue;
             if (!match_from(r->parts, r->nparts - 1, n)) continue;
-            for (int i = 0; i < r->ndecls; i++) m_add(cx, &r->decls[i], make_key(&r->decls[i], origin, r->spec, base_order + r->order));
+            for (int i = 0; i < r->ndecls; i++) {
+                uint64_t key = make_key(&r->decls[i], origin, r->spec, base_order + r->order);
+                if (r->pe) mp_add(cx, r->pe - 1, &r->decls[i], key);
+                else m_add(cx, &r->decls[i], key);
+            }
         }
     }
     for (int u = 0; u < sh->nuniversal; u++) {
         const rule_t *r = &sh->rules[sh->universal[u]];
         if (r->media >= 0 && mok && !mok[r->media]) continue;
         if (!match_from(r->parts, r->nparts - 1, n)) continue;
-        for (int i = 0; i < r->ndecls; i++) m_add(cx, &r->decls[i], make_key(&r->decls[i], origin, r->spec, base_order + r->order));
+        for (int i = 0; i < r->ndecls; i++) {
+            uint64_t key = make_key(&r->decls[i], origin, r->spec, base_order + r->order);
+            if (r->pe) mp_add(cx, r->pe - 1, &r->decls[i], key);
+            else m_add(cx, &r->decls[i], key);
+        }
     }
 }
 
@@ -2469,6 +2506,22 @@ static bool subst_vars(const web_style_t *st, const char *s, char *out, size_t s
     }
     out[o] = 0;
     return true;
+}
+
+/* Custom properties declared on an element compute with their var() references
+   substituted there (descendants inherit the result, not the references): run after
+   the element's custom properties are all in. */
+static void resolve_vars(cctx_t *cx, web_style_t *st, const web_style_t *ps) {
+    for (web_var_t *v = (web_var_t *)st->vars; v && v != ps->vars; v = (web_var_t *)v->next) {
+        if (!v->value || (!strcasestr(v->value, "var(") && !strcasestr(v->value, "env("))) continue;
+        char buf[1024];
+        if (subst_vars(st, v->value, buf, sizeof buf, 0) && !strcasestr(buf, "var(")) {
+            char *r = wa_strndup(&cx->doc->ar, buf, strlen(buf));
+            if (r) v->value = r;
+        } else {
+            v->value = "initial";      /* a cycle or a missing reference: guaranteed-invalid */
+        }
+    }
 }
 
 static void apply_raw(cctx_t *cx, web_node_t *n, web_style_t *st, const web_style_t *ps, const decl_t *d, int pass) {
@@ -2775,6 +2828,83 @@ static void apply_grid(cctx_t *cx, web_style_t *st, const web_style_t *ps, int p
     else { g->rows = copy; g->nrows = (int16_t)k; g->row_rep = rep; g->row_nrep = nrep; }
 }
 
+/* content: "text" 'text' attr(x) open-quote ... -> 1252 text in the document arena (NULL = none) */
+static const char *content_value(cctx_t *cx, const web_node_t *n, const char *s, size_t len) {
+    char out[512];
+    size_t o = 0;
+    const char *p = s, *e = s + len;
+    while (p < e && web_isspace((unsigned char)*p)) p++;
+    if ((size_t)(e - p) >= 4 && (!strncasecmp(p, "none", 4) || !strncasecmp(p, "normal", 6))) {
+        const char *q = p + (tolower((unsigned char)p[1]) == 'o' && tolower((unsigned char)p[2]) == 'n' ? 4 : 6);
+        while (q < e && web_isspace((unsigned char)*q)) q++;
+        if (q >= e) return NULL;
+    }
+    while (p < e && o < sizeof out - 4) {
+        char ch = *p;
+        if (web_isspace((unsigned char)ch)) { p++; continue; }
+        if (ch == '/') break;                 /* alternative text follows */
+        if (ch == '"' || ch == '\'') {
+            char q = ch;
+            p++;
+            while (p < e && *p != q && o < sizeof out - 4) {
+                uint32_t cp;
+                if (*p == '\\' && p + 1 < e) {
+                    p++;
+                    if (isxdigit((unsigned char)*p)) {
+                        cp = 0;
+                        int k = 0;
+                        while (p < e && isxdigit((unsigned char)*p) && k < 6) { cp = cp * 16 + (uint32_t)hexv((unsigned char)*p); p++; k++; }
+                        if (p < e && *p == ' ') p++;
+                    } else if (*p == '\n') { p++; continue; }
+                    else cp = (unsigned char)*p++;
+                } else {
+                    /* UTF-8 (style sheets), else a 1252 byte (styles inside the page) */
+                    unsigned char b = (unsigned char)*p;
+                    int extra = b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0;
+                    cp = b;
+                    if (extra && p + extra < e) {
+                        uint32_t v = b & (0x3F >> extra);
+                        bool ok = true;
+                        for (int k = 1; k <= extra; k++) {
+                            unsigned char c2 = (unsigned char)p[k];
+                            if ((c2 & 0xC0) != 0x80) { ok = false; break; }
+                            v = (v << 6) | (c2 & 0x3F);
+                        }
+                        if (ok) { cp = v; p += extra; }
+                    }
+                    p++;
+                }
+                if (cp == 0xA0) cp = ' ';
+                int c1252 = cp < 0x80 ? (int)cp : web_cp_to_1252(cp);
+                if (c1252 == '?' && cp != '?') continue;     /* icon fonts' private characters */
+                if (c1252 >= 32 || c1252 == '\t') out[o++] = (char)c1252;
+            }
+            if (p < e) p++;
+            continue;
+        }
+        if ((size_t)(e - p) > 5 && !strncasecmp(p, "attr(", 5)) {
+            const char *a = p + 5, *b = a;
+            while (b < e && *b != ')' && !web_isspace((unsigned char)*b)) b++;
+            char name[64];
+            size_t nl = MIN((size_t)(b - a), sizeof name - 1);
+            for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)a[i]);
+            name[nl] = 0;
+            const char *v = web_attr(n, name);
+            for (; v && *v && o < sizeof out - 4; v++) out[o++] = *v;
+            while (p < e && *p != ')') p++;
+            if (p < e) p++;
+            continue;
+        }
+        if ((size_t)(e - p) >= 10 && !strncasecmp(p, "open-quote", 10)) { out[o++] = (char)0x93; p += 10; continue; }
+        if ((size_t)(e - p) >= 11 && !strncasecmp(p, "close-quote", 11)) { out[o++] = (char)0x94; p += 11; continue; }
+        /* counter(), url(), no-open-quote ...: nothing */
+        while (p < e && !web_isspace((unsigned char)*p) && *p != '(') p++;
+        if (p < e && *p == '(') { int d = 1; p++; while (p < e && d) { if (*p == '(') d++; else if (*p == ')') d--; p++; } }
+    }
+    out[o] = 0;
+    return wa_strndup(&cx->doc->ar, out, o);
+}
+
 static uint8_t ai_of(int kw) {
     switch (kw) {
     case K_CENTER: return AI_CENTER;
@@ -2816,7 +2946,7 @@ static uint8_t display_kw(int kw) {
     case K_FLEX: return D_FLEX;
     case K_INLINE_FLEX: return D_INLINE_FLEX;
     case K_GRID: return D_GRID;
-    case K_INLINE_GRID: return D_INLINE_BLOCK;
+    case K_INLINE_GRID: return D_INLINE_GRID;
     case K_CONTENTS: return D_CONTENTS;
     default: return 255;
     }
@@ -3178,17 +3308,38 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         if (v->t == CV_NUM) st->masked = v->f > 0;
         else if (initial) st->masked = 0;
         break;
+    case P_FILL:
+        if (inherit) { st->fill_mode = ps->fill_mode; st->fill = ps->fill; }
+        else if (initial) st->fill_mode = 0;
+        else if (v->t == CV_COLOR) { st->fill_mode = 1; st->fill = v->color; }
+        else if (v->t == CV_KW && v->kw == K_CURRENTCOLOR) st->fill_mode = 2;
+        else if (v->t == CV_KW && v->kw == K_NONE) st->fill_mode = 3;
+        else break;
+        st->fill_own = 1;
+        break;
     case P_GRID_AREA_NAME:
         st->garea = v->t == CV_STR && v->raw ? wa_strndup(&cx->doc->ar, v->raw, (size_t)v->f) : NULL;
+        break;
+    case P_CONTENT:
+        if (initial || inherit) st->content = NULL;
+        else if (v->t == CV_STR && v->raw) st->content = content_value(cx, n, v->raw, (size_t)v->f);
         break;
     case P_TRANSFORM: case P_TRANSLATE:
         if (initial) { st->tx = st->ty = (web_len_t){ 0, U_PX }; st->offscreen = 0; }
         else if (v->t == CV_STR && v->raw) apply_transform(cx, st, ps, v->raw, (size_t)v->f, p == P_TRANSLATE);
         break;
-    case P_OPACITY:   /* "0" parses as a length */
-        if ((v->t == CV_NUM || v->t == CV_LEN) && v->f <= 0.01f) st->visibility_hidden = 3;
-        else if (v->t == CV_NUM || v->t == CV_LEN) { if (st->visibility_hidden == 3) st->visibility_hidden = 0; }
+    case P_OPACITY: {  /* "0" parses as a length; 50% is a percentage */
+        float o = -1;
+        if (v->t == CV_NUM || (v->t == CV_LEN && v->unit == UN_PX)) o = v->f;
+        else if (v->t == CV_LEN && v->unit == UN_PCT) o = v->f / 100.0f;
+        else if (initial) o = 1;
+        if (o < 0) break;
+        o = CLAMP(o, 0.0f, 1.0f);
+        if (o <= 0.01f) st->visibility_hidden = 3;
+        else if (st->visibility_hidden == 3) st->visibility_hidden = 0;
+        st->fade = (uint8_t)(255 - (int)lroundf(o * 255));
         break;
+    }
     default:
         break;
     }
@@ -3415,10 +3566,9 @@ static int inline_decls(cctx_t *cx, web_node_t *n, const char *style, decl_t **d
     return n->ninl;
 }
 
-static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
-    web_style_t *st = wa_alloc(&cx->doc->ar, sizeof *st);
-    if (!st) { n->st = NULL; return; }
-    /* inherited */
+/* inherited values from ps, initial values for the rest (n may be NULL: a pseudo-element) */
+static void style_init(web_style_t *st, const web_style_t *ps, const web_node_t *n) {
+    int tag = n ? n->tag : T_UNKNOWN;
     st->color = ps->color;
     st->fsize = ps->fsize;
     st->lh = ps->lh;
@@ -3438,8 +3588,10 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     st->collapse = ps->collapse;
     st->border_box = 0;
     st->vars = ps->vars;
-    st->valign = (n->tag == T_TD || n->tag == T_TH || n->tag == T_TR) ? ps->valign : VA_BASELINE;
-    if (n->tag == T_TD || n->tag == T_TH) { if (st->valign == VA_BASELINE) st->valign = VA_MIDDLE; }
+    st->fill_mode = ps->fill_mode;
+    st->fill = ps->fill;
+    st->valign = (tag == T_TD || tag == T_TH || tag == T_TR) ? ps->valign : VA_BASELINE;
+    if (tag == T_TD || tag == T_TH) { if (st->valign == VA_BASELINE) st->valign = VA_MIDDLE; }
     st->spacing = ps->spacing & 0x0FFF;   /* border-spacing inherits; border styles do not */
     /* initial values */
     st->display = D_INLINE;
@@ -3451,9 +3603,99 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     }
     st->shrink = 100;
     st->basis.u = U_AUTO;
+}
+
+/* after the declarations: borders, and boxes hidden in the ways pages hide them */
+static void style_finish(web_style_t *st, const web_node_t *n) {
+    int tag = n ? n->tag : T_UNKNOWN;
+    /* finish borders: a width only counts with a style */
+    for (int i = 0; i < 4; i++) {
+        if (!(st->spacing & (0x1000 << i))) st->bw[i] = 0;
+        if (st->bc[i] == 0x00000001) st->bc[i] = st->color;
+    }
+    st->spacing &= 0x0FFF;
+    if (tag == T_TABLE && st->collapse) st->spacing = 0;
+    if (st->deco && !st->deco_color) st->deco_color = st->color;
+    /* elements that are hidden off-screen for screen readers */
+    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
+        ((st->left.u == U_PX && st->left.v < -500) || (st->top.u == U_PX && st->top.v < -500)))
+        st->display = D_NONE;
+    if (st->visibility_hidden >= 2 || (st->overflow_hidden && st->width.u == U_PX && st->width.v <= 1 &&
+                                       st->height.u == U_PX && st->height.v <= 1))
+        st->display = D_NONE;
+    if (st->visibility_hidden == 3 && (st->position == POS_ABSOLUTE || st->position == POS_FIXED)) st->display = D_NONE;
+    /* out-of-flow boxes that are hidden or slid out of view (dropdowns, off-canvas menus) take no room */
+    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
+        (st->offscreen || st->visibility_hidden == 1 ||
+         (st->left.u == U_PCT && st->left.v <= -1000) || (st->top.u == U_PCT && st->top.v <= -1000)))
+        st->display = D_NONE;
+    if (st->visibility_hidden > 1) st->visibility_hidden = 0;
+    if (tag == T_INPUT) {
+        const char *ty = web_attr(n, "type");
+        if (ty && !strcasecmp(ty, "hidden")) st->display = D_NONE;
+    }
+}
+
+/* ::before (k 0) / ::after (k 1) of n: a generated child element when its content is set */
+static void style_pseudo(cctx_t *cx, web_node_t *n, int k) {
+    const web_style_t *ps = n->st;
+    if (!ps || ps->display == D_NONE || !cx->nmp[k] || n->tag == T_INPUT || n->tag == T_IMG ||
+        n->tag == T_TEXTAREA || n->tag == T_SELECT || n->tag == T_BR || n->tag == T_HR) return;
+    web_style_t *st = wa_alloc(&cx->doc->ar, sizeof *st);
+    if (!st) return;
+    style_init(st, ps, NULL);
+    if (cx->nmp[k] > 1) qsort(cx->mp[k], cx->nmp[k], sizeof(mdecl_t), mcmp);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < cx->nmp[k]; i++) apply_decl(cx, n, st, ps, cx->mp[k][i].d, pass);
+        if (pass == 0) resolve_vars(cx, st, ps);
+    }
+    style_finish(st, NULL);
+    if (!st->content || st->display == D_NONE) return;
+    web_node_t *pn = wa_alloc(&cx->doc->ar, sizeof *pn);
+    if (!pn) return;
+    pn->type = WN_ELEM;
+    pn->name = k ? "::after" : "::before";
+    pn->tag = T_UNKNOWN;
+    pn->pseudo = (uint8_t)(k + 1);
+    pn->ctl = pn->img = pn->link = -1;
+    pn->ninl = -1;
+    pn->depth = n->depth < 250 ? (uint8_t)(n->depth + 1) : n->depth;
+    pn->parent = n;
+    pn->st = st;
+    if (*st->content) {
+        web_node_t *t = wa_alloc(&cx->doc->ar, sizeof *t);
+        if (t) {
+            t->type = WN_TEXT;
+            t->text = (char *)st->content;
+            t->len = (int)strlen(st->content);
+            t->ctl = t->img = t->link = -1;
+            t->ninl = -1;
+            t->parent = pn;
+            pn->first = pn->last = t;
+        }
+    }
+    if (k == 0) {
+        pn->next = n->first;
+        if (n->first) n->first->prev = pn; else n->last = pn;
+        n->first = pn;
+    } else {
+        pn->prev = n->last;
+        if (n->last) n->last->next = pn; else n->first = pn;
+        n->last = pn;
+    }
+}
+
+static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
+    /* generated content of an earlier styling goes (it is made again below) */
+    while (n->first && n->first->pseudo) { n->first = n->first->next; if (n->first) n->first->prev = NULL; else n->last = NULL; }
+    while (n->last && n->last->pseudo) { n->last = n->last->prev; if (n->last) n->last->next = NULL; else n->first = NULL; }
+    web_style_t *st = wa_alloc(&cx->doc->ar, sizeof *st);
+    if (!st) { n->st = NULL; return; }
+    style_init(st, ps, n);
 
     /* collect matching declarations */
     cx->nm = 0;
+    cx->nmp[0] = cx->nmp[1] = 0;
     match_sheet(cx, ua_sheet, 0, 0, n, NULL);
     if (cx->doc->quirks) match_sheet(cx, ua_quirks, 0, 0, n, NULL);
     for (int i = 0; i < cx->c->nsheets && i < 63; i++)
@@ -3486,40 +3728,17 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
             }
         }
         for (int i = split; i < cx->nm; i++) apply_decl(cx, n, st, ps, cx->m[i].d, pass);
+        if (pass == 0) resolve_vars(cx, st, ps);
     }
-
-    /* finish borders: a width only counts with a style */
-    for (int i = 0; i < 4; i++) {
-        if (!(st->spacing & (0x1000 << i))) st->bw[i] = 0;
-        if (st->bc[i] == 0x00000001) st->bc[i] = st->color;
-    }
-    st->spacing &= 0x0FFF;
-    if (n->tag == T_TABLE && st->collapse) st->spacing = 0;
-    if (st->deco && !st->deco_color) st->deco_color = st->color;
-    /* elements that are hidden off-screen for screen readers */
-    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
-        ((st->left.u == U_PX && st->left.v < -500) || (st->top.u == U_PX && st->top.v < -500)))
-        st->display = D_NONE;
-    if (st->visibility_hidden >= 2 || (st->overflow_hidden && st->width.u == U_PX && st->width.v <= 1 &&
-                                       st->height.u == U_PX && st->height.v <= 1))
-        st->display = D_NONE;
-    if (st->visibility_hidden == 3 && (st->position == POS_ABSOLUTE || st->position == POS_FIXED)) st->display = D_NONE;
-    /* out-of-flow boxes that are hidden or slid out of view (dropdowns, off-canvas menus) take no room */
-    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
-        (st->offscreen || st->visibility_hidden == 1 ||
-         (st->left.u == U_PCT && st->left.v <= -1000) || (st->top.u == U_PCT && st->top.v <= -1000)))
-        st->display = D_NONE;
-    if (st->visibility_hidden > 1) st->visibility_hidden = 0;
-    if (n->tag == T_INPUT) {
-        const char *ty = web_attr(n, "type");
-        if (ty && !strcasecmp(ty, "hidden")) st->display = D_NONE;
-    }
+    style_finish(st, n);
     n->st = st;
+    style_pseudo(cx, n, 0);
+    style_pseudo(cx, n, 1);
 }
 
 static void style_rec(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     for (web_node_t *c = n->first; c; c = c->next) {
-        if (c->type != WN_ELEM) continue;
+        if (c->type != WN_ELEM || c->pseudo) continue;   /* (generated boxes are styled already) */
         style_element(cx, c, ps);
         if (!c->st) continue;
         if (c->st->display == D_NONE) continue;   /* nothing inside is shown */
@@ -3553,4 +3772,6 @@ void web_style_doc(web_doc_t *d, const web_cascade_t *c) {
     style_rec(&cx, d->root, &root);
     for (int i = 0; i < 64; i++) free(cx.media_ok[i]);
     free(cx.m);
+    free(cx.mp[0]);
+    free(cx.mp[1]);
 }

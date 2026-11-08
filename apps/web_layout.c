@@ -480,10 +480,15 @@ static int avg_char_w(const font_t *f) {
 
 static void ctrl_box(lctx_t *lc, web_ctrl_t *c, const web_style_t *st, int cbw, int *ow, int *oh) {
     int z = lc->zoom;
-    const font_t *f = web_font(st->fsize, st->bold ? WF_BOLD : 0);
-    if (c->type == C_TEXTAREA) f = web_font(st->fsize, WF_MONO);
+    const font_t *f = web_font(st->fsize, (st->bold ? WF_BOLD : 0) | (st->mono ? WF_MONO : 0));
     c->font = f;
     c->color = st->color;
+    /* the CSS box the control is drawn as (background, border, rounding) */
+    c->css_bg = st->bg;
+    c->css_bw = st->bw[0];
+    c->css_bc = st->bc[0];
+    c->css_rad = st->radius[0];
+    c->styled = c->type != C_CHECKBOX && c->type != C_RADIO && c->type != C_IMAGE && c->type != C_FILE;
     int fh = font_height(f);
     int w = 0, h = fh + 8 * z / 100;
     switch (c->type) {
@@ -642,11 +647,10 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
         meas_atom(m, w + 4, w + 4);
         return;
     }
-    if (c->ctl >= 0 && c->tag == T_BUTTON) {
-        web_ctrl_t *ct = &lc->pg->ctrls[c->ctl];
-        int w, h;
-        ctrl_box(lc, ct, st, 0, &w, &h);
-        meas_atom(m, w + 4, w + 4);
+    if (c->tag == T_BUTTON && !block_level(c)) {     /* a styled box with its contents */
+        int mn, mx;
+        intrinsic(lc, c, &mn, &mx);
+        meas_atom(m, mx, mn);
         return;
     }
     if (block_level(c) || is_float(c)) {
@@ -659,7 +663,7 @@ static void meas_node(lctx_t *lc, meas_t *m, web_node_t *c, const web_style_t *p
         return;
     }
     int d = st->display;
-    if (d == D_INLINE_BLOCK || d == D_INLINE_TABLE || d == D_INLINE_FLEX) {
+    if (d == D_INLINE_BLOCK || d == D_INLINE_TABLE || d == D_INLINE_FLEX || d == D_INLINE_GRID) {
         int mn, mx;
         intrinsic(lc, c, &mn, &mx);
         meas_atom(m, mx, mn);
@@ -1058,7 +1062,7 @@ static void intrinsic(lctx_t *lc, web_node_t *n, int *mn, int *mx) {
         flex_intrinsic(lc, n, mn, mx);
         *mn += mbp;
         *mx += mbp;
-    } else if (st->display == D_GRID) {
+    } else if (st->display == D_GRID || st->display == D_INLINE_GRID) {
         grid_intrinsic(lc, n, mn, mx);
         *mn += mbp;
         *mx += mbp;
@@ -1677,11 +1681,11 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
     }
     if (c->tag == T_BR) { ifc_break(f); return; }
     if (c->tag == T_IMG) { add_image(f, c); return; }
-    if (c->ctl >= 0) { add_ctrl(f, c); return; }
+    if (c->ctl >= 0 && c->tag != T_BUTTON) { add_ctrl(f, c); return; }
     if (c->tag == T_A && web_attr(c, "name") && !c->id) anchor_add(lc, web_attr(c, "name"), f->y);
     if (block_level(c)) { block_in_inline(f, c); return; }
     int d = st->display;
-    if (d == D_INLINE_BLOCK || d == D_INLINE_TABLE || d == D_INLINE_FLEX) {
+    if (d == D_INLINE_BLOCK || d == D_INLINE_TABLE || d == D_INLINE_FLEX || d == D_INLINE_GRID || c->tag == T_BUTTON) {
         int saved = lc->link;
         if (c->link >= 0) lc->link = c->link;
         add_box(f, c, false);
@@ -1832,6 +1836,17 @@ static void sort_layers(lctx_t *lc, int from, int to) {
         if (it[i].kind == WI_PLACE && it[i].ref >= 0 && it[i].ref < lc->nabs && lc->abs[it[i].ref].place >= from &&
             lc->abs[it[i].ref].place < to)
             lc->abs[it[i].ref].place = i;
+}
+
+/* opacity: everything the box drew gets more transparent (not a group: overlapping
+   parts show through each other) */
+static void fade_items(lctx_t *lc, int from, int to, int a) {
+    for (int i = from; i < to; i++) {
+        web_item_t *it = &lc->L->items[i];
+        it->color = color_alpha(it->color, (int)(COLOR_A(it->color) * a / 255));
+        if (it->kind == WI_IMAGE || it->kind == WI_SVG || it->kind == WI_CTRL)
+            it->alpha = (uint8_t)(255 - (255 - it->alpha) * a / 255);
+    }
 }
 
 static int16_t z_layer(const web_style_t *st) {
@@ -3058,7 +3073,7 @@ static int grid_layout(lctx_t *lc, web_node_t *box, int cx, int cy, int cw, int 
             if (!gi->n || gi->valign != AI_STRETCH || len_set(gi->n->st->height)) continue;
             int rh = gr.pos[gi->r1 - 1] + gr.size[gi->r1 - 1] - gr.pos[gi->r0];
             int d = gi->n->st->display;
-            if (rh > gi->h + 1 && (d == D_FLEX || d == D_GRID || d == D_INLINE_FLEX)) again = true;
+            if (rh > gi->h + 1 && (d == D_FLEX || d == D_GRID || d == D_INLINE_FLEX || d == D_INLINE_GRID)) again = true;
         }
         if (again && lc->relayouts < MAX_RELAYOUTS) {
             lc->relayouts++;
@@ -3176,6 +3191,62 @@ static int block_children(lctx_t *lc, web_node_t *n, int cx, int cy, int cw, boo
     return y - cy;
 }
 
+/* an image or a form control laid out as a box of its own (display:block, a flex or
+   grid item, absolutely positioned): fw / force_h as for layout_box */
+static int layout_replaced(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, int force_h, bres_t *r, const bm_t *b) {
+    const web_style_t *st = n->st;
+    int hp = b->pl + b->pr + b->bl + b->br, vp = b->pt + b->pb + b->bt + b->bb;
+    int w, h, kind, ref = -1;
+    const char *alt = NULL;
+    web_ctrl_t *ct = NULL;
+    if (n->tag == T_IMG) {
+        image_box(lc, n, cbw, &w, &h);
+        web_image_t *im = n->img >= 0 && n->img < lc->pg->nimgs ? &lc->pg->imgs[n->img] : NULL;
+        bool failed = !im || im->state == IMG_FAILED;
+        alt = web_attr(n, "alt");
+        kind = (failed && alt && *alt) ? WI_IMGALT : WI_IMAGE;
+        ref = n->img;
+        if (st->border_box && len_set(st->width)) w = MAX(0, w - hp);
+        if (fw >= 0 && w > 0 && h > 0 && !len_set(st->height) && st->height.u != U_PX) h = (int)((int64_t)h * fw / w);
+    } else {
+        ct = &lc->pg->ctrls[n->ctl];
+        if (ct->type == C_HIDDEN) return 0;
+        ctrl_box(lc, ct, st, cbw, &w, &h);
+        hp = vp = 0;        /* (a control draws its CSS border and padding inside its own box) */
+        kind = WI_CTRL;
+        ref = n->ctl;
+    }
+    if (fw >= 0) w = fw;
+    if (force_h >= 0) h = MAX(0, force_h - vp);
+    int ml = b->ml;
+    if (fw < 0 && b->aml && b->amr) ml = (cbw - w - hp) / 2;
+    else if (fw < 0 && b->aml) ml = cbw - w - hp - b->mr;
+    int bx = x + ml, bw = w + hp, bh = h + vp;
+    if (!st->visibility_hidden && kind != WI_CTRL) {
+        int bgi = reserve_bg(lc, st->bg);
+        fill_bg_r(lc, bgi, bx, y, bw, bh, st);
+        borders(lc, st, bx, y, bw, bh);
+    }
+    if (!st->visibility_hidden && w > 0 && h > 0) {
+        web_item_t *it = item_add(lc, kind);
+        if (it) {
+            it->x = bx + (kind == WI_CTRL ? 0 : b->bl + b->pl);
+            it->y = y + (kind == WI_CTRL ? 0 : b->bt + b->pt);
+            it->w = w;
+            it->h = h;
+            it->ref = ref;
+            it->link = lc->link;
+            it->text = kind == WI_IMGALT ? alt : NULL;
+            it->font = kind == WI_CTRL ? ct->font : sfont(lc, st);
+            it->color = st->color;
+        }
+    }
+    r->h = bh;
+    r->w = bw;
+    r->mb = b->mb;
+    return bh;
+}
+
 static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, bres_t *r, int listnum) {
     const web_style_t *st = n->st;
     int force_h = lc->force_h;          /* a border-box height decided by the parent (flex / grid / abs) */
@@ -3185,6 +3256,8 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     if (st->display == D_TABLE || st->display == D_INLINE_TABLE) return layout_table(lc, n, x, y, cbw, fw, r);
     bm_t b;
     box_metrics(st, cbw, &b);
+    if ((n->ctl >= 0 && n->tag != T_BUTTON && n->ctl < lc->pg->nctrls) || n->tag == T_IMG)
+        return layout_replaced(lc, n, x, y, cbw, fw, force_h, r, &b);
     if (n->tag == T_SVG) {
         /* a replaced box */
         int bw, bh;
@@ -3283,7 +3356,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
                  n->tag != T_BODY && n->tag != T_HTML;
     int saved_clip = lc->cur_clip, my_clip = clips ? clip_add(lc) : 0;
     if (my_clip) lc->cur_clip = my_clip;
-    bool grid = st->display == D_GRID;
+    bool grid = st->display == D_GRID || st->display == D_INLINE_GRID;
     bool flex = st->display == D_FLEX || st->display == D_INLINE_FLEX;
     bool abspos = st->position == POS_ABSOLUTE || st->position == POS_FIXED;
     bool bfc = st->overflow_hidden || fw >= 0 || flex || grid || abspos;
@@ -3323,6 +3396,15 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int nb0 = lc->L->nitems;
     borders(lc, st, bx, y, bw, bh);
     int nb1 = lc->L->nitems;
+    if (n->tag == T_BUTTON && n->ctl >= 0 && n->ctl < lc->pg->nctrls) {
+        /* a <button> is drawn as the box it is styled as; the control only takes clicks */
+        web_ctrl_t *ct = &lc->pg->ctrls[n->ctl];
+        ct->boxed = true;
+        ct->font = sfont(lc, st);
+        ct->color = st->color;
+        web_item_t *ci = item_add(lc, WI_CTRL);
+        if (ci) { ci->x = bx; ci->y = y; ci->w = bw; ci->h = bh; ci->ref = n->ctl; ci->link = lc->link; }
+    }
     if (dbgi >= 0) {
         web_item_t *dbg = &lc->L->items[dbgi];
         dbg->x = bx; dbg->y = y; dbg->w = bw; dbg->h = bh; dbg->node = n;
@@ -3340,7 +3422,8 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     {
         const web_style_t *ps = n->parent && n->parent->type == WN_ELEM ? n->parent->st : NULL;
         bool positioned = st->position != POS_STATIC;
-        bool fg_item = ps && (ps->display == D_FLEX || ps->display == D_INLINE_FLEX || ps->display == D_GRID);
+        bool fg_item = ps && (ps->display == D_FLEX || ps->display == D_INLINE_FLEX || ps->display == D_GRID ||
+                              ps->display == D_INLINE_GRID);
         bool zctx = st->z_set && (positioned || fg_item);
         bool sc = root || zctx || st->isolate || len_set(st->tx) || len_set(st->ty);
         web_item_t *its = lc->L->items;
@@ -3367,6 +3450,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         int dx = len_set(st->tx) ? rlen(st->tx, bw) : 0, dy = len_set(st->ty) ? rlen(st->ty, bh) : 0;
         shift_items(lc, first_item, lc->L->nitems, dx, dy);
     }
+    if (st->fade) fade_items(lc, first_item, lc->L->nitems, 255 - st->fade);
     r->h = bh;
     r->w = bw;
     r->mb = cbot ? collapse(b.mb, trailing) : b.mb;

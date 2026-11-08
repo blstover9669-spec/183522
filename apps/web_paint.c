@@ -125,7 +125,7 @@ static void draw_image(web_page_t *pg, surface_t *s, const web_item_t *it, int X
         }
         src = im->scaled;
     }
-    if (src->flags & SURF_ALPHA) gfx_blit_alpha(s, X, Y, src, 255);
+    if ((src->flags & SURF_ALPHA) || it->alpha) gfx_blit_alpha(s, X, Y, src, 255 - it->alpha);
     else gfx_blit(s, X, Y, src);
 }
 
@@ -152,17 +152,37 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
     const font_t *f = c->font ? c->font : FONT_UI;
     int w = c->w, h = c->h;
     int fh = font_height(f);
-    uint32_t text = c->disabled ? RGB(140, 140, 140) : RGB(16, 16, 16);
+    uint32_t text = c->disabled ? RGB(140, 140, 140) : c->styled ? c->color : RGB(16, 16, 16);
+    if (c->styled && c->type != C_CHECKBOX && c->type != C_RADIO) {
+        /* the box the page styled the control as */
+        int16_t rad[4];
+        int r = c->css_rad < 0 ? -c->css_rad * MIN(w, h) / 1000 : c->css_rad;
+        r = CLAMP(r, 0, MIN(w, h) / 2);
+        for (int i = 0; i < 4; i++) rad[i] = (int16_t)r;
+        uint32_t bg = c->disabled && COLOR_A(c->css_bg) ? color_mix(c->css_bg, RGB(200, 200, 200), 60) : c->css_bg;
+        if (COLOR_A(bg)) { if (r) paint_rrect(s, x, y, w, h, rad, 0, bg); else gfx_fill_rect(s, x, y, w, h, bg); }
+        if (c->css_bw > 0 && COLOR_A(c->css_bc)) {
+            if (r) paint_rrect(s, x, y, w, h, rad, c->css_bw, c->css_bc);
+            else for (int i = 0; i < c->css_bw && i < w / 2 && i < h / 2; i++) gfx_rect(s, x + i, y + i, w - 2 * i, h - 2 * i, c->css_bc);
+        }
+        if (focused) gfx_rounded_rect(s, x - 1, y - 1, w + 2, h + 2, r ? r + 1 : 2, FOCUS_RING);
+    }
     switch (c->type) {
     case C_TEXT: case C_PASSWORD: case C_TEXTAREA: {
-        gfx_fill_rect(s, x, y, w, h, c->disabled ? RGB(240, 240, 240) : RGB(255, 255, 255));
-        gfx_rect(s, x, y, w, h, focused ? FOCUS_RING : FIELD_BORDER);
-        if (focused) gfx_rect(s, x + 1, y + 1, w - 2, h - 2, FOCUS_RING);
+        if (!c->styled) {
+            gfx_fill_rect(s, x, y, w, h, c->disabled ? RGB(240, 240, 240) : RGB(255, 255, 255));
+            gfx_rect(s, x, y, w, h, focused ? FOCUS_RING : FIELD_BORDER);
+            if (focused) gfx_rect(s, x + 1, y + 1, w - 2, h - 2, FOCUS_RING);
+        }
         rect_t old = s->clip;
         surface_set_clip(s, rect_intersect(old, rect_make(x + 3, y + 2, w - 6, h - 4)));
         if (c->type == C_TEXTAREA) {
             int ly = y + 4, line = 0, cl = 0, cc = 0;
             const char *v = c->value ? c->value : "";
+            if (!*v && !focused) {
+                const char *ph = web_attr(c->node, "placeholder");
+                if (ph) gfx_text(s, x + 5, ly, ph, RGB(117, 117, 117), f);
+            }
             /* find the caret's line and column */
             for (int i = 0; i < c->caret && v[i]; i++) { if (v[i] == '\n') { cl++; cc = 0; } else cc++; }
             int first = cl - (h - 8) / fh + 1;
@@ -228,9 +248,11 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
         break;
     }
     case C_SELECT: {
-        gfx_fill_rounded_rect(s, x, y, w, h, 3, FIELD_BORDER);
-        gfx_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, 2, RGB(255, 255, 255));
-        if (focused) gfx_rounded_rect(s, x, y, w, h, 3, FOCUS_RING);
+        if (!c->styled) {
+            gfx_fill_rounded_rect(s, x, y, w, h, 3, FIELD_BORDER);
+            gfx_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, 2, RGB(255, 255, 255));
+            if (focused) gfx_rounded_rect(s, x, y, w, h, 3, FOCUS_RING);
+        }
         const char *lab = c->sel >= 0 && c->sel < c->nopts ? c->opt_text[c->sel] : "";
         rect_t old = s->clip;
         surface_set_clip(s, rect_intersect(old, rect_make(x + 2, y, w - 22, h)));
@@ -246,9 +268,11 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
             gfx_blit_scaled(s, x, y, w, h, im->surf, 0, 0, im->surf->w, im->surf->h, true);
             break;
         }
-        gfx_fill_rounded_rect(s, x, y, w, h, 3, FIELD_BORDER);
-        gfx_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, 2, c->disabled ? RGB(245, 245, 245) : RGB(239, 239, 239));
-        if (focused) gfx_rounded_rect(s, x, y, w, h, 3, FOCUS_RING);
+        if (!c->styled) {
+            gfx_fill_rounded_rect(s, x, y, w, h, 3, FIELD_BORDER);
+            gfx_fill_rounded_rect(s, x + 1, y + 1, w - 2, h - 2, 2, c->disabled ? RGB(245, 245, 245) : RGB(239, 239, 239));
+            if (focused) gfx_rounded_rect(s, x, y, w, h, 3, FOCUS_RING);
+        }
         rect_t old = s->clip;
         surface_set_clip(s, rect_intersect(old, rect_make(x + 2, y, w - 4, h)));
         int tw = font_text_width(f, c->label);
@@ -315,7 +339,14 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
         case WI_MARKER:
             draw_marker(s, it, X, Y);
             break;
+        case WI_SVG:
+            web_svg_paint(pg, s, it->node, X, Y, it->w, it->h, it->color, 255 - it->alpha);
+            break;
         case WI_CTRL:
+            if (it->ref >= 0 && it->ref < pg->nctrls && pg->ctrls[it->ref].boxed) {
+                if (o && o->focus_ctrl == it->ref) gfx_rounded_rect(s, X - 1, Y - 1, it->w + 2, it->h + 2, 4, FOCUS_RING);
+                break;
+            }
             if (it->ref >= 0 && it->ref < pg->nctrls)
                 web_paint_ctrl(pg, &pg->ctrls[it->ref], s, X, Y, o && o->focus_ctrl == it->ref, o && o->caret_on);
             break;

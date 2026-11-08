@@ -915,10 +915,11 @@ static void start_tag(parser_t *p, tag_tok_t *t) {
         if (tag == T_TITLE && !d->title[0]) web_text_content(e, d->title, sizeof d->title);
         return;
     }
-    if (tag == T_SVG || tag == T_MATH || tag == T_TEMPLATE) {
+    if (tag == T_MATH || tag == T_TEMPLATE) {
         if (!t->selfclose) skip_subtree(p, t->name);
         return;
     }
+    if (tag == T_SVG && t->selfclose) return;      /* (an <svg> keeps its shapes: they are drawn) */
     if (tag == T_PLAINTEXT) {
         add_text(p, p->s + p->i, p->n - p->i);
         p->i = p->n;

@@ -270,6 +270,7 @@ void web_page_free_resources(web_page_t *pg) {
     pg->links = NULL;
     pg->nlinks = pg->lcap = 0;
     web_layout_free(&pg->lay);
+    web_svg_free_cache(pg);
     web_doc_free(pg->doc);
     pg->doc = NULL;
 }
