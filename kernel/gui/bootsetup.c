@@ -8,12 +8,17 @@
  * greyed out), Install and, under it, Continue ISO.
  *
  *   Install       the screen changes to a progress bar at the top with the
- *                 percentage in its middle. When the drive is written: "Your
- *                 drive has been installed and ready to have files savable",
- *                 then the computer restarts. The ISO's GRUB menu finds the
- *                 drive signature (kernel/disk/diskfmt.h) and boots the
- *                 installed NovaOS by default, so the restart goes straight
- *                 into it. Only the chosen size of the disk is used.
+ *                 percentage in its middle and Cancel under it. Cancel stops
+ *                 the installation (install_cancel clears the boot record,
+ *                 the install header and the drive signature, so nothing
+ *                 tries to start the half-written drive) and comes back to
+ *                 this screen. When the drive is written: "Your drive has
+ *                 been installed and ready to have files savable", "How to
+ *                 start your drive" (a short guide with the tabs VM and USB)
+ *                 and Restart. Restart restarts the computer: the ISO's GRUB
+ *                 menu finds the drive signature (kernel/disk/diskfmt.h) and
+ *                 boots the installed NovaOS by default, so the restart goes
+ *                 straight into it. Only the chosen size of the disk is used.
  *   Continue ISO  NovaOS keeps running from the ISO (nothing is saved); the save
  *                 file screen (OSaver, osaver_boot_prompt) follows, and the
  *                 desktop when that closes.
@@ -25,7 +30,10 @@
  * The installation is the kernel's installer back end (install_begin_sized /
  * install_step), the same one the Installer app drives. Keyboard: Up/Down pick
  * a size, Tab moves between the sizes and the buttons, Enter/Space presses the
- * focused button, Left/Right switch the hard disk when there are several.
+ * focused button, Left/Right switch the hard disk when there are several. While
+ * it installs Esc cancels (Enter/Space only after Tab has focused Cancel, so a
+ * held Enter cannot cancel); on the finished screen Tab, Enter/Space and
+ * Left/Right (the guide's tabs) work the same way.
  */
 #include "wm_internal.h"
 #include "bootscreen.h"

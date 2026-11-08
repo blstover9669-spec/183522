@@ -219,10 +219,16 @@ Select the VM and click **Settings**:
    **Install**. All data on the disk is erased; only the chosen size of it is
    used. (Files live in memory while NovaOS runs, so the space you can really
    fill is limited by the VM's memory whatever size you pick.)
-2. A progress bar shows the installation; then *Your drive has been installed
-   and ready to have files savable* and the VM restarts **straight into the
-   installed NovaOS** - the CD's boot menu finds the installed drive and boots
-   it by itself, so you can leave the ISO attached.
+2. A progress bar shows the installation. **Cancel** under it stops the
+   installation safely: the disk's boot record and drive signature are
+   cleared, so nothing tries to start the half-written drive, and you are back
+   on the NovaOS Drive installation screen.
+3. When the drive is written: *Your drive has been installed and ready to have
+   files savable*, with **How to start your drive** (a short guide with the
+   tabs *VM* and *USB*) and **Restart**. Click **Restart**: the VM restarts
+   **straight into the installed NovaOS** - the CD's boot menu finds the
+   installed drive and boots it by itself after 2 seconds, so you can leave
+   the ISO attached.
 
 You can also install from a running system: **Installer** on the desktop (or
 Start menu -> System -> Installer) - choose the hard disk, the drive size and
@@ -233,9 +239,12 @@ you have already made along.
 
 1. With the ISO attached, the GRUB menu picks **Boot from the first hard disk
    (installed NovaOS)** by itself after 2 seconds (choose the NovaOS 2.5 entry
-   to get the NovaOS Drive installation again). Without the ISO the BIOS boots
-   the hard disk directly. You briefly see `NovaOS loader / Loading NovaOS
-   .... ok`, then the splash screen with a loading bar and the desktop.
+   within those 2 seconds to get the NovaOS Drive installation again). To
+   start without the ISO: power off the VM, open *Settings -> Storage*, select
+   the optical drive with NovaOS.iso, choose *Remove Disk from Virtual Drive*
+   and start the VM - the BIOS then boots the hard disk directly. Keep the
+   hard disk on the IDE controller. You briefly see `NovaOS loader / Loading
+   NovaOS .... ok`, then the splash screen with a loading bar and the desktop.
 2. Your files are now saved to the disk automatically: a few seconds after a
    change, at least every 60 seconds while there are unsaved changes, and
    before every restart or shut down. Shut down from the Start menu, or with
@@ -246,16 +255,33 @@ you have already made along.
    (for example `rm -r /` in the Terminal) NovaOS shows **No drive found** and
    stays there - also after a restart. Reinstall from the ISO (pick the NovaOS
    2.5 entry in the GRUB menu, then Install).
+4. NovaOS checks two more requirements at every start of the drive and shows
+   **System requirement fail** (black screen, Nova icon, the reason under it)
+   until you reset the VM:
+   * *Requires a readable COS:// drive (at least 4 MB)* - COS:// is the drive
+     NovaOS starts from. The installed hard disk was not found (it is on a
+     SATA/AHCI, SCSI or NVMe controller: move it back to the IDE controller),
+     reading it failed, or it is smaller than 4 MB.
+   * *A required bundle app is missing* - `/system/apps` holds one small file
+     per app that comes with NovaOS; it or one of its files was deleted.
+     Reinstall from the ISO.
 
 ### Troubleshooting
 
-* **Black screen:** pick **NovaOS 1.5 Developer Preview (safe graphics
+* **Black screen:** pick **NovaOS 2.5 Developer Preview (safe graphics
   800x600)** in the GRUB menu (press the arrow keys while it is shown). Installing from
   this entry makes the installed system use 800x600 too.
 * **The pointer does not move:** the pointing device must be *PS/2 Mouse*,
   and you have to click into the VM window first.
-* **No hard disk found / the Installer finds no disk:** the disk is on a SATA,
-  NVMe or SCSI controller - move it to the IDE controller (see step 2.3).
+* **No hard disk found / the Installer finds no disk / System requirement
+  fail - Requires a readable COS:// drive:** the disk is on a SATA, NVMe or
+  SCSI controller - move it to the IDE controller (see step 2.3).
+* **USB stick or a real PC:** the installed drive can't run from a USB stick
+  (NovaOS only reads IDE hard disks). Writing NovaOS.iso to a stick with
+  balenaEtcher or Rufus (DD mode) and booting a PC with legacy BIOS/CSM from it
+  (boot menu key, often F12) runs NovaOS from the ISO, and nothing is saved.
+  On a real computer choose **Continue ISO**, never Install - Install erases
+  that computer's hard disk. NovaOS has only been tested in virtual machines.
 * **All storage sizes are greyed out:** the virtual disk is smaller than
   100 MB. Give the VM a bigger disk.
 * **No sound:** the audio controller must be *ICH AC97* or *SoundBlaster 16*
@@ -285,8 +311,8 @@ VBoxManage storageattach NovaOS --storagectl IDE --port 0 --device 0 \
     --type hdd --medium "$HOME/NovaOS-disk.vdi"
 VBoxManage storageattach NovaOS --storagectl IDE --port 1 --device 0 \
     --type dvddrive --medium "$PWD/NovaOS.iso"
-VBoxManage startvm NovaOS            # NovaOS Drive installation: pick a size, Install
-                                     # (it restarts into the installed system by itself)
+VBoxManage startvm NovaOS            # NovaOS Drive installation: pick a size, Install,
+                                     # then Restart (boots the installed system)
 ```
 
 ## Running in QEMU
@@ -294,7 +320,7 @@ VBoxManage startvm NovaOS            # NovaOS Drive installation: pick a size, I
 ```sh
 qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso                      # live CD
 truncate -s 1G disk.img
-qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso -hda disk.img -boot d  # install (then it boots the disk)
+qemu-system-i386 -m 256 -vga std -cdrom NovaOS.iso -hda disk.img -boot d  # install, Restart (then it boots the disk)
 qemu-system-i386 -m 256 -vga std -hda disk.img -boot c                    # installed system
 ```
 

@@ -125,15 +125,26 @@ it; `setup=1` brings it back. Test it through the real GRUB path, with an ISO
 whose command line has `testmouse=1 setup=1` (accurate clicks) and a disk:
 `bootsetup: ready` means it waits for input. At 1024x768 the size rows are at
 x = 300, y = 424 + 28 * i (100 MB ... 10 GB), Install at (660, 494), Continue
-ISO at (660, 554). Install restarts the VM; the ISO's GRUB menu then boots the
-disk by itself (`boot: loader "NovaOS disk loader"` in the log).
+ISO at (660, 554). While it installs (about 2 s in QEMU) Cancel is at (512,
+148). The finished screen (`bootsetup: finished screen`) has How to start your
+drive at (419, 466) and Restart at (648, 466); with the guide open the tabs VM
+/ USB are at (451, 342) / (571, 342) and Restart at (512, 593). Restart
+restarts the VM; the ISO's GRUB menu then boots the disk by itself (`boot:
+loader "NovaOS disk loader"` in the log). Add `res=800x600` to the ISO's
+command line to check the 800x600 layout.
 
 ```sh
 make BUILD=build-setup CMDLINE="testmouse=1 setup=1" GRUB_TIMEOUT=1
 truncate -s 512M disk.img
 tools/shot.py --iso build-setup/NovaOS.iso --hda disk.img --out shots-setup \
     "serial:bootsetup: ready" shot:setup click:300,508 click:660,494 wait:0.3 shot:progress \
-    "serial:bootsetup: drive installed" shot:done "serial:NovaOS disk loader" ready shot:installed
+    "serial:bootsetup: finished screen" shot:done click:419,466 wait:0.5 shot:vm click:571,342 \
+    wait:0.5 shot:usb click:512,593 "serial:NovaOS disk loader" ready shot:installed
+# Cancel while the bar runs: back on the setup screen, sectors 0, 1 and 2047 of the
+# disk are zero and the next boot of the ISO shows the setup screen again
+tools/shot.py --iso build-setup/NovaOS.iso --hda disk.img --out shots-cancel \
+    "serial:bootsetup: ready" click:300,508 click:660,494 wait:0.6 click:512,148 \
+    "serial:install: cancelled" wait:0.5 shot:back
 # Continue ISO: the save file screen (OSaver) comes next
 tools/shot.py --iso build-setup/NovaOS.iso --out shots-iso "serial:bootsetup: ready" \
     click:660,554 ready wait:1 shot:save-file-screen
@@ -144,7 +155,35 @@ on ISO boots, `ui: loaded 8 fonts, 2 themes, 6 wallpapers ...`). Deleting the
 drive or a system file shows "No drive found" and logs `nodrive: No drive
 found (PATH is missing)`, e.g. `"type:rm -r /system\n" "serial:nodrive:"`
 in a Terminal (on an installed drive it stays like that after a restart, so
-use a scratch disk).
+use a scratch disk; wait for `persist: saved` before a `monitor:system_reset`).
+
+### System requirement fail
+
+Every start logs the two checks: `reqfail: COS:// drive ok (disk 0, ...)` (or
+`COS:// is the CD (ISO boot)`) and `reqfail: N bundle apps found in
+/system/apps`; a failure logs `reqfail: System requirement fail - REASON
+(DETAIL)` and shows the screen. Make an installed disk with the build under
+test and use a copy of it per case:
+
+```sh
+truncate -s 128M disk.img
+tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \
+    ready "serial:INSTALL: done"
+# COS:// not found: the disk on an AHCI (SATA) controller - the ISO's GRUB still boots
+# it through the BIOS, the kernel finds no IDE hard disk
+tools/shot.py --iso build/NovaOS.iso --out shots-cos "serial:reqfail: System" wait:1 shot:cos \
+    --extra -device ahci,id=ahci -drive id=d0,if=none,file=disk.img,format=raw \
+    -device ide-hd,drive=d0,bus=ahci.0
+# COS:// not readable: QEMU's blkdebug fails reads of slot A's header (its lba is in
+# "persist: using disk 0 (...) at lba N" of a normal boot)
+printf '[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "10240"\n' > blk.cfg
+tools/shot.py --iso build/NovaOS.iso --out shots-eio "serial:reqfail: System" wait:1 shot:eio \
+    --extra -drive file=blkdebug:blk.cfg:disk.img,format=raw,if=ide,index=0
+# bundle app: delete one app file (or "rm -r /system/apps"), let it save, reset
+tools/shot.py --disk disk.img --out shots-app ready key:meta_l wait:0.5 type:terminal key:ret \
+    wait:1.5 "type:rm /system/apps/Paint.app\n" "serial:persist: saved" monitor:system_reset \
+    "serial:reqfail: System" wait:1 shot:app
+```
 
 ### Power button, keyboard LEDs, empty IDE channels
 

@@ -56,8 +56,9 @@ void       boot_sleep_until(uint32_t t);
    from an installed drive). setup=1 forces it, setup=0 / nosetup skips it; automated
    starts (autorun=, testmouse=) skip it too. */
 bool bootsetup_wanted(void);
-/* Run the NovaOS Drive installation. Returns after "Continue ISO"; "Install"
-   restarts the computer into the installed system. */
+/* Run the NovaOS Drive installation. Returns after "Continue ISO"; after "Install"
+   the finished screen's Restart restarts the computer into the installed system
+   (Cancel or a failed installation come back to the screen). */
 void bootsetup_run(void);
 /* After Continue ISO, once the desktop exists (before it fades in): the save file
    screen (OSaver's osaver_boot_prompt, if it is part of the build). */

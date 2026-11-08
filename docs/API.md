@@ -635,7 +635,10 @@ loader, command line, display - rewritten at every start),
 `shadows`; the command line and Settings win over them),
 `/system/ui/fonts/*.font`, `/system/ui/themes/light.theme` / `dark.theme`
 (`key=RRGGBB` or `AARRGGBB`, the theme_t colour names) and
-`/system/ui/wallpapers/*.wallpaper`. The kernel and fonts are packed (NVLZ:
+`/system/ui/wallpapers/*.wallpaper`, and `/system/apps/NAME.app`: one small
+text file per bundled app - every app in the registry, so also the games the
+Games app bundles (`name=`, `category=`, `description=`, `opens=`; `/` in a
+name would become `-`). The kernel and fonts are packed (NVLZ:
 `"NVLZ"`, u32 size, u32 CRC32, an LZ4-format stream - `kernel/fs/lz.h`). An ISO
 start writes them from built-in copies; an installed drive keeps them. NovaOS
 loads its UI from `/system/ui` at startup (a damaged file falls back to the
@@ -648,6 +651,17 @@ and stays there until the computer is reset. On an installed drive the change
 is saved first, so it is still gone after a restart. Do not delete or rename
 these paths from an app; the Terminal's `rm -r /` (or `/system`, `/home`)
 does it on purpose.
+
+**System requirement fail.** The same black screen with "System requirement
+fail" and the reason under it (`kernel/gui/reqfail.c`), also forever, when the
+computer starts but NovaOS cannot boot. Both checks run at startup only:
+*Requires a readable COS:// drive (at least 4 MB)* - on an installed-drive boot
+(`boot=disk`) the drive NovaOS starts from (COS://) must be found on the IDE
+controllers, read without errors (`persist_boot_status()`) and be 4 MB or
+larger; ISO boots start from the CD and pass. *A required bundle app is
+missing* - `/system/apps` is missing, none of the app files is found, or the
+file of a registered app is missing. "No drive found" is checked first, so it
+wins when `/system` itself is gone.
 
 **Boot splash setting:** `/system/config/splash.cfg`, a text file with one
 `key=value` per line. `noanimation=1`: the splash shows the Nova icon in the
@@ -753,15 +767,20 @@ sectors inside an app callback), `disk_flush`, `disk_rescan`,
 the command line) the VFS is saved to the disk automatically;
 `persist_active()`, `persist_get_info(&info)` (dirty, saving, last save,
 capacity), `persist_save()` (synchronous - the Terminal's `sync` command uses it)
-and `persist_save_async()`. The installer back end (`install_begin_sized /
-install_step / install_progress ...`) is what `apps/installer.c` and the
+and `persist_save_async()`; `persist_boot_status()` says whether the drive of
+an installed-drive boot was found and read at startup (`DISK_OK`,
+`DISK_ENODEV`, or the read error). The installer back end (`install_begin_sized /
+install_step / install_progress / install_cancel ...`) is what `apps/installer.c` and the
 NovaOS Drive installation screen of ISO boots (`kernel/gui/bootsetup.c`)
 drive: `install_begin_sized(disk, bytes, copy_files, err, n)` uses only the
 first `bytes` of the disk (0 = all of it); the drive sizes offered to users are
 `install_size_count() / install_size_bytes(i) / install_size_label(i)` (100 MB,
 150 MB, 200 MB, 250 MB, 500 MB, 700 MB, 1 GB, 5 GB, 10 GB),
 `install_size_fits(disk, bytes)` and `install_size_default(disk)` (the largest
-that fits). Disk layout: `kernel/disk/diskfmt.h` (sector 2047 holds the drive
+that fits). `install_cancel(job)` stops an unfinished job between steps and
+clears the boot record, the install header and the drive signature, so the disk
+no longer looks like an installed NovaOS (the NovaOS Drive installation's Cancel
+button). Disk layout: `kernel/disk/diskfmt.h` (sector 2047 holds the drive
 signature the ISO's GRUB menu looks for to boot an installed drive by
 default).
 
@@ -828,7 +847,11 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
 `SELFTEST: done, N passed, M failed`, `*** KERNEL PANIC ***`, `bootsetup: ready`
 (the NovaOS Drive installation screen waits for input), `bootsetup: drive
-installed`, `nodrive: No drive found (PATH is missing)`.
+installed`, `bootsetup: finished screen` (How to start your drive / Restart
+shown), `bootsetup: Cancel at N%` and `install: cancelled at N% ...`,
+`nodrive: No drive found (PATH is missing)`, `reqfail: System requirement fail -
+REASON (DETAIL)`, `reqfail: COS:// drive ok (...)` / `reqfail: COS:// is the CD
+(ISO boot)` and `reqfail: N bundle apps found in /system/apps` (checks passed).
 
 ---
 
