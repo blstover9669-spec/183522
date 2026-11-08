@@ -144,7 +144,7 @@ static void compact_disc(surface_t *s, int cx, int cy, int r, double spin, int o
  * ==================================================================================== */
 static void pick_apps(wl_t *wl) {
     static const char *const pref[] = { "Files", "Notepad", "Terminal", "Calculator", "Paint", "Clock",
-                                        "Calendar", "Piano", "Tetris", "Minesweeper", "Task Manager", "Snake" };
+                                        "Calendar", "Piano", "Games", "Task Manager", "Web Browser", "Sticky Notes" };
     wl->napps = 0;
     for (int i = 0; i < ARRAY_SIZE(pref) && wl->napps < MAX_APPS; i++) {
         const app_desc_t *a = app_find(pref[i]);
@@ -153,6 +153,7 @@ static void pick_apps(wl_t *wl) {
     for (int i = 0; i < app_count() && wl->napps < MAX_APPS; i++) {
         const app_desc_t *a = app_get(i);
         if (!a || (a->flags & APP_HIDDEN) || !strcmp(a->name, "Welcome")) continue;
+        if (a->category && !strcmp(a->category, CAT_GAMES) && strcmp(a->name, "Games")) continue;   /* inside Games */
         bool dup = false;
         for (int k = 0; k < wl->napps; k++) dup |= wl->apps[k] == a;
         if (!dup) wl->apps[wl->napps++] = a;
@@ -247,11 +248,20 @@ static void hero_desktop(wl_t *wl, surface_t *s, int dx, uint32_t now) {
         app_draw_icon(s, wl->apps[i], x + 12, y + 10 + i * 30, 22);
         gfx_fill_rounded_rect(s, x + 38, y + 18 + i * 30, 26, 5, 2, RGBA(255, 255, 255, 150));
     }
-    /* taskbar */
+    /* the bottom islands: Start button, the app rectangle (Settings, Welcome, Files), the clock */
     int tbh = 20, ty = y + MINI_H - tbh;
-    gfx_fill_rect(s, x, ty, MINI_W, tbh, t->dark ? RGBA(24, 26, 32, 215) : RGBA(240, 242, 248, 215));
+    uint32_t isl = t->dark ? RGBA(24, 26, 32, 215) : RGBA(240, 242, 248, 215);
+    gfx_fill_rounded_rect(s, x + 3, ty + 1, 18, 18, 5, isl);
     ui_draw_logo(s, x + 5, ty + 3, 14);
-    for (int i = 0; i < 3; i++) gfx_fill_rounded_rect(s, x + 28 + i * 18, ty + 5, 12, 10, 3, color_alpha(t->taskbar_text, 90));
+    static const char *const rect_apps[3] = { "Settings", "Welcome", "Files" };
+    int rx = x + (MINI_W - 62) / 2;
+    gfx_fill_rounded_rect(s, rx, ty + 1, 62, 18, 5, isl);
+    for (int i = 0; i < 3; i++) {
+        const app_desc_t *a = app_find(rect_apps[i]);
+        if (a) app_draw_icon(s, a, rx + 6 + i * 18, ty + 4, 12);
+        else gfx_fill_rounded_rect(s, rx + 6 + i * 18, ty + 5, 12, 10, 3, color_alpha(t->taskbar_text, 90));
+    }
+    gfx_fill_rounded_rect(s, x + MINI_W - 45, ty + 1, 42, 18, 5, isl);
     gfx_fill_rounded_rect(s, x + MINI_W - 40, ty + 7, 32, 6, 3, color_alpha(t->taskbar_text, 120));
     /* start menu opens and closes in a loop; the pointer points at the Start button */
     double cyc = fmod(tt, 3.6);
@@ -422,11 +432,12 @@ static void page_body(wl_t *wl, char *buf, int n) {
     case P_WINDOWS:
         snprintf(buf, (size_t)n, "Drag a window by its title bar. Drop it on the top edge to maximise it, or on "
                  "the left or right edge to fill half the screen. Alt+Tab switches windows, Alt+F4 closes one, "
-                 "and taskbar buttons minimise and restore them.");
+                 "and the app buttons next to the Start button minimise and restore them.");
         break;
     case P_APPS:
         snprintf(buf, (size_t)n, "%d apps come with NovaOS - files, a text editor, a terminal, tools, music and "
-                 "games. Click an icon above to open it; the Start menu lists everything by category.",
+                 "games. Click an icon above to open it; the Start menu lists the apps by category, and the "
+                 "games are inside Games.",
                  visible_apps());
         break;
     case P_STYLE:

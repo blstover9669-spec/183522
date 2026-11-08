@@ -18,8 +18,7 @@
  *                 test area, restore defaults.
  *   Date & Time - live analog + digital clock, ISO week / day of year, month
  *                 calendar, clock details, shortcuts to Clock and Calendar.
- *   Sound       - system sounds on/off (the same switch as the taskbar speaker
- *                 icon), test sounds, PC speaker notes.
+ *   Sound       - system sounds on/off, test sounds, PC speaker notes.
  *   SafetyShield - the threat scanner (kernel/services/safetyshield.c): the
  *                 risk levels and what they mean, a Scan button, the
  *                 "Recent scanned files" list and a bar with the files
@@ -30,8 +29,8 @@
  *
  * Settings are remembered in /system/config/settings. An INIT_FS hook applies them again
  * at boot (an installed system keeps them across restarts) and a small
- * background timer notices changes made elsewhere (desktop menu, taskbar mute
- * button) and saves those too. Options given on the kernel command line
+ * background timer notices changes made elsewhere (e.g. the desktop menu) and
+ * saves those too. Options given on the kernel command line
  * (dark=, wallpaper=, mousespeed=) win over saved settings.
  *
  * autorun=Settings:mouse opens a page directly (appearance, styles, mouse,
@@ -587,9 +586,12 @@ static void draw_mode_preview(surface_t *s, int x, int y, int w, int h, bool dar
     gfx_fill_rounded_rect(s, wx + 7, wy + 16, ww * 55 / 100, 4, 2, line);
     gfx_fill_rounded_rect(s, wx + 7, wy + 25, ww * 38 / 100, 4, 2, line);
     gfx_fill_rounded_rect(s, wx + ww - 27, wy + wh - 13, 20, 8, 3, accent);
-    /* taskbar */
-    gfx_fill_rect(s, x + 4, y + h - 9, w - 8, 6, dark ? RGBA(16, 18, 24, 190) : RGBA(246, 248, 252, 200));
+    /* the bottom islands: Start button, the app rectangle, the clock */
+    uint32_t isl = dark ? RGBA(16, 18, 24, 190) : RGBA(246, 248, 252, 200);
+    gfx_fill_rounded_rect(s, x + 4, y + h - 10, 10, 8, 3, isl);
     gfx_fill_circle_aa(s, x + 9, y + h - 6, 2, accent);
+    gfx_fill_rounded_rect(s, x + w / 2 - 13, y + h - 10, 26, 8, 3, isl);
+    gfx_fill_rounded_rect(s, x + w - 22, y + h - 10, 18, 8, 3, isl);
 }
 
 static void mode_draw(widget_t *w, surface_t *s, rect_t r) {
@@ -1113,7 +1115,7 @@ static void on_sound_toggle(widget_t *w, void *ctx) {
     bool on = ui_get_value(w) != 0;
     sys_set_sound_enabled(on);
     sync_sound_buttons(st);
-    theme_refresh();        /* no "sound changed" notification exists: repaint so the taskbar icon follows */
+    theme_refresh();        /* no "sound changed" notification exists: repaint everything that shows it */
     if (on) {
         static const note_t ok[] = { { 784, 70 }, { 1175, 110 } };
         sys_play_notes(ok, 2);
@@ -1974,8 +1976,7 @@ static void paint_page(st_t *st, surface_t *s) {
     case PG_SOUND: {
         draw_big_speaker(st, s, SPK_X, SPK_Y, SPK_S);
         gfx_text_wrapped(s, rect_make(CX + 140, 136, CW - 140, 60),
-                         "Beeps, alerts and melodies play on the PC speaker. The speaker icon in the taskbar "
-                         "turns sounds on and off too.", sys_text_dim(t), FONT_UI);
+                         "Beeps, alerts and melodies play on the PC speaker.", sys_text_dim(t), FONT_UI);
         section(s, CX, 226, "Try a sound");
         rect_t r = rect_make(CX, 310, CW, 106);
         card(s, r);
