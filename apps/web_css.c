@@ -32,7 +32,7 @@ enum {
     P_ALIGN_SELF, P_JUSTIFY_SELF, P_JUSTIFY_ITEMS, P_ALIGN_CONTENT, P_ASPECT_RATIO,
     P_GRID_COLS, P_GRID_ROWS, P_GRID_AREAS, P_GRID_AUTO_COLS, P_GRID_AUTO_ROWS, P_GRID_AUTO_FLOW,
     P_GRID_COL_START, P_GRID_COL_END, P_GRID_ROW_START, P_GRID_ROW_END, P_GRID_AREA_NAME,
-    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT, P_BOX_SHADOW,
+    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT, P_BOX_SHADOW, P_OUTLINE,
     P_LONGHAND_COUNT,
     /* shorthands (only used while parsing / for var()) */
     P_MARGIN, P_PADDING, P_BORDER, P_BORDER_TOP, P_BORDER_RIGHT, P_BORDER_BOTTOM, P_BORDER_LEFT,
@@ -114,7 +114,8 @@ static const struct { const char *name; int id; } prop_names[] = {
     {"border-inline-color", P_BORDER_INLINE_COLOR}, {"border-block-color", P_BORDER_BLOCK_COLOR},
     {"border-inline-style", P_BORDER_INLINE_STYLE}, {"border-block-style", P_BORDER_BLOCK_STYLE},
     {"-webkit-tap-highlight-color", P_IGNORED}, {"transition-behavior", P_IGNORED}, {"isolation", P_ISOLATION},
-    {"fill", P_FILL}, {"content", P_CONTENT}, {"box-shadow", P_BOX_SHADOW}, {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
+    {"fill", P_FILL}, {"content", P_CONTENT}, {"box-shadow", P_BOX_SHADOW},
+    {"outline", P_OUTLINE}, {"outline-style", P_OUTLINE}, {"mask-image", P_MASK_IMAGE}, {"-webkit-mask-image", P_MASK_IMAGE}, {"mask", P_MASK_IMAGE}, {"-webkit-mask", P_MASK_IMAGE},
 };
 
 static int prop_lookup(const char *s, size_t n) {
@@ -830,6 +831,19 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
         else if (!parse_component(s, n, &v) || (v.t != CV_INHERIT && v.t != CV_INITIAL)) { v.t = CV_NUM; v.f = 1; }
         out_add(o, prop, &v, imp);
         return;
+    case P_OUTLINE: {
+        /* only "no outline" matters (focus rings of form fields) */
+        const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
+        int c = split_components(s, n, cs, cl, false);
+        bool none = false;
+        for (int i = 0; i < c; i++)
+            if ((cl[i] == 4 && !strncasecmp(cs[i], "none", 4)) || (cl[i] == 1 && cs[i][0] == '0') ||
+                (cl[i] == 3 && !strncasecmp(cs[i], "0px", 3))) none = true;
+        v.t = CV_NUM;
+        v.f = none ? 1 : 0;
+        out_add(o, prop, &v, imp);
+        return;
+    }
     case P_ISOLATION:
         if (n == 7 && !strncasecmp(s, "isolate", 7)) { v.t = CV_NUM; v.f = 1; }
         else if (n == 4 && !strncasecmp(s, "auto", 4)) { v.t = CV_NUM; v.f = 0; }
@@ -3337,6 +3351,10 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
     case P_ISOLATION:
         if (v->t == CV_NUM) st->isolate = v->f > 0;
         else if (initial) st->isolate = 0;
+        break;
+    case P_OUTLINE:
+        if (v->t == CV_NUM) st->no_outline = v->f > 0;
+        else if (initial) st->no_outline = 0;
         break;
     case P_MASK_IMAGE:
         if (v->t == CV_NUM) st->masked = v->f > 0;

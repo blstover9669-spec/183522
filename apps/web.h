@@ -219,6 +219,7 @@ typedef struct web_style {
     uint8_t  ovf_scroll;               /* overflow: auto / scroll           */
     uint8_t  masked;                   /* mask-image: the background is only an icon's shape */
     uint8_t  fade;                     /* 255 - opacity x 255 (0 = opaque)  */
+    uint8_t  no_outline;               /* outline: none (no focus ring)     */
     uint8_t  fill_mode;                /* svg fill (inherited): 0 unset, 1 colour, 2 currentColor, 3 none */
     uint8_t  fill_own;                 /* ... set by a rule on this element */
     uint32_t fill;
@@ -279,6 +280,7 @@ typedef struct web_ctrl {
     bool     fixed;           /* in a position:fixed box: y is relative to the view */
     bool     boxed;           /* <button> laid out as a styled box: no native look */
     bool     styled;          /* drawn with its CSS background / border (css_*) */
+    bool     no_outline;      /* outline: none - no focus ring             */
     uint32_t css_bg, css_bc;
     int      css_bw, css_rad;  /* css_rad < 0: tenths of a percent */
     const font_t *font;

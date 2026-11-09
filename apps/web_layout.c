@@ -488,6 +488,7 @@ static void ctrl_box(lctx_t *lc, web_ctrl_t *c, const web_style_t *st, int cbw, 
     c->css_bw = st->bw[0];
     c->css_bc = st->bc[0];
     c->css_rad = st->radius[0];
+    c->no_outline = st->no_outline;
     c->styled = c->type != C_CHECKBOX && c->type != C_RADIO && c->type != C_IMAGE && c->type != C_FILE;
     int fh = font_height(f);
     int w = 0, h = fh + 8 * z / 100;
@@ -3457,6 +3458,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
         /* a <button> is drawn as the box it is styled as; the control only takes clicks */
         web_ctrl_t *ct = &lc->pg->ctrls[n->ctl];
         ct->boxed = true;
+        ct->no_outline = st->no_outline;
         ct->font = sfont(lc, st);
         ct->color = st->color;
         web_item_t *ci = item_add(lc, WI_CTRL);

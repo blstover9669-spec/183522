@@ -196,7 +196,7 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
             if (r) paint_rrect(s, x, y, w, h, rad, c->css_bw, c->css_bc);
             else for (int i = 0; i < c->css_bw && i < w / 2 && i < h / 2; i++) gfx_rect(s, x + i, y + i, w - 2 * i, h - 2 * i, c->css_bc);
         }
-        if (focused) gfx_rounded_rect(s, x - 1, y - 1, w + 2, h + 2, r ? r + 1 : 2, FOCUS_RING);
+        if (focused && !c->no_outline) gfx_rounded_rect(s, x - 1, y - 1, w + 2, h + 2, r ? r + 1 : 2, FOCUS_RING);
     }
     switch (c->type) {
     case C_TEXT: case C_PASSWORD: case C_TEXTAREA: {
@@ -208,7 +208,9 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
         rect_t old = s->clip;
         surface_set_clip(s, rect_intersect(old, rect_make(x + 3, y + 2, w - 6, h - 4)));
         if (c->type == C_TEXTAREA) {
-            int ly = y + 4, line = 0, cl = 0, cc = 0;
+            /* (a one-row box shorter than a line plus the usual inset: centre the line) */
+            int ly = h < fh + 8 ? y + (h - fh) / 2 : y + 4, line = 0, cl = 0, cc = 0;
+            if (h < fh + 8) surface_set_clip(s, rect_intersect(old, rect_make(x + 3, y, w - 6, h)));
             const char *v = c->value ? c->value : "";
             if (!*v && !focused) {
                 const char *ph = web_attr(c->node, "placeholder");
@@ -216,15 +218,20 @@ void web_paint_ctrl(web_page_t *pg, web_ctrl_t *c, surface_t *s, int x, int y, b
             }
             /* find the caret's line and column */
             for (int i = 0; i < c->caret && v[i]; i++) { if (v[i] == '\n') { cl++; cc = 0; } else cc++; }
-            int first = cl - (h - 8) / fh + 1;
+            int rows = (h - 8) / MAX(fh, 1);
+            if (rows < 1) rows = 1;       /* the caret's line is always drawn */
+            int first = cl - rows + 1;
             if (first < 0) first = 0;
             const char *p = v;
             while (*p || line == cl) {
                 const char *e = strchr(p, '\n');
                 int len = e ? (int)(e - p) : (int)strlen(p);
                 if (line >= first) {
-                    gfx_text_n(s, x + 5, ly, p, len, text, f);
-                    if (focused && caret && line == cl) gfx_fill_rect(s, x + 5 + font_text_width_n(f, p, cc), ly, 1, fh, RGB(0, 0, 0));
+                    /* (lines are not wrapped: the caret's line slides left to keep the caret in view) */
+                    int off = 0;
+                    if (line == cl) { int cxp = font_text_width_n(f, p, cc); if (cxp > w - 14) off = cxp - (w - 14); }
+                    gfx_text_n(s, x + 5 - off, ly, p, len, text, f);
+                    if (focused && caret && line == cl) gfx_fill_rect(s, x + 5 - off + font_text_width_n(f, p, cc), ly, 1, fh, text);
                     ly += fh;
                     if (ly > y + h) break;
                 }
@@ -392,7 +399,8 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
         }
         case WI_CTRL:
             if (it->ref >= 0 && it->ref < pg->nctrls && pg->ctrls[it->ref].boxed) {
-                if (o && o->focus_ctrl == it->ref) gfx_rounded_rect(s, X - 1, Y - 1, it->w + 2, it->h + 2, 4, FOCUS_RING);
+                if (o && o->focus_ctrl == it->ref && !pg->ctrls[it->ref].no_outline)
+                    gfx_rounded_rect(s, X - 1, Y - 1, it->w + 2, it->h + 2, 4, FOCUS_RING);
                 break;
             }
             if (it->ref >= 0 && it->ref < pg->nctrls)
