@@ -166,7 +166,8 @@ static web_item_t *item_add(lctx_t *lc, int kind) {
     web_item_t *it = &L->items[L->nitems++];
     memset(it, 0, sizeof *it);
     it->kind = (uint8_t)kind;
-    it->link = -1;
+    /* inside a link: its boxes (a button's background) are part of it, not just the text */
+    it->link = kind == WI_PLACE || kind == WI_BOX ? -1 : lc->link;
     it->clip = lc->cur_clip;
     return it;
 }
@@ -566,6 +567,27 @@ static void meas_atom(meas_t *m, int w, int minw) {
     meas_add(m, w, minw);
 }
 
+static int up1252(int c);
+static int low1252(int c);
+
+/* the width of a word as text-transform shows it */
+static int tt_width(const font_t *f, const char *s, int n, int tt) {
+    if (tt == TT_NONE) return font_text_width_n(f, s, n);
+    char buf[128];
+    int w = 0;
+    for (int i = 0; i < n; i += (int)sizeof buf) {
+        int k = n - i < (int)sizeof buf ? n - i : (int)sizeof buf;
+        for (int j = 0; j < k; j++) {
+            int c = (unsigned char)s[i + j];
+            if (tt == TT_UPPER || (tt == TT_CAPITALIZE && i + j == 0)) c = up1252(c);
+            else if (tt == TT_LOWER) c = low1252(c);
+            buf[j] = (char)c;
+        }
+        w += font_text_width_n(f, buf, k);
+    }
+    return w;
+}
+
 static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_style_t *st) {
     const font_t *f = sfont(lc, st);
     int spw = font_char_width(f, ' ');
@@ -603,8 +625,7 @@ static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_styl
         }
         int j = i;
         while (j < n && !web_isspace((unsigned char)s[j])) j++;
-        int w = font_text_width_n(f, s + i, j - i);
-        if (st->transform == TT_UPPER) w = w * 115 / 100;
+        int w = tt_width(f, s + i, j - i, st->transform);
         int sp = (m->pend && m->line) ? spw : 0;
         meas_glue(m, w, sp);
         i = j;
@@ -1253,8 +1274,10 @@ static void ifc_flush(ifc_t *f, int upto) {
         else if (f->align == TA_RIGHT) dx = free_w;
     }
     int x0 = f->lx + dx, base = f->y + asc;
+    int saved_link = lc->link;
     for (int i = 0; i < n;) {
         litem_t *it = &f->it[i];
+        if (it->kind != LI_BOX) lc->link = it->link;   /* (for the backgrounds and borders) */
         if (it->kind == LI_TEXT) {
             int j = i + 1;
             while (j < n && f->it[j].kind == LI_TEXT && f->it[j].font == it->font && f->it[j].color == it->color &&
@@ -1309,6 +1332,7 @@ static void ifc_flush(ifc_t *f, int upto) {
         }
         i++;
     }
+    lc->link = saved_link;
     emit_marker(lc, base);
     lc->last_base = base;
     f->y += lh;
@@ -1722,7 +1746,7 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
         litem_t *it = ifc_push(f);
         if (it) {
             it->kind = LI_SPACE; it->glued = glued; it->x = f->used + spw; it->spw = spw; it->w = lpad; f->used = it->x + lpad;
-            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden;
+            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden; it->link = lc->link;
         }
     }
     lc->depth++;
@@ -1732,7 +1756,7 @@ static void inline_node(ifc_t *f, web_node_t *c, const web_style_t *pst) {
         litem_t *it = ifc_push(f);
         if (it) {
             it->kind = LI_SPACE; it->glued = true; it->x = f->used; it->w = rpad; f->used += rpad;
-            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden;
+            it->bg = lc->ibg; it->font = sfont(lc, st); it->hidden = st->visibility_hidden; it->link = lc->link;
         }
     }
     lc->link = saved_link;
