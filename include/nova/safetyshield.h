@@ -2,15 +2,24 @@
  * nova/safetyshield.h - SafetyShield, the NovaOS threat scanner.
  *
  * The "safetyshield" service scans every file in the OS automatically every
- * minute (and on demand with safetyshield_scan()). Each file is checked
- * against a table of detection rules (kernel/services/safetyshield.c) and
- * gets a risk level. When a scan catches something (any level above Safe) a
- * notification appears: "SafetyShield detected a threat in your system".
+ * minute (and on demand with safetyshield_scan()). Each file is checked by
+ * its name, extension, first bytes (magic numbers) and a set of content
+ * signatures matched over its whole content (kernel/services/safetyshield.c),
+ * and gets a risk level. When a check catches something (any level above Safe)
+ * a notification appears: "SafetyShield detected a threat in your system".
+ * SafetyShield reports only - it never deletes, quarantines or changes a file.
  *
- * Detection rules are inactive for now, so every file is Safe. The kernel
- * command line option safetyshield_test=N (N = 1..6, the risk level) turns on
- * a built-in test rule that flags /tmp/safetyshield-test.txt, so the whole
- * detection path (log, list, notification) can be tested.
+ * Everything under /system is a trusted NovaOS system file and stays Safe, and
+ * ordinary documents/pictures/notes need a strong, specific pattern to be
+ * flagged. The EICAR industry-standard antivirus test file is detected.
+ *
+ * safetyshield_check_file() checks one file right away in the background (the
+ * Web Browser calls it when a download finishes) and safetyshield_file_risk()
+ * reads back that file's risk. The kernel command line option
+ * safetyshield_test=N (N = 1..6, the risk level) flags
+ * /tmp/safetyshield-test.txt, and safetyshield_samples=1 drops a set of
+ * harmless files that match the rules (plus EICAR) under /tmp/ss-samples/, so
+ * the whole detection path (log, list, notification) can be tested.
  *
  * Not included by <nova.h>: #include <nova/safetyshield.h>.
  */
@@ -52,6 +61,11 @@ typedef struct safetyshield_status {
 void     safetyshield_status(safetyshield_status_t *out);
 /* Start a scan now: 0 = started, 1 = already scanning, -1 = service not running. */
 int      safetyshield_scan(void);
+/* Queue an immediate background check of one file (e.g. a finished download). The normal
+   threat notification appears if it is a threat; safetyshield_generation() bumps. */
+void     safetyshield_check_file(const char *path);
+/* The last known risk of a file (SS_RISK_*), or -1 if it has not been checked yet. */
+int      safetyshield_file_risk(const char *path);
 /* Number of files in the whole OS (hidden and system files included). */
 int      safetyshield_total_files(void);
 /* Bumps on every change (scan progress, results) - poll it to refresh a UI. */
@@ -61,7 +75,7 @@ uint32_t safetyshield_generation(void);
 typedef struct safetyshield_entry {
     char path[VFS_PATH_MAX];
     int  risk;                 /* SS_RISK_*                         */
-    char rule[32];             /* name of the rule that matched, "" */
+    char rule[48];             /* name of the rule that matched, "" */
 } safetyshield_entry_t;
 
 int  safetyshield_recent_count(void);
