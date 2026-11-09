@@ -96,6 +96,7 @@ typedef struct tab {
     char refresh[B_URL_MAX]; /* <meta http-equiv=refresh>                 */
     uint32_t refresh_at;
     int sx, sy;
+    uint32_t dl_gen, dl_sig, dl_shown;   /* Browser://Downloads: what it shows, when it was made */
     /* security of the page shown */
     bool https, cert_ok;
     char cert_subject[128], cert_issuer[128], tls_info[96], cert_error[160];
@@ -144,6 +145,30 @@ void bdata_history_clear(void);
 int  bdata_bookmark_find(const char *url);
 void bdata_bookmark_add(const char *url, const char *title);
 void bdata_bookmark_remove(int i);
+/* the downloads list (Browser://Downloads), oldest first, kept in ~/.browser/downloads */
+#define B_DL_PAGE "Browser://Downloads"
+enum { BDL_ACTIVE = 0, BDL_DONE, BDL_FAILED, BDL_CANCELLED };
+typedef struct bdl {
+    int      id;
+    uint8_t  state;          /* BDL_*                                     */
+    uint32_t time;           /* sys_time() it started                     */
+    uint32_t got, total;     /* bytes so far / expected (0 = unknown)     */
+    char     name[96];       /* the file's name                           */
+    char     path[256];      /* where it was saved ("" until then)        */
+    char     url[512];       /* where it came from                        */
+    char     reason[96];     /* why it failed                             */
+} bdl_t;
+extern bdl_t   *bdata_dl;
+extern int      bdata_ndl;
+extern uint32_t bdata_dl_gen;    /* bumps on every change (progress too) */
+bdl_t *bdata_dl_add(const char *name, const char *url);   /* a new active entry */
+bdl_t *bdata_dl_find(int id);
+void   bdata_dl_remove(int id);
+void   bdata_dl_clear(void);         /* every entry that is not running */
+void   bdata_dl_changed(bool save);  /* save = the state changed (not just progress) */
+uint32_t bdata_dl_risk_sig(void);    /* changes when SafetyShield's verdicts on them do */
+bool   bdata_is_dl_page(const char *url);
+char  *bpage_downloads(void);
 /* built-in pages (HTML in the page fonts' 1252 charset); malloc'd */
 char *bpage_home(void);
 char *bpage_history(void);
@@ -168,6 +193,8 @@ void tab_scroll_to(tab_t *t, int x, int y);
 void browser_allow_host(const char *url);
 int  browser_downloads_active(void);
 const char *browser_download_status(void);
+void browser_dl_cancel(int id);
+void browser_dl_retry(int id);
 /* "about:..." pages and their actions */
 void tab_show_internal(tab_t *t, const char *url, char *html);
 

@@ -258,7 +258,7 @@ const char *browser_input_to_url(const char *in, char *out, size_t size) {
     size_t n = strlen(in);
     while (n && in[n - 1] == ' ') n--;
     if (!n || n >= size - 16) return NULL;
-    static const char *schemes[] = { "http://", "https://", "file:", "about:", "view-source:", "data:" };
+    static const char *schemes[] = { "http://", "https://", "file:", "about:", "view-source:", "data:", "browser:" };
     for (int i = 0; i < ARRAY_SIZE(schemes); i++)
         if (n >= strlen(schemes[i]) && !strncasecmp(in, schemes[i], strlen(schemes[i]))) {
             memcpy(out, in, n);
@@ -542,7 +542,7 @@ static void paint(browser_t *b) {
     draw_button(b, s, HS_HOME, true);
     draw_button(b, s, HS_LOCK, true);
     draw_button(b, s, HS_ZOOM, true);
-    draw_button(b, s, HS_STAR, t && strncmp(t->url, "about:", 6));
+    draw_button(b, s, HS_STAR, t && strncmp(t->url, "about:", 6) && strncasecmp(t->url, "browser:", 8));
     draw_button(b, s, HS_MENU, true);
     draw_bookmarks(b, s);
     if (b->find_open) draw_find(b, s);
@@ -967,7 +967,7 @@ static void open_settings(browser_t *b) {
 
 static void view_source(browser_t *b) {
     tab_t *t = cur(b);
-    if (!t || !strncmp(t->url, "view-source:", 12) || !strncmp(t->url, "about:", 6)) return;
+    if (!t || !strncmp(t->url, "view-source:", 12) || !strncmp(t->url, "about:", 6) || !strncasecmp(t->url, "browser:", 8)) return;
     char url[B_URL_MAX + 16];
     snprintf(url, sizeof url, "view-source:%s", t->url);
     tab_t *n = browser_new_tab(b, NULL, true);
@@ -988,7 +988,7 @@ static void view_source(browser_t *b) {
 
 static void toggle_bookmark(browser_t *b) {
     tab_t *t = cur(b);
-    if (!t || !strncmp(t->url, "about:", 6)) return;
+    if (!t || !strncmp(t->url, "about:", 6) || !strncasecmp(t->url, "browser:", 8)) return;
     int i = bdata_bookmark_find(t->url);
     if (i >= 0) { bdata_bookmark_remove(i); set_status(b, "Bookmark removed"); }
     else {
@@ -998,11 +998,6 @@ static void toggle_bookmark(browser_t *b) {
     win_invalidate(b->win);
 }
 
-static void open_downloads(void) {
-    if (!vfs_is_dir(B_DOWNLOADS)) vfs_mkdirs(B_DOWNLOADS);
-    shell_open(B_DOWNLOADS);
-}
-
 enum { M_NEWTAB = 0, M_HISTORY, M_DOWNLOADS, M_SEP1, M_FIND, M_ZIN, M_ZOUT, M_ZRESET, M_SOURCE, M_SEP2, M_SETTINGS };
 
 static void menu_cb(int item, void *ctx) {
@@ -1010,7 +1005,7 @@ static void menu_cb(int item, void *ctx) {
     switch (item) {
     case M_NEWTAB: browser_new_tab(b, NULL, true); break;
     case M_HISTORY: browser_new_tab(b, "about:history", true); break;
-    case M_DOWNLOADS: open_downloads(); break;
+    case M_DOWNLOADS: browser_new_tab(b, B_DL_PAGE, true); break;
     case M_FIND: find_show(b, true); break;
     case M_ZIN: zoom_step(b, 1); break;
     case M_ZOUT: zoom_step(b, -1); break;
@@ -1290,6 +1285,7 @@ static bool window_keys(browser_t *b, const event_t *ev) {
         case 'r': reload_or_stop(b); return true;
         case 'f': find_show(b, true); return true;
         case 'h': browser_new_tab(b, "about:history", true); return true;
+        case 'j': browser_new_tab(b, B_DL_PAGE, true); return true;
         case 'd': toggle_bookmark(b); return true;
         case 'u': view_source(b); return true;
         case '=': case '+': zoom_step(b, 1); return true;

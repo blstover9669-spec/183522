@@ -186,8 +186,12 @@ typedef struct dl {
     http_request_t *req;
     char name[64];
     uint32_t got, total;
+    int rec;                 /* its entry on Browser://Downloads (id), 0 = none */
 } dl_t;
 static dl_t dls[8];
+
+/* SafetyShield's per-file check may not be built in (yet) */
+void safetyshield_check_file(const char *path) __attribute__((weak));
 
 int browser_downloads_active(void) {
     int n = 0;
@@ -255,7 +259,8 @@ static void download_name(const char *cd, const char *url, char *out, size_t siz
     strlcpy(out, clean, size);
 }
 
-static void save_download(const char *name, const uint8_t *data, uint32_t len) {
+/* saves into ~/Downloads (a free name), notifies, and records the result in entry rec */
+static void save_download(const char *name, const uint8_t *data, uint32_t len, int rec) {
     if (!vfs_is_dir(B_DOWNLOADS)) vfs_mkdirs(B_DOWNLOADS);
     char path[320], base[96], ext[32] = "";
     strlcpy(base, name, sizeof base);
@@ -265,30 +270,81 @@ static void save_download(const char *name, const uint8_t *data, uint32_t len) {
     for (int i = 1; vfs_exists(path) && i < 1000; i++) snprintf(path, sizeof path, "%s/%s (%d)%s", B_DOWNLOADS, base, i, ext);
     int r = vfs_write_file(path, data, len);
     char msg[200];
+    bdl_t *e = rec ? bdata_dl_find(rec) : NULL;
     if (r < 0) {
         snprintf(msg, sizeof msg, "%s could not be saved: %s", name, vfs_strerror(r));
         notify("Download failed", msg, ICON_ERROR);
+        if (e) { e->state = BDL_FAILED; strlcpy(e->reason, vfs_strerror(r), sizeof e->reason); }
     } else {
         snprintf(msg, sizeof msg, "%s saved in Downloads", vfs_basename(path));
         notify("Download complete", msg, ICON_FOLDER_DOWNLOADS);
+        if (e) { e->state = BDL_DONE; strlcpy(e->path, path, sizeof e->path); e->got = e->total = len; }
+        if (safetyshield_check_file) safetyshield_check_file(path);
     }
+    if (e) bdata_dl_changed(true);
     klog("browser: download %s -> %s (%u bytes, %d)", name, path, (unsigned)len, r);
 }
 
 static void dl_finish(dl_t *d, http_request_t *r) {
-    if (http_error(r) != HTTP_OK) {
-        char msg[200];
-        snprintf(msg, sizeof msg, "%s: %s", d->name, http_error_text(r));
+    if (http_error(r) != HTTP_OK || http_status(r) >= 400) {
+        char msg[200], why[96];
+        if (http_error(r) != HTTP_OK) strlcpy(why, http_error_text(r), sizeof why);
+        else snprintf(why, sizeof why, "Server error %d", http_status(r));
+        snprintf(msg, sizeof msg, "%s: %s", d->name, why);
         notify("Download failed", msg, ICON_ERROR);
+        bdl_t *e = d->rec ? bdata_dl_find(d->rec) : NULL;
+        if (e) { e->state = BDL_FAILED; strlcpy(e->reason, why, sizeof e->reason); bdata_dl_changed(true); }
     } else {
         uint32_t len = 0;
         uint8_t *body = http_take_body(r, &len);
-        save_download(d->name, body ? body : (const uint8_t *)"", len);
+        save_download(d->name, body ? body : (const uint8_t *)"", len, d->rec);
         free(body);
     }
     http_free(r);
     d->active = false;
     d->req = NULL;
+}
+
+static void doc_progress(http_request_t *r, void *ctx);
+static void doc_done(http_request_t *r, void *ctx);
+static bool host_allowed(const char *url);
+
+void browser_dl_cancel(int id) {
+    for (int i = 0; i < 8; i++)
+        if (dls[i].active && dls[i].rec == id) {
+            http_free(dls[i].req);       /* (its callback will not run any more) */
+            dls[i].req = NULL;
+            dls[i].active = false;
+        }
+    bdl_t *e = bdata_dl_find(id);
+    if (e && e->state == BDL_ACTIVE) { e->state = BDL_CANCELLED; bdata_dl_changed(true); }
+}
+
+/* download the entry's address again (Failed / Cancelled -> Retry) */
+void browser_dl_retry(int id) {
+    bdl_t *e = bdata_dl_find(id);
+    if (!e || e->state == BDL_ACTIVE || !e->url[0]) return;
+    dl_t *d = NULL;
+    for (int i = 0; i < 8; i++) if (!dls[i].active) { d = &dls[i]; break; }
+    rctx_t *rc = d ? calloc(1, sizeof *rc) : NULL;
+    if (!rc) return;
+    memset(d, 0, sizeof *d);
+    strlcpy(d->name, e->name, sizeof d->name);
+    d->rec = id;
+    rc->dl = d;
+    http_options_t o;
+    memset(&o, 0, sizeof o);
+    o.flags = host_allowed(e->url) ? HTTP_F_ALLOW_BAD_CERT : 0;
+    o.on_progress = doc_progress;
+    d->req = http_fetch_ex(e->url, &o, doc_done, rc);
+    if (!d->req) { free(rc); return; }
+    d->active = true;
+    e->state = BDL_ACTIVE;
+    e->got = e->total = 0;
+    e->reason[0] = 0;
+    e->path[0] = 0;
+    e->time = sys_time();
+    bdata_dl_changed(true);
 }
 
 static bool wants_download(http_request_t *r) {
@@ -568,9 +624,12 @@ void tab_restyle(tab_t *t) {
     t->styled = true;
     tab_relayout(t);
     if (first) {
-        klog("browser: %s: %d elements, %d stylesheets, style %u ms, layout %d ms, %d items, heap %u KB used",
-             t->url, t->pg.doc->nelems, n, (unsigned)(t1 - t0), t->pg.lay.ms, t->pg.lay.nitems,
-             (unsigned)(sys_mem_used() / 1024));
+        /* (Browser://Downloads is made again twice a second while files download: not logged) */
+        if (!t->internal || !bdata_is_dl_page(t->url)) {
+            klog("browser: %s: %d elements, %d stylesheets, style %u ms, layout %d ms, %d items, heap %u KB used",
+                 t->url, t->pg.doc->nelems, n, (unsigned)(t1 - t0), t->pg.lay.ms, t->pg.lay.nitems,
+                 (unsigned)(sys_mem_used() / 1024));
+        }
         pump(t);
     }
 }
@@ -630,8 +689,19 @@ static void decode_one(tab_t *t) {
     }
 }
 
+static void browser_page(tab_t *t, const char *url);
+
 void tab_tick(tab_t *t) {
     uint32_t now = sys_uptime_ms();
+    if (bdata_is_dl_page(t->url) && !t->req && (int32_t)(now - t->dl_shown) >= 500) {
+        /* Browser://Downloads follows the downloads (and SafetyShield's verdicts) live */
+        uint32_t sig = t->dl_sig;
+        if (t->dl_gen == bdata_dl_gen) { sig = bdata_dl_risk_sig(); t->dl_shown = now; }
+        if (t->dl_gen != bdata_dl_gen || sig != t->dl_sig) {
+            t->req_mode = NAV_RELOAD;
+            browser_page(t, B_DL_PAGE);
+        }
+    }
     if (t->net_wait && !t->req && (net_is_up() || (int32_t)(now - t->net_wait) >= 0)) {
         char url[B_URL_MAX];
         strlcpy(url, t->req_url, sizeof url);
@@ -839,7 +909,8 @@ static void deliver(tab_t *t, const char *url, uint8_t *body, uint32_t len, cons
     if (kind == K_DOWNLOAD) {
         char name[96];
         download_name(NULL, url, name, sizeof name);
-        save_download(name, body, len);
+        bdl_t *e = bdata_dl_add(name, url);
+        save_download(name, body, len, e ? e->id : 0);
         free(body);
         browser_tab_changed(t);
         return;
@@ -898,6 +969,8 @@ static void doc_progress(http_request_t *r, void *ctx) {
     if (rc->dl) {
         rc->dl->got = got;
         rc->dl->total = total;
+        bdl_t *e = rc->dl->rec ? bdata_dl_find(rc->dl->rec) : NULL;
+        if (e) { e->got = got; e->total = total; bdata_dl_changed(false); }
         return;
     }
     tab_t *t = rc->t;
@@ -914,6 +987,8 @@ static void doc_progress(http_request_t *r, void *ctx) {
             download_name(http_header(r, "Content-Disposition"), http_url(r), d->name, sizeof d->name);
             d->got = got;
             d->total = total;
+            bdl_t *e = bdata_dl_add(d->name, http_url(r));
+            if (e) { d->rec = e->id; e->got = got; e->total = total; }
             rc->t = NULL;
             rc->dl = d;
             t->req = NULL;
@@ -1017,6 +1092,43 @@ static void about_page(tab_t *t, const char *url) {
     browser_tab_changed(t);
 }
 
+/* Browser://Downloads and its actions (browser://downloads/open?ID ...) */
+static void browser_page(tab_t *t, const char *url) {
+    if (!bdata_is_dl_page(url)) {
+        char *html = bpage_error("This page does not exist", "The browser has no page at this address.", NULL, url, false);
+        commit(t, url);
+        clear_security(t);
+        if (html) show_html(t, url, html, (uint32_t)strlen(html), NULL, true);
+        browser_tab_changed(t);
+        return;
+    }
+    const char *act = url + 19;
+    if (*act == '/') act++;
+    const char *q = strchr(act, '?');
+    int id = q ? atoi(q + 1) : 0;
+    bool action = *act != 0;
+    bdl_t *e = id ? bdata_dl_find(id) : NULL;
+    if (!strncasecmp(act, "open", 4) && e && e->path[0]) shell_open(e->path);
+    else if (!strncasecmp(act, "show", 4)) {
+        if (!vfs_is_dir(B_DOWNLOADS)) vfs_mkdirs(B_DOWNLOADS);
+        shell_open(B_DOWNLOADS);
+    } else if (!strncasecmp(act, "cancel", 6) && e) browser_dl_cancel(id);
+    else if (!strncasecmp(act, "retry", 5) && e) browser_dl_retry(id);
+    else if (!strncasecmp(act, "remove", 6) && e) {
+        if (e->state == BDL_ACTIVE) browser_dl_cancel(id);
+        bdata_dl_remove(id);
+    } else if (!strncasecmp(act, "clear", 5)) bdata_dl_clear();
+    /* an action keeps the page where it is (no new history entry, same scroll) */
+    if (action && bdata_is_dl_page(t->url)) t->req_mode = NAV_RELOAD;
+    char *html = bpage_downloads();
+    tab_show_internal(t, B_DL_PAGE, html);
+    t->dl_gen = bdata_dl_gen;
+    t->dl_sig = bdata_dl_risk_sig();
+    t->dl_shown = sys_uptime_ms();
+    strlcpy(t->title, "Downloads", sizeof t->title);
+    browser_tab_changed(t);
+}
+
 static void start(tab_t *t, const char *url_in, int mode, const char *post, uint32_t postlen, bool source) {
     /* url_in may point into the history, which committing a page changes */
     char url[B_URL_MAX];
@@ -1034,6 +1146,7 @@ static void start(tab_t *t, const char *url_in, int mode, const char *post, uint
         if (t->req_post) { memcpy(t->req_post, post, postlen); t->req_post[postlen] = 0; t->req_postlen = postlen; }
     }
     if (!strncasecmp(url, "about:", 6)) { about_page(t, url); return; }
+    if (!strncasecmp(url, "browser:", 8)) { browser_page(t, url); return; }
     if (!strncasecmp(url, "view-source:", 12)) { start(t, url + 12, mode, NULL, 0, true); return; }
     if (!strncasecmp(url, "file:", 5) || !strncasecmp(url, "data:", 5)) {
         uint32_t len = 0;
