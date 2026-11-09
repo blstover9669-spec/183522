@@ -195,6 +195,7 @@ int  browser_downloads_active(void);
 const char *browser_download_status(void);
 void browser_dl_cancel(int id);
 void browser_dl_retry(int id);
+void browser_dl_start(tab_t *t, const char *url, const char *name);
 /* "about:..." pages and their actions */
 void tab_show_internal(tab_t *t, const char *url, char *html);
 

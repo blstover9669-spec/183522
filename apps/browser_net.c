@@ -145,7 +145,7 @@ static int classify(const char *ctype, const uint8_t *b, uint32_t n, const char 
         if (!strncmp(ct, "image/", 6)) {
             if (!strcmp(ct, "image/png") || !strcmp(ct, "image/jpeg") || !strcmp(ct, "image/jpg") ||
                 !strcmp(ct, "image/gif") || !strcmp(ct, "image/bmp") || !strcmp(ct, "image/x-ms-bmp") ||
-                !strcmp(ct, "image/pjpeg"))
+                !strcmp(ct, "image/pjpeg") || !strcmp(ct, "image/svg+xml"))
                 return K_IMAGE;
             return image_magic(b, n) ? K_IMAGE : K_DOWNLOAD;
         }
@@ -187,6 +187,8 @@ typedef struct dl {
     char name[64];
     uint32_t got, total;
     int rec;                 /* its entry on Browser://Downloads (id), 0 = none */
+    bool named;              /* the name came from <a download="..."> (the server's is not used) */
+    bool headers;            /* the response's name / type have been looked at */
 } dl_t;
 static dl_t dls[8];
 
@@ -259,6 +261,28 @@ static void download_name(const char *cd, const char *url, char *out, size_t siz
     strlcpy(out, clean, size);
 }
 
+/* a name without an extension gets the one its content type has (.apk for Android packages ...) */
+static void add_type_ext(char *name, size_t size, const char *ctype) {
+    static const struct { const char *t, *e; } map[] = {
+        { "application/vnd.android.package-archive", ".apk" }, { "application/zip", ".zip" },
+        { "application/x-zip-compressed", ".zip" }, { "application/pdf", ".pdf" },
+        { "application/x-msdownload", ".exe" }, { "application/x-msdos-program", ".exe" },
+        { "application/vnd.microsoft.portable-executable", ".exe" }, { "application/x-msi", ".msi" },
+        { "application/x-ms-installer", ".msi" }, { "application/x-apple-diskimage", ".dmg" },
+        { "application/vnd.debian.binary-package", ".deb" }, { "application/x-debian-package", ".deb" },
+        { "application/x-rpm", ".rpm" }, { "application/gzip", ".gz" }, { "application/x-gzip", ".gz" },
+        { "application/x-tar", ".tar" }, { "application/x-7z-compressed", ".7z" }, { "application/vnd.rar", ".rar" },
+        { "application/x-rar-compressed", ".rar" }, { "application/java-archive", ".jar" },
+        { "application/x-iso9660-image", ".iso" }, { "application/json", ".json" }, { "application/xml", ".xml" },
+        { "audio/mpeg", ".mp3" }, { "audio/wav", ".wav" }, { "audio/x-wav", ".wav" }, { "video/mp4", ".mp4" },
+        { "image/png", ".png" }, { "image/jpeg", ".jpg" }, { "image/gif", ".gif" }, { "image/svg+xml", ".svg" },
+        { "image/webp", ".webp" }, { "text/plain", ".txt" }, { "text/html", ".html" }, { "text/csv", ".csv" },
+    };
+    if (!ctype || strrchr(name, '.')) return;
+    for (int i = 0; i < ARRAY_SIZE(map); i++)
+        if (!strncasecmp(ctype, map[i].t, strlen(map[i].t))) { strlcat(name, map[i].e, size); return; }
+}
+
 /* saves into ~/Downloads (a free name), notifies, and records the result in entry rec */
 static void save_download(const char *name, const uint8_t *data, uint32_t len, int rec) {
     if (!vfs_is_dir(B_DOWNLOADS)) vfs_mkdirs(B_DOWNLOADS);
@@ -285,7 +309,26 @@ static void save_download(const char *name, const uint8_t *data, uint32_t len, i
     klog("browser: download %s -> %s (%u bytes, %d)", name, path, (unsigned)len, r);
 }
 
+/* the server's file name (Content-Disposition, else the address it ended at), unless
+   <a download="..."> (or an earlier attempt) already named the file; the type's extension
+   if the name has none */
+static void dl_headers(dl_t *d, http_request_t *r) {
+    if (d->headers) return;
+    d->headers = true;
+    if (!d->named) download_name(http_header(r, "Content-Disposition"), http_url(r), d->name, sizeof d->name);
+    add_type_ext(d->name, sizeof d->name, http_header(r, "Content-Type"));
+    bdl_t *e = d->rec ? bdata_dl_find(d->rec) : NULL;
+    if (e) strlcpy(e->name, d->name, sizeof e->name);
+}
+
+/* the bytes of a data: or file: address */
+static uint8_t *local_bytes(const char *url, uint32_t *len, char *ctype, size_t csize) {
+    if (!strncasecmp(url, "data:", 5)) return data_url(url, len, ctype, csize);
+    return read_local(url, len);
+}
+
 static void dl_finish(dl_t *d, http_request_t *r) {
+    if (http_error(r) == HTTP_OK && http_status(r) < 400) dl_headers(d, r);
     if (http_error(r) != HTTP_OK || http_status(r) >= 400) {
         char msg[200], why[96];
         if (http_error(r) != HTTP_OK) strlcpy(why, http_error_text(r), sizeof why);
@@ -309,6 +352,59 @@ static void doc_progress(http_request_t *r, void *ctx);
 static void doc_done(http_request_t *r, void *ctx);
 static bool host_allowed(const char *url);
 
+/* Download url right away (a link with the download attribute): name = the attribute's
+   value, else the server's name. data: and file: addresses are saved at once. */
+void browser_dl_start(tab_t *t, const char *url, const char *name) {
+    char fname[96] = "";
+    if (name && *name) {
+        clean_name(name, fname, sizeof fname);
+        while (fname[0] == '.') memmove(fname, fname + 1, strlen(fname));
+        if (!fname[0]) strlcpy(fname, "download", sizeof fname);
+    }
+    if (!strncasecmp(url, "data:", 5) || !strncasecmp(url, "file:", 5)) {
+        uint32_t len = 0;
+        char ctype[96] = "";
+        uint8_t *d = local_bytes(url, &len, ctype, sizeof ctype);
+        if (!fname[0]) {
+            if (!strncasecmp(url, "file:", 5)) download_name(NULL, url, fname, sizeof fname);
+            else strlcpy(fname, "download", sizeof fname);
+        }
+        add_type_ext(fname, sizeof fname, ctype[0] ? ctype : NULL);
+        bdl_t *e = bdata_dl_add(fname, url);
+        if (d) save_download(fname, d, len, e ? e->id : 0);
+        else if (e) { e->state = BDL_FAILED; strlcpy(e->reason, "The file could not be read", sizeof e->reason); bdata_dl_changed(true); }
+        free(d);
+        if (t) browser_tab_changed(t);
+        return;
+    }
+    dl_t *d = NULL;
+    for (int i = 0; i < 8; i++) if (!dls[i].active) { d = &dls[i]; break; }
+    rctx_t *rc = d ? calloc(1, sizeof *rc) : NULL;
+    if (!rc) {
+        notify("Download failed", "Too many downloads at once", ICON_ERROR);
+        return;
+    }
+    memset(d, 0, sizeof *d);
+    if (fname[0]) { strlcpy(d->name, fname, sizeof d->name); d->named = true; }
+    else download_name(NULL, url, d->name, sizeof d->name);
+    rc->dl = d;
+    http_options_t o;
+    memset(&o, 0, sizeof o);
+    o.flags = host_allowed(url) ? HTTP_F_ALLOW_BAD_CERT : 0;
+    o.on_progress = doc_progress;
+    char u[B_URL_MAX];
+    strlcpy(u, url, sizeof u);
+    char *hash = strchr(u, '#');
+    if (hash) *hash = 0;
+    d->req = http_fetch_ex(u, &o, doc_done, rc);
+    if (!d->req) { free(rc); return; }
+    d->active = true;
+    bdl_t *e = bdata_dl_add(d->name, u);
+    if (e) d->rec = e->id;
+    klog("browser: downloading %s as %s", u, d->name);
+    if (t) browser_tab_changed(t);
+}
+
 void browser_dl_cancel(int id) {
     for (int i = 0; i < 8; i++)
         if (dls[i].active && dls[i].rec == id) {
@@ -324,12 +420,25 @@ void browser_dl_cancel(int id) {
 void browser_dl_retry(int id) {
     bdl_t *e = bdata_dl_find(id);
     if (!e || e->state == BDL_ACTIVE || !e->url[0]) return;
+    if (strncasecmp(e->url, "http://", 7) && strncasecmp(e->url, "https://", 8)) {
+        /* data: / file: (a data: address too long to keep in the list cannot be read again) */
+        uint32_t len = 0;
+        char ct[96];
+        uint8_t *b = strlen(e->url) + 1 < sizeof e->url ? local_bytes(e->url, &len, ct, sizeof ct) : NULL;
+        if (!b) return;
+        e->time = sys_time();
+        e->reason[0] = 0;
+        save_download(e->name, b, len, id);
+        free(b);
+        return;
+    }
     dl_t *d = NULL;
     for (int i = 0; i < 8; i++) if (!dls[i].active) { d = &dls[i]; break; }
     rctx_t *rc = d ? calloc(1, sizeof *rc) : NULL;
     if (!rc) return;
     memset(d, 0, sizeof *d);
     strlcpy(d->name, e->name, sizeof d->name);
+    d->named = true;
     d->rec = id;
     rc->dl = d;
     http_options_t o;
@@ -352,6 +461,19 @@ static bool wants_download(http_request_t *r) {
     if (cd && strcasestr(cd, "attachment")) return true;
     const char *ct = http_header(r, "Content-Type");
     if (!ct) return false;
+    if (!strncasecmp(ct, "application/octet-stream", 24) || !strncasecmp(ct, "binary/octet-stream", 19)) {
+        /* "some bytes": a download unless the address names something the browser shows */
+        const char *u = http_url(r), *e = u ? u + strcspn(u, "?#") : NULL, *dot = NULL;
+        for (const char *q = u; q && q < e; q++) { if (*q == '/') dot = NULL; else if (*q == '.') dot = q; }
+        if (!dot) return true;
+        char ext[8];
+        size_t k = (size_t)(e - dot - 1) < sizeof ext - 1 ? (size_t)(e - dot - 1) : sizeof ext - 1;
+        memcpy(ext, dot + 1, k);
+        ext[k] = 0;
+        static const char *shown[] = { "htm", "html", "xhtml", "txt", "png", "jpg", "jpeg", "gif", "bmp", "svg", "css", "js", "json", "xml" };
+        for (int i = 0; i < ARRAY_SIZE(shown); i++) if (!strcasecmp(ext, shown[i])) return false;
+        return true;
+    }
     return classify(ct, (const uint8_t *)"", 0, NULL) == K_DOWNLOAD;
 }
 
@@ -909,6 +1031,7 @@ static void deliver(tab_t *t, const char *url, uint8_t *body, uint32_t len, cons
     if (kind == K_DOWNLOAD) {
         char name[96];
         download_name(NULL, url, name, sizeof name);
+        add_type_ext(name, sizeof name, ctype);
         bdl_t *e = bdata_dl_add(name, url);
         save_download(name, body, len, e ? e->id : 0);
         free(body);
@@ -967,9 +1090,12 @@ static void doc_progress(http_request_t *r, void *ctx) {
     uint32_t got = 0, total = 0;
     http_progress(r, &got, &total);
     if (rc->dl) {
-        rc->dl->got = got;
-        rc->dl->total = total;
-        bdl_t *e = rc->dl->rec ? bdata_dl_find(rc->dl->rec) : NULL;
+        dl_t *d = rc->dl;
+        d->got = got;
+        d->total = total;
+        int st = http_status(r);
+        if (st >= 200 && st < 400) dl_headers(d, r);
+        bdl_t *e = d->rec ? bdata_dl_find(d->rec) : NULL;
         if (e) { e->got = got; e->total = total; bdata_dl_changed(false); }
         return;
     }
@@ -985,6 +1111,8 @@ static void doc_progress(http_request_t *r, void *ctx) {
             d->active = true;
             d->req = r;
             download_name(http_header(r, "Content-Disposition"), http_url(r), d->name, sizeof d->name);
+            add_type_ext(d->name, sizeof d->name, http_header(r, "Content-Type"));
+            d->headers = true;
             d->got = got;
             d->total = total;
             bdl_t *e = bdata_dl_add(d->name, http_url(r));
@@ -1032,6 +1160,21 @@ static void doc_done(http_request_t *r, void *ctx) {
     }
     int status = http_status(r);
     if (status == 204 || status == 205) { http_free(r); browser_tab_changed(t); return; }
+    if (!t->req_source && status >= 200 && status < 300 && wants_download(r)) {
+        /* a download that arrived in one go (no progress call promoted it) */
+        char name[96];
+        download_name(http_header(r, "Content-Disposition"), http_url(r), name, sizeof name);
+        add_type_ext(name, sizeof name, http_header(r, "Content-Type"));
+        bdl_t *e = bdata_dl_add(name, http_url(r));
+        uint32_t len = 0;
+        uint8_t *body = http_take_body(r, &len);
+        save_download(name, body ? body : (const uint8_t *)"", len, e ? e->id : 0);
+        free(body);
+        http_free(r);
+        if (browser_is_current(t)) browser_set_address(t->b, NULL);   /* the page stays */
+        browser_tab_changed(t);
+        return;
+    }
     char *url = dupstr(http_url(r));
     char ctype[128];
     const char *ct = http_header(r, "Content-Type");
@@ -1239,9 +1382,14 @@ void tab_follow_link(tab_t *t, int link, bool new_tab) {
         browser_tab_changed(t);
         return;
     }
+    /* <a download>: save the target instead of going there (the page stays) */
+    const web_node_t *ln = t->pg.links[link].node;
+    const char *dla = ln ? web_attr(ln, "download") : NULL;
+    if (dla && !strncasecmp(href, "data:", 5)) { browser_dl_start(t, href, dla); return; }
     char abs[B_URL_MAX];
     if (!strncasecmp(href, "about:", 6)) strlcpy(abs, href, sizeof abs);
     else if (!url_resolve(t->pg.base, href, abs, sizeof abs)) return;
+    if (dla && strncasecmp(abs, "about:", 6) && strncasecmp(abs, "browser:", 8)) { browser_dl_start(t, abs, dla); return; }
     const char *target = t->pg.links[link].target;
     if (new_tab || (target && !strcasecmp(target, "_blank"))) { browser_new_tab(t->b, abs, !new_tab); return; }
     const char *hash = strchr(abs, '#');

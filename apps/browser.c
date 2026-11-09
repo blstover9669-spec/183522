@@ -22,6 +22,7 @@ typedef struct bview {   /* per-window state that browser.h does not need to kno
     bool chrome_dirty;
     uint32_t resize_at;
     uint32_t status_until;
+    bool dl_shown;       /* the status bar showed a download in progress */
 } bview_t;
 
 static bview_t *V(browser_t *b) { return (bview_t *)(b + 1); }
@@ -1357,9 +1358,11 @@ static void browser_event(window_t *win, const event_t *ev) {
             bv->pc_valid = false;
             win_invalidate_rect(win, v.x + c->x - t->sx, v.y + c->y - t->sy, c->w, c->h);
         }
-        if (bv->chrome_dirty || browser_downloads_active() || (b->status[0] && (int32_t)(now - bv->status_until) >= 0)) {
+        bool dl_on = browser_downloads_active() > 0;
+        if (bv->chrome_dirty || dl_on || bv->dl_shown || (b->status[0] && (int32_t)(now - bv->status_until) >= 0)) {
             if (b->status[0] && (int32_t)(now - bv->status_until) >= 0) b->status[0] = 0;
             bv->chrome_dirty = false;
+            bv->dl_shown = dl_on;   /* once more after the last download ends */
             win_invalidate_rect(win, 0, 0, win_width(win), B_TAB_H + B_TOOL_H);
             win_invalidate_rect(win, 0, win_height(win) - B_STATUS_H, win_width(win), B_STATUS_H);
         }
