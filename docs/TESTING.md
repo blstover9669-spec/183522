@@ -231,16 +231,32 @@ follow. Settings > Styles (`autorun=Settings:styles`) picks the style
 462)); the serial log names it: `[screensaver] activated after N s idle
 (Bubbles)`.
 
-SafetyShield: `safetyshield_test=N` makes a test file count as a threat of
-risk level N, so a scan logs `[safetyshield] WARN: ...` and shows the
-notification (`[notifyd] SafetyShield: SafetyShield detected a threat in
-your system`); the Scan button of Settings > SafetyShield is at about
-(414, 468):
+SafetyShield: `safetyshield_samples=1` writes harmless sample files that
+match the detection rules to `/tmp/ss-samples/` (text with the marker
+strings, two-byte "MZ"/"PK" headers, and the standard EICAR antivirus test
+file - no real malware; never in the shipped system), plus
+`safe_note.txt` and `article.txt` (mentions tools and commands) that must
+stay Safe. A scan logs each threat as `[safetyshield] WARN: <level>:
+<path> (rule: <rule>)` and shows the notification (`[notifyd] SafetyShield:
+SafetyShield detected a threat in your system`); the Scan button of
+Settings > SafetyShield is at about (414, 470) and "Recent scanned files"
+at (400, 504). Expected: ransom_note.txt Severe; wipe.sh, miner.cfg,
+dropper.ps1 Dangerous; invoice.pdf.exe Trojan; eicar.com, disable_av.bat
+High; toolbar.js Moderate; photo.jpg, game.apk, verify.sh Risky;
+safe_note.txt and article.txt Safe (11 threats):
 
 ```sh
-tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Settings:safetyshield safetyshield_test=4" ready \
-    click:414,468 wait:0.7 shot:scanning "serial:scan finished" shot:done click:400,504 wait:0.5 shot:recent
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Settings:safetyshield safetyshield_samples=1" ready \
+    click:414,470 wait:0.7 shot:scanning "serial:scan finished" shot:done click:400,504 wait:0.5 shot:recent
+grep "safetyshield" shots/serial.log
 ```
+
+Without the samples a full scan must find nothing (`scan finished: N files
+in ... ms, 0 threats found`) - check it on a fresh boot and on an installed
+drive. `safetyshield_test=N` still makes one test file count as a threat of
+risk level N. `safetyshield_check_file(path)` (what the Web Browser calls
+after a download) logs `queued check: <path>`, then `checked <path>: Safe`
+or the `WARN` line.
 
 ### Sound (recorded to a WAV file)
 
