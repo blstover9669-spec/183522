@@ -1,3 +1,71 @@
+# NovaOS 2.5 Developer Preview - Release Notes
+
+**Kernel version:** 2.5.0
+**Download:** `NovaOS.iso` (bootable CD image, BIOS / GRUB)
+
+NovaOS 2.5 is the biggest update yet: internet and a web browser, a new
+way to install, save codes, a virus scanner and a new bottom of the screen.
+As before, everything was tested in QEMU only, not yet on real VirtualBox.
+
+## Install and boot
+* **NovaOS Drive installation:** ISO boots open a setup screen after the
+  splash. Pick a size (100 MB to 10 GB; sizes bigger than the disk are
+  greyed out), then **Install** (progress bar with Cancel) or **Continue
+  ISO**. When it finishes: "Your drive has been installed and ready to have
+  files savable", a "How to start your drive" guide (VM / USB tabs) and
+  Restart, which starts the installed drive.
+* **Animated splash:** the Nova icon rises, shimmers rainbow, then a loading
+  bar on installed drives. Settings > Styles: "No animation on splash screen".
+* **/system** now holds the kernel, boot files, UI files (fonts, themes,
+  wallpapers) and one file per app in /system/apps; NovaOS loads its UI
+  from them.
+* **"No drive found"** if the drive's top folders are deleted, and
+  **"System requirement fail"** if the COS:// drive can't be read or a
+  required bundle app is missing.
+
+## Desktop
+* **The taskbar is gone:** Start button at the bottom left with the running
+  apps next to it, the rectangle with Settings, Welcome and Files in the
+  middle (spinner while opening, glowing outline while open), and the time
+  at the bottom right with "Developer version 2.5".
+* **Games:** the ten games now live in one Games app.
+* **Settings > Styles:** five screensavers (Nova Drop, Original, Bubbles,
+  Bouncing App Logos, Lines) with live preview.
+* **Screenshots** really save into Pictures: PrintScreen or **Ctrl+Alt+S**.
+* **Every error plays the alert sound.**
+
+## Internet
+* **Networking:** Intel PRO/1000 (e1000) driver, DHCP, DNS, TCP, TLS 1.2 and
+  1.3 with certificate checks, HTTP/1.1 (redirects, chunked, gzip), cookies.
+  Terminal: `net`, `ping`, `nslookup`, `fetch`, `cookies`.
+* **Web Browser:** tabs, address bar (sites or search), back / forward /
+  reload / home, padlock and certificate warnings, bookmarks, history (can
+  be turned off), find (Ctrl+F), zoom, view source, error pages. Pages:
+  HTML, CSS (including flexbox, grid and positioning), PNG / JPEG / GIF /
+  SVG, forms. No JavaScript.
+* **Downloads:** download buttons and links save straight into Downloads;
+  **Browser://Downloads** lists them (progress, Cancel, Retry, Show in
+  folder) and works offline.
+
+## Safety and saving
+* **SafetyShield:** scans every file every minute and every download right
+  away, with seven risk levels (Safe to Severe), a list of scanned files and
+  a notification when it finds a threat. It only reports; it never deletes.
+* **OSaver:** turns your files, settings and wallpaper into a save code.
+  ISO boots ask "Do you have a save file?" so a code brings everything back.
+
+## Fixes
+* Fractal Explorer no longer crashes with "x87 floating-point error"
+  (Rainbow / dragging), and stops at "Maximum zoom reached".
+
+## Known limitations
+* Tested in QEMU only. In VirtualBox set the network adapter type to
+  **Intel PRO/1000 MT Desktop** for internet.
+* The browser has no JavaScript, so sites like ChatGPT's chat can't work, and
+  its TLS is hobby code: don't type real passwords or bank details.
+
+---
+
 # NovaOS 1.5 Developer Preview - Release Notes
 
 **Release date:** 22 October 2026

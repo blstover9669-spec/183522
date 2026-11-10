@@ -1,6 +1,6 @@
 # NovaOS
 
-**NovaOS 1.5 Developer Preview** - a hobby operating system with a modern
+**NovaOS 2.5 Developer Preview** - a hobby operating system with a modern
 graphical desktop, written from scratch in C and assembly.
 
 ![NovaOS desktop with the Start menu open](docs/screenshots/start-menu.png)
@@ -16,7 +16,7 @@ disk, which then boots NovaOS on its own and keeps your files across
 restarts.
 
 **Download:** [`NovaOS.iso`](NovaOS.iso) in this repository (about 10 MB).
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 1.5.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 2.5.
 
 > **Developer Preview:** NovaOS is a hobby project and a technology preview.
 > It has been tested in QEMU, which emulates the same hardware VirtualBox
@@ -39,7 +39,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 1.5.
 
 ## Screenshots
 
-Every app in NovaOS 1.5 (each one screenshotted in QEMU from the release build):
+Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release build; in 2.5 the ten games live inside the Games app):
 
 ![All 30 NovaOS apps](docs/screenshots/all-apps.png)
 
@@ -201,8 +201,11 @@ Select the VM and click **Settings**:
    supported). In VirtualBox 7 also tick *Enable Audio Output* (under
    *Extended Features*). VirtualBox does not emulate the PC speaker, so
    without one of these cards NovaOS is silent.
-5. **Network:** you can untick *Enable Network Adapter* - NovaOS has no
-   network support yet.
+5. **Network:** keep *Enable Network Adapter* ticked, *Attached to:* **NAT**,
+   and under *Advanced* set *Adapter Type* to **Intel PRO/1000 MT Desktop
+   (82540EM)**. That is the only network card NovaOS has a driver for;
+   VirtualBox picks a different card for "Other" machines, and then NovaOS
+   has no internet.
 6. Click **OK**.
 
 ### 3. Start NovaOS from the ISO
@@ -294,6 +297,9 @@ you have already made along.
 * **No sound:** the audio controller must be *ICH AC97* or *SoundBlaster 16*
   with audio output enabled. `sound` in the Terminal shows which output
   NovaOS uses.
+* **No internet ("No network adapter"):** set the VM's network *Adapter
+  Type* to **Intel PRO/1000 MT Desktop** (Settings, step 5). `net` in the Terminal
+  shows the network status.
 * **PrintScreen does nothing:** your host computer kept the key (Windows 11
   opens its Snipping Tool with it). Press **Ctrl+Alt+S** instead - it saves the
   same screenshot to `/home/user/Pictures`.
@@ -312,6 +318,7 @@ VBoxManage modifyvm NovaOS --memory 256 --vram 32 --graphicscontroller vboxvga \
     --mouse ps2 --firmware bios --boot1 dvd --boot2 disk --boot3 none
 VBoxManage modifyvm NovaOS --audio-driver default --audio-controller ac97 \
     --audio-enabled on --audio-out on      # VirtualBox 6.1: --audio default --audiocontroller ac97 --audioout on
+VBoxManage modifyvm NovaOS --nic1 nat --nictype1 82540EM   # Intel PRO/1000 MT Desktop
 VBoxManage storagectl NovaOS --name IDE --add ide --controller PIIX4
 VBoxManage createmedium disk --filename "$HOME/NovaOS-disk.vdi" --size 1024 --format VDI
 VBoxManage storageattach NovaOS --storagectl IDE --port 0 --device 0 \
@@ -409,14 +416,17 @@ and screenshots: [docs/TESTING.md](docs/TESTING.md);
 
 ## Known limitations
 
-NovaOS 1.5 is a **Developer Preview**. Things that are not there (yet):
+NovaOS 2.5 is a **Developer Preview**. Things that are not there (yet):
 
 * **Not yet tested on real VirtualBox or on real PCs.** All testing was done
   in QEMU (`qemu-system-i386`, PIIX chipset, IDE, PS/2, std VGA, AC'97 and
   SB16), which emulates the hardware VirtualBox presents; VirtualBox-specific
   behaviour (empty IDE channels, ACPI power button, VBE modes) was handled
   from its documentation, not observed on VirtualBox itself.
-* **No networking** - no network card drivers, no TCP/IP, no browser.
+* **Basic networking** - only the Intel PRO/1000 (e1000) network card, IPv4
+  only. The Web Browser has no JavaScript, so sites that need it (for
+  example ChatGPT's chat) can't work, and its TLS (HTTPS) is hobby code:
+  don't type real passwords or bank details.
 * **No SATA/AHCI, NVMe, SCSI or USB** - hard disks must be on an IDE
   controller (PIO mode), and keyboard and mouse must be PS/2 (no USB tablet).
 * **BIOS only** - no UEFI boot.
