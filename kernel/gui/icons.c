@@ -11,6 +11,7 @@
 #include "wm_internal.h"
 #include <nova/icons.h>
 #include <nova/shell.h>
+#include <nova/account.h>
 
 typedef struct {
     surface_t *s;
@@ -889,6 +890,212 @@ int icon_for_path(const char *path) {
     const char *ext = vfs_extension(norm);
     if (!*ext && !strncmp(norm, "/system/config/", 15)) return ICON_FILE_CONFIG;
     return icon_for_ext(ext);
+}
+
+/* ---- account pictures (include/nova/account.h) ---------------------------------------------
+ * Round profile pictures on the same 64-unit grid: the classic person icon (the
+ * default) and a few built-in pictures, all drawn here. The square design is cut
+ * to a circle with an anti-aliased edge. */
+static void pic_person(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(206, 213, 225), RGB(160, 171, 191));
+    uint32_t p = RGB(247, 249, 252);
+    CIRC(c, 32, 25, 11.5, p);                        /* head                     */
+    CIRC(c, 32, 67, 25, p);                          /* shoulders (cut by the circle) */
+}
+
+static void pic_star(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(124, 92, 255), RGB(34, 190, 238));
+    double pts[16];
+    for (int i = 0; i < 8; i++) {
+        double a = i * M_PI / 4 - M_PI / 2, r = i % 2 ? 5.2 : 21;
+        pts[2 * i] = 31 + cos(a) * r;
+        pts[2 * i + 1] = 34 + sin(a) * r;
+    }
+    POLY(c, pts, 8, COLOR_WHITE);
+    for (int i = 0; i < 8; i++) {
+        double a = i * M_PI / 4 - M_PI / 2, r = i % 2 ? 1.6 : 6;
+        pts[2 * i] = 47 + cos(a) * r;
+        pts[2 * i + 1] = 17 + sin(a) * r;
+    }
+    POLY(c, pts, 8, RGBA(255, 255, 255, 220));
+}
+
+static void pic_mountains(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(255, 178, 118), RGB(250, 104, 142));
+    CIRC(c, 41, 25, 8.5, RGB(255, 238, 176));
+    static const double back[] = { -4, 64, 21, 29, 46, 64 };
+    static const double front[] = { 16, 64, 41, 35, 68, 64 };
+    static const double snow[] = { 41, 35, 47.4, 43.8, 44, 42.2, 41, 45, 37.6, 42.4, 34.8, 44.2 };
+    POLY(c, back, 3, RGB(134, 78, 156));
+    POLY(c, front, 3, RGB(76, 48, 116));
+    POLY(c, snow, 6, RGB(246, 236, 248));
+}
+
+static void pic_flower(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(132, 216, 150), RGB(36, 146, 102));
+    for (int i = 0; i < 6; i++) {
+        double a = i * M_PI / 3 - M_PI / 2;
+        CIRC(c, 32 + cos(a) * 11.5, 32 + sin(a) * 11.5, 8.6, RGB(255, 236, 244));
+    }
+    for (int i = 0; i < 6; i++) {
+        double a = i * M_PI / 3 - M_PI / 2;
+        CIRC(c, 32 + cos(a) * 11.5, 32 + sin(a) * 11.5, 4.2, RGB(255, 186, 214));
+    }
+    CIRC(c, 32, 32, 7.4, RGB(255, 196, 64));
+    CIRC(c, 30, 30, 2.4, RGBA(255, 255, 255, 120));
+}
+
+static void pic_planet(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(36, 42, 104), RGB(14, 16, 46));
+    static const double stars[][3] = { { 12, 14, 1.1 }, { 52, 10, 0.9 }, { 50, 50, 1.2 }, { 9, 46, 0.8 }, { 24, 6, 0.7 },
+                                       { 57, 31, 0.8 } };
+    for (int i = 0; i < 6; i++) CIRC(c, stars[i][0], stars[i][1], stars[i][2], RGBA(255, 255, 255, 210));
+    /* the ring: an ellipse tilted by -18 degrees, back half, planet, front half */
+    double rx = 24, ry = 6.5, rot = -18 * M_PI / 180, px = 0, py = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            CIRC(c, 32, 32, 13.5, RGB(255, 168, 92));
+            CIRC(c, 29, 28.5, 9.5, RGBA(255, 214, 150, 150));
+        }
+        for (int i = 0; i <= 48; i++) {
+            double t = i * 2 * M_PI / 48, ex = cos(t) * rx, ey = sin(t) * ry;
+            double x = 32 + ex * cos(rot) - ey * sin(rot), y = 32 + ex * sin(rot) + ey * cos(rot);
+            bool front = sin(t) > 0;
+            if (i && front == (pass == 1)) LINE(c, px, py, x, y, 3.2, RGB(255, 226, 170), true);
+            px = x;
+            py = y;
+        }
+    }
+}
+
+static void pic_cat(ic_t *c) {
+    RG(c, 0, 0, 64, 64, RGB(255, 204, 120), RGB(242, 140, 76));
+    uint32_t fur = RGB(84, 66, 62), inner = RGB(236, 150, 160);
+    static const double ear_l[] = { 15, 31, 18, 11, 30, 21 };
+    static const double ear_r[] = { 49, 31, 46, 11, 34, 21 };
+    static const double in_l[] = { 18.5, 26, 19.8, 16, 26, 21.5 };
+    static const double in_r[] = { 45.5, 26, 44.2, 16, 38, 21.5 };
+    POLY(c, ear_l, 3, fur);
+    POLY(c, ear_r, 3, fur);
+    POLY(c, in_l, 3, inner);
+    POLY(c, in_r, 3, inner);
+    CIRC(c, 32, 37, 18, fur);
+    CIRC(c, 25, 34, 3.4, RGB(255, 226, 112));
+    CIRC(c, 39, 34, 3.4, RGB(255, 226, 112));
+    RR(c, 24.2, 31, 1.6, 6, 0.8, RGB(30, 24, 22));
+    RR(c, 38.2, 31, 1.6, 6, 0.8, RGB(30, 24, 22));
+    static const double nose[] = { 29.6, 41, 34.4, 41, 32, 43.8 };
+    POLY(c, nose, 3, inner);
+    uint32_t wh = RGBA(255, 255, 255, 200);
+    LINE(c, 21, 43, 8, 41, 0.9, wh, false);
+    LINE(c, 21, 45, 8, 47, 0.9, wh, false);
+    LINE(c, 43, 43, 56, 41, 0.9, wh, false);
+    LINE(c, 43, 45, 56, 47, 0.9, wh, false);
+}
+
+static const char *const pic_names[ACCOUNT_PIC_BUILTIN] = { "Person", "Star", "Mountains", "Flower", "Planet", "Cat" };
+
+const char *account_builtin_name(int pic) {
+    return pic >= 0 && pic < ACCOUNT_PIC_BUILTIN ? pic_names[pic] : pic == ACCOUNT_PIC_FILE ? "Picture" : "?";
+}
+
+/* Cut a square alpha surface to a circle (anti-aliased edge). */
+static void round_mask(surface_t *s) {
+    double r = s->w / 2.0;
+    for (int y = 0; y < s->h; y++) {
+        uint32_t *row = surface_row(s, y);
+        for (int x = 0; x < s->w; x++) {
+            double dx = x + 0.5 - r, dy = y + 0.5 - r, cov = r - sqrt(dx * dx + dy * dy) + 0.5;
+            if (cov >= 1) continue;
+            uint32_t a = cov <= 0 ? 0 : (uint32_t)(COLOR_A(row[x]) * cov);
+            row[x] = (row[x] & 0x00FFFFFFu) | (a << 24);
+        }
+    }
+}
+
+static surface_t *pic_render(int pic, int size) {
+    int ss = size <= 128 ? 2 : 1, big = size * ss;
+    surface_t *hi = surface_create_alpha(big, big);
+    if (!hi) return NULL;
+    ic_t c = { hi, 0, 0, big, big / 64.0, false };
+    switch (pic) {
+    case ACCOUNT_PIC_STAR: pic_star(&c); break;
+    case ACCOUNT_PIC_MOUNTAINS: pic_mountains(&c); break;
+    case ACCOUNT_PIC_FLOWER: pic_flower(&c); break;
+    case ACCOUNT_PIC_PLANET: pic_planet(&c); break;
+    case ACCOUNT_PIC_CAT: pic_cat(&c); break;
+    default: pic_person(&c); break;
+    }
+    surface_reset_clip(hi);
+    surface_t *img = ss > 1 ? surface_scaled(hi, size, size) : hi;
+    if (img != hi) surface_destroy(hi);
+    if (img) round_mask(img);
+    return img;
+}
+
+#define PIC_CACHE 10
+static struct { int pic, size; uint32_t serial; surface_t *img; } pic_cache[PIC_CACHE];
+static int pic_next;
+
+static const surface_t *pic_cached(int pic, int size, uint32_t serial) {
+    for (int i = 0; i < PIC_CACHE; i++)
+        if (pic_cache[i].img && pic_cache[i].pic == pic && pic_cache[i].size == size && pic_cache[i].serial == serial)
+            return pic_cache[i].img;
+    return NULL;
+}
+
+static const surface_t *pic_store(int pic, int size, uint32_t serial, surface_t *img) {
+    if (!img) return NULL;
+    surface_destroy(pic_cache[pic_next].img);
+    pic_cache[pic_next].pic = pic;
+    pic_cache[pic_next].size = size;
+    pic_cache[pic_next].serial = serial;
+    pic_cache[pic_next].img = img;
+    pic_next = (pic_next + 1) % PIC_CACHE;
+    return img;
+}
+
+void account_draw_builtin(int pic, surface_t *s, int x, int y, int size) {
+    if (size <= 0 || size > 512) return;
+    if (pic < 0 || pic >= ACCOUNT_PIC_BUILTIN) pic = ACCOUNT_PIC_PERSON;
+    const surface_t *img = pic_cached(pic, size, 0);
+    if (!img) img = pic_store(pic, size, 0, pic_render(pic, size));
+    if (img) gfx_blit_alpha(s, x, y, img, 255);
+}
+
+static surface_t *image_round(const surface_t *src, int size) {
+    surface_t *r = surface_create_alpha(size, size);
+    if (!r) return NULL;
+    int side = MIN(src->w, src->h);
+    gfx_blit_scaled(r, 0, 0, size, size, src, (src->w - side) / 2, (src->h - side) / 2, side, side, true);
+    for (int y = 0; y < size; y++) {           /* the picture is opaque */
+        uint32_t *row = surface_row(r, y);
+        for (int x = 0; x < size; x++) row[x] |= 0xFF000000u;
+    }
+    round_mask(r);
+    return r;
+}
+
+void account_draw_image(const surface_t *img, surface_t *s, int x, int y, int size) {
+    if (!img || size <= 0 || size > 512) return;
+    surface_t *r = image_round(img, size);
+    if (r) gfx_blit_alpha(s, x, y, r, 255);
+    surface_destroy(r);
+}
+
+surface_t *account_picture_image(void);        /* kernel/core/account.c */
+
+void account_draw_picture(surface_t *s, int x, int y, int size) {
+    int pic = account_picture();
+    if (pic != ACCOUNT_PIC_FILE) { account_draw_builtin(pic, s, x, y, size); return; }
+    uint32_t serial = account_serial() | 0x80000000u;
+    const surface_t *img = pic_cached(ACCOUNT_PIC_FILE, size, serial);
+    if (!img) {
+        surface_t *src = account_picture_image();
+        if (!src) { account_draw_builtin(ACCOUNT_PIC_PERSON, s, x, y, size); return; }
+        img = pic_store(ACCOUNT_PIC_FILE, size, serial, image_round(src, size));
+    }
+    if (img) gfx_blit_alpha(s, x, y, img, 255);
 }
 
 /* ---- Icon Library: a hidden app that shows every icon at 48/32/16 (for checking) ---------- */

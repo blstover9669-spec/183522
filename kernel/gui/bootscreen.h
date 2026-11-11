@@ -9,6 +9,11 @@
  *   reqfail.c    "System requirement fail" (no readable COS:// drive of at
  *                least 4 MB on an installed-drive boot, or a bundled app's file
  *                in /system/apps is missing)
+ *   firststart.c the installation menu of an installed drive's first start (the
+ *                drive starts without system files): "This system now supports",
+ *                the account, then it writes the system files and saves
+ *   startscreen.c the start screen (time, account name and picture, Start or the
+ *                password) - every start, before the desktop
  *   sysfiles.c   the system files in /system (kernel, boot files, UI files):
  *                seeding from the built-in copies, the list of required files
  *                (kernel/fs/sysfiles.c)
@@ -20,7 +25,9 @@
  * COS:// drive check; ISO: the system files are written) -> drive check (No drive
  * found) -> bundle app check (/system/apps) -> UI files loaded -> INIT_FS hooks
  * -> splash animation -> [ISO: NovaOS Drive installation] -> [installed: loading
- * bar] desktop -> desktop (-> ISO: save file screen).
+ * bar; first start: the installation menu instead of the drive and bundle app
+ * checks, which run after it] -> desktop -> [ISO: save file screen] -> start
+ * screen -> the desktop opens.
  */
 #ifndef BOOTSCREEN_H
 #define BOOTSCREEN_H
@@ -50,6 +57,13 @@ surface_t *splash_capture_desktop(void);
 void       splash_crossfade(const surface_t *from, const surface_t *to, int ms);
 /* Wait (halting the CPU) until g_ticks reaches t. */
 void       boot_sleep_until(uint32_t t);
+/* The loading bar goes away (the installation menu of a first start takes over). */
+void       splash_bar_hide(void);
+
+/* Boot hooks on the command line: 1 = key=1 (forced on), 0 = key=0, -1 = not given. */
+int        boot_flag(const char *key);
+/* Automated starts (autorun=, testmouse= - every tools/shot.py --kernel run). */
+bool       boot_automated(void);
 
 /* ---- bootsetup.c --------------------------------------------------------------------- */
 /* True when this boot shows the NovaOS Drive installation: ISO boots (GRUB, not
@@ -63,6 +77,25 @@ void bootsetup_run(void);
 /* After Continue ISO, once the desktop exists (before it fades in): the save file
    screen (OSaver's osaver_boot_prompt, if it is part of the build). */
 void bootsetup_after_desktop(void);
+
+/* ---- firststart.c --------------------------------------------------------------------- */
+/* True on an installed drive's first start: it holds no saved files yet (or only the
+   files the Installer app copied), so it has no system files. */
+bool firststart_pending(void);
+/* The installation menu (after the splash animation): "This system now supports",
+   the account (name, picture, optional password), then installing - the system files,
+   the default folders and files and the account are written and saved to the drive.
+   Automated starts (autorun=, testmouse=) without setup=1 install with the defaults
+   (account "User", no password) without showing it. Returns true if it was shown
+   (its last screen is on the display). The drive checks run afterwards (kmain). */
+bool firststart_run(void);
+
+/* ---- startscreen.c --------------------------------------------------------------------- */
+/* Decide whether this start shows the start screen (startscreen=, setup=1, automated
+   starts) - before the INIT_LATE hooks, which may wait for it. */
+void startscreen_prepare(void);
+/* Show it now (the desktop exists); the desktop opens when it is passed. */
+void startscreen_show(void);
 
 /* ---- nodrive.c ----------------------------------------------------------------------- */
 /* Check the drive at startup (No drive found if it is incomplete) and start watching
@@ -88,8 +121,15 @@ void reqfail_check_apps(void);
 void reqfail_show(const char *reason, const char *detail) NORETURN;
 
 /* ---- sysfiles.c (kernel/fs) ------------------------------------------------------------- */
-/* Write the system files into /system from the built-in copies (ISO boot / first boot). */
+/* Write the system files into /system from the built-in copies (ISO boot / a drive's
+   first start): all of them, or one part (SYSFILES_BOOT kernel + boot loader + boot.cfg,
+   SYSFILES_UI /system/ui, SYSFILES_APPS /system/apps). */
+enum { SYSFILES_BOOT, SYSFILES_UI, SYSFILES_APPS, SYSFILES_PARTS };
 void sysfiles_seed(void);
+void sysfiles_seed_part(int part);
+/* The default home folders and files (kernel/fs/vfs.c): only_missing keeps files that
+   are there already. */
+void vfs_write_default_files(bool only_missing);
 /* Bring the files that describe the running system (boot.cfg) up to date. */
 void sysfiles_refresh(void);
 /* NULL if the drive has all system files, else the first missing path. */
