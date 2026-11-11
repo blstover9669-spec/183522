@@ -751,7 +751,9 @@ static void run_install(void) {
     const disk_info_t *d = disk_get(B.disk);
     klog("bootsetup: installing a %s drive on disk %d (%s)", install_size_label(B.sel), B.disk, d ? d->model : "?");
     char err[160] = "";
-    install_job_t *job = install_begin_sized(B.disk, bytes, true, err, sizeof err);
+    /* only what the drive needs to boot (boot loader + kernel): no system files and no
+       files from this ISO session - the drive's first start is the installation menu */
+    install_job_t *job = install_begin_sized(B.disk, bytes, false, err, sizeof err);
 
     /* the screen changes to a progress bar at the top (on the plain background), Cancel under it */
     surface_t *prog = surface_create(B.w, B.h), *frame = surface_create(B.w, B.h);

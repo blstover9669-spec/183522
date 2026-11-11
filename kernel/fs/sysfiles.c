@@ -17,11 +17,13 @@
  *                               in the app registry: name, category, description,
  *                               file types)
  *
- * An ISO start - and the first start of an installed drive whose files were not
- * copied - writes them from the built-in copies in the kernel. An installed drive
- * keeps them with all other files (the installer copies them along), so there
- * they are restored at startup. If any of them is missing the drive is not
- * complete: "No drive found" (kernel/gui/nodrive.c). The app files are checked
+ * An ISO start writes them from the built-in copies in the kernel. An installed
+ * drive starts without them (the installer writes only the boot loader and the
+ * kernel): its first start - the installation menu, kernel/gui/firststart.c -
+ * writes them part by part (sysfiles_seed_part) and saves them to the drive, and
+ * from then on they are restored with all other files at startup. If any of them
+ * is missing after that the drive is not complete: "No drive found"
+ * (kernel/gui/nodrive.c). The app files are checked
  * at startup only: /system/apps missing, no app file in it or one bundled app's
  * file missing is "System requirement fail" (kernel/gui/reqfail.c).
  */
@@ -95,23 +97,42 @@ const char *sysfiles_apps_missing(void) {
     return what[0] ? what : NULL;
 }
 
+static uint32_t seeded_klen, seeded_plen;
+
+void sysfiles_seed_part(int part) {
+    switch (part) {
+    case SYSFILES_BOOT: {
+        vfs_mkdirs("/system/boot");
+        uint32_t klen = 0, plen = 0;
+        uint8_t *k = install_kernel_image(&klen);
+        uint8_t *packed = k ? nvlz_pack(k, klen, &plen) : NULL;
+        if (packed) vfs_write_file("/system/boot/kernel.bin", packed, plen);
+        else if (k) vfs_write_file("/system/boot/kernel.bin", k, klen);
+        kfree(packed);
+        kfree(k);
+        vfs_write_file("/system/boot/mbr.bin", bootblob_mbr, (uint32_t)(bootblob_mbr_end - bootblob_mbr));
+        vfs_write_file("/system/boot/stage2.bin", bootblob_stage2, (uint32_t)(bootblob_stage2_end - bootblob_stage2));
+        boot_cfg();
+        seeded_klen = klen;
+        seeded_plen = plen;
+        break;
+    }
+    case SYSFILES_UI:
+        uifiles_seed();
+        break;
+    case SYSFILES_APPS:
+        seed_apps();
+        break;
+    default:
+        break;
+    }
+}
+
 void sysfiles_seed(void) {
     uint32_t t0 = g_ticks;
-    vfs_mkdirs("/system/boot");
-    uint32_t klen = 0, plen = 0;
-    uint8_t *k = install_kernel_image(&klen);
-    uint8_t *packed = k ? nvlz_pack(k, klen, &plen) : NULL;
-    if (packed) vfs_write_file("/system/boot/kernel.bin", packed, plen);
-    else if (k) vfs_write_file("/system/boot/kernel.bin", k, klen);
-    kfree(packed);
-    kfree(k);
-    vfs_write_file("/system/boot/mbr.bin", bootblob_mbr, (uint32_t)(bootblob_mbr_end - bootblob_mbr));
-    vfs_write_file("/system/boot/stage2.bin", bootblob_stage2, (uint32_t)(bootblob_stage2_end - bootblob_stage2));
-    boot_cfg();
-    uifiles_seed();
-    seed_apps();
-    klog("sysfiles: wrote the system files (kernel %u bytes, packed %u, %d app files) in %u ms", klen, plen,
-         app_count(), g_ticks - t0);
+    for (int i = 0; i < SYSFILES_PARTS; i++) sysfiles_seed_part(i);
+    klog("sysfiles: wrote the system files (kernel %u bytes, packed %u, %d app files) in %u ms", seeded_klen,
+         seeded_plen, app_count(), g_ticks - t0);
 }
 
 void sysfiles_refresh(void) {

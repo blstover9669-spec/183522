@@ -76,6 +76,14 @@ typedef struct persist_info {
 } persist_info_t;
 
 bool persist_active(void);
+/* An installed drive's first start: the drive holds no saved files yet - a new drive
+   gets only the boot loader and the kernel - or only the files the Installer app copied
+   (their slot is marked PERSIST_FLAG_FIRST_START). It has no system files, so this start
+   is the installation menu (kernel/gui/firststart.c); true until its first save. */
+bool persist_first_start(void);
+/* Flags in byte PERSIST_FLAGS_BYTE of a save slot's header reserved area. */
+#define PERSIST_FLAGS_BYTE        0
+#define PERSIST_FLAG_FIRST_START  0x01
 void persist_get_info(persist_info_t *out);
 /* Installed-drive boots (boot=disk): DISK_OK when the drive NovaOS started from was
    found and read without errors at startup, DISK_ENODEV when it was not found (e.g. it
@@ -102,8 +110,10 @@ int            install_check_disk(int disk, char *why, int n);
 bool           install_disk_has_novaos(int disk);
 /* True if this system was booted from that disk. */
 bool           install_is_boot_disk(int disk);
-/* Prepare an installation onto `disk` (erases it once install_step runs).
-   copy_files: also store the current files as the installed system's files. */
+/* Prepare an installation onto `disk` (erases it once install_step runs). The drive
+   gets the boot loader and the kernel; its first start writes the system files.
+   copy_files: also store the current files - without the system files - as the
+   installed system's files. */
 install_job_t *install_begin(int disk, bool copy_files, char *err, int n);
 /* The same, using only the first size_bytes of the disk (partition and file storage
    end there; 0 = the whole disk). */

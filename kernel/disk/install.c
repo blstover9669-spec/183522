@@ -10,6 +10,15 @@
  * the partition ends there and the two file storage slots share the space after
  * the kernel (each slot just under 2 GiB at most).
  *
+ * A new drive gets only what it needs to boot - the boot loader and the kernel -
+ * and no files at all: no system files, nothing from the running session. Its
+ * first start is the installation menu (kernel/gui/firststart.c), which writes
+ * the system files, the default folders and files and the account. With
+ * copy_files (the Installer app's "Copy my current files") the user's files are
+ * copied, still without the system files (/system/boot, /system/ui,
+ * /system/apps): the save slot is marked PERSIST_FLAG_FIRST_START, so that
+ * drive's first start is the installation menu too.
+ *
  * The work is split into slices (install_step) so the Installer app can drive
  * it from a timer and keep the GUI responsive. Order of writes: stage 2,
  * kernel, files, storage headers, verify (read back + compare), and only then
@@ -166,10 +175,11 @@ static void chs(uint32_t lba, uint8_t *out) {
     out[2] = (uint8_t)c;
 }
 
-/* Boot options carried over from the current command line into the installed one. */
+/* Boot options carried over from the current command line into the installed one
+   (setup= and startscreen= are the test hooks of the boot screens). */
 static void build_cmdline(char *out, size_t n, uint32_t disk_id) {
     snprintf(out, n, "boot=disk diskid=%08x", disk_id);
-    static const char *carry[] = { "testmouse", "res", "mousespeed", "nosplash" };
+    static const char *carry[] = { "testmouse", "res", "mousespeed", "nosplash", "setup", "startscreen" };
     for (int i = 0; i < ARRAY_SIZE(carry); i++) {
         const char *v = sys_cmdline_get(carry[i]);
         if (!v) continue;
@@ -177,6 +187,52 @@ static void build_cmdline(char *out, size_t n, uint32_t disk_id) {
         if (*v) snprintf(out + len, n - len, " %s=%s", carry[i], v);
         else snprintf(out + len, n - len, " %s", carry[i]);
     }
+}
+
+/* Drop the system files (/system/boot, /system/ui, /system/apps and everything in
+   them) from a vfs_serialize() image, in place; returns the new length (0: not an
+   image). The format is in kernel/fs/vfs.c: a header, then node records in pre-order
+   (u32 parent | u8 is_dir | u8 name_len | name | u32 mtime | u32 ctime | u32 size | data). */
+static uint32_t strip_system_files(uint8_t *img, uint32_t len) {
+    uint32_t count;
+    if (len < 16 || memcmp(img, "NVFS", 4)) return 0;
+    memcpy(&count, img + 8, 4);
+    uint32_t *map = kmalloc((size_t)count * 4);
+    if (!map) return 0;
+    static const char *const sys[] = { "boot", "ui", "apps" };
+    uint32_t rd = 16, wr = 16, kept = 0, sys_dir = 0xFFFFFFFFu, dropped = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (rd + 18 > len || rd + 18 + img[rd + 5] > len) { kfree(map); return 0; }
+        uint32_t parent, size;
+        memcpy(&parent, img + rd, 4);
+        uint8_t nl = img[rd + 5];
+        const char *name = (const char *)img + rd + 6;
+        memcpy(&size, img + rd + 6 + nl + 8, 4);
+        uint32_t rec = 6 + nl + 12 + size;
+        if (rd + rec > len || (i && parent >= i)) { kfree(map); return 0; }
+        bool drop = false;
+        if (i) {
+            if (map[parent] == 0xFFFFFFFFu) drop = true;
+            else if (parent == sys_dir)
+                for (int k = 0; k < ARRAY_SIZE(sys); k++)
+                    if ((size_t)nl == strlen(sys[k]) && !memcmp(name, sys[k], nl)) drop = true;
+            if (!drop && parent == 0 && nl == 6 && !memcmp(name, "system", 6)) sys_dir = i;
+        }
+        if (drop) { map[i] = 0xFFFFFFFFu; dropped++; rd += rec; continue; }
+        uint32_t np = i ? map[parent] : 0xFFFFFFFFu;
+        map[i] = kept++;
+        memmove(img + wr, img + rd, rec);
+        memcpy(img + wr, &np, 4);
+        wr += rec;
+        rd += rec;
+    }
+    kfree(map);
+    uint32_t sum = 0;
+    for (uint32_t i = 16; i < wr; i++) sum = sum * 31 + img[i];
+    memcpy(img + 8, &kept, 4);
+    memcpy(img + 12, &sum, 4);
+    klog("install: copying your files without the system files (%u of %u entries left out)", dropped, count);
+    return wr;
 }
 
 install_job_t *install_begin(int disk, bool copy_files, char *err, int n) {
@@ -217,6 +273,9 @@ install_job_t *install_begin_sized(int disk, uint64_t size_bytes, bool copy_file
             j->files = kcalloc(1, j->files_sectors * 512);
             if (!j->files) goto nomem;
             j->files_len = (uint32_t)vfs_serialize(j->files, (uint32_t)need);
+            j->files_len = strip_system_files(j->files, j->files_len);
+            if (!j->files_len) { kfree(j->files); j->files = NULL; j->files_sectors = 0; }
+            else j->files_sectors = (j->files_len + 511) / 512;
         } else {
             klog("install: current files (%d bytes) do not fit - not copied", (int)need);
         }
@@ -325,7 +384,8 @@ int install_step(install_job_t *j, uint32_t budget_ms) {
             if (r) return fail(j, r, "Copying your files failed");
             break;
         case PH_STORAGE: {
-            /* slot A: the copied files (or an empty header); slot B: empty */
+            /* slot A: the copied files, marked: the drive's first start (the installation
+               menu) has not run yet - or an empty header; slot B: empty */
             persist_header_t *ph = kcalloc(2, sizeof *ph);
             if (!ph) return fail(j, DISK_ENOMEM, "Preparing file storage failed");
             if (j->files) {
@@ -337,6 +397,7 @@ int install_step(install_job_t *j, uint32_t budget_ms) {
                 ph->length = j->files_len;
                 ph->data_crc = crc32_buf(j->files, j->files_len);
                 ph->save_time = sys_time();
+                ph->reserved[PERSIST_FLAGS_BYTE] = PERSIST_FLAG_FIRST_START;
                 ph->checksum = crc32_buf(ph, 508);
             }
             r = disk_write(j->disk, j->l.persist_lba, 1, &ph[0]);

@@ -17,6 +17,12 @@
  * Two slots (A/B): a save goes to the slot not holding the newest save and is
  * committed by writing that slot's header sector last, so an interrupted save
  * (power cut) leaves the previous one intact.
+ *
+ * A new drive has no saved files (the installer writes only the boot loader and
+ * the kernel): that start is the drive's first start (persist_first_start), the
+ * installation menu, which writes the system files and saves - nothing is saved
+ * before it has finished (persist_start runs after it), so a drive switched off
+ * during the menu starts with the menu again.
  */
 #include "kernel.h"
 #include <nova/disk.h>
@@ -89,6 +95,7 @@ static struct {
     uint32_t len, nsec, done, gen, crc, started;
     int slot;
     int boot_status;          /* persist_boot_status()                         */
+    bool first_start;         /* persist_first_start()                         */
 } P = { .disk = -1, .newest = -1 };
 
 int persist_boot_disk(void) { return P.active ? P.disk : -1; }
@@ -99,6 +106,7 @@ static void read_failed(int r) {
     if (P.boot_status == DISK_OK) P.boot_status = r;
 }
 bool persist_active(void) { return P.active; }
+bool persist_first_start(void) { return P.active && P.first_start; }
 
 static uint32_t capacity(void) { return P.active ? (P.hdr.persist_slot_sectors - 1) * 512 : 0; }
 static uint32_t slot_lba(int slot) { return P.hdr.persist_lba + (uint32_t)slot * P.hdr.persist_slot_sectors; }
@@ -212,6 +220,7 @@ bool persist_restore(void) {
             P.seq = ph[s]->seq;
             P.used = ph[s]->length;
             P.last_save = ph[s]->save_time;
+            P.first_start = (ph[s]->reserved[PERSIST_FLAGS_BYTE] & PERSIST_FLAG_FIRST_START) != 0;
             break;
         }
     }
@@ -220,20 +229,23 @@ bool persist_restore(void) {
         if (valid[s] && ph[s]->seq > P.seq) P.seq = ph[s]->seq;
     kfree(ph[0]);
     kfree(ph[1]);
-    if (!P.loaded) klog("persist: no saved files on disk yet - starting with the default files");
+    if (!P.loaded) P.first_start = true;
+    if (!P.loaded) klog("persist: no saved files on the drive yet - its first start (installation menu)");
+    else if (P.first_start) klog("persist: the files the Installer copied - the drive's first start (installation menu)");
     return P.loaded;
 }
 
-/* After the drive check: bring the system info up to date and start saving. */
+/* After the drive check (on a first start: after the installation menu, which saved
+   already): bring the system info up to date and start saving. */
 void persist_start(void) {
     if (!P.active) return;
-    if (P.loaded) refresh_system_files();
-    P.saved_gen = P.loaded ? vfs_generation() : vfs_generation() - 1;   /* first boot: save defaults soon */
+    if (P.loaded && !P.first_start) refresh_system_files();
+    if (!P.saves) P.saved_gen = P.loaded && !P.first_start ? vfs_generation() : vfs_generation() - 1;
 
     vfs_set_sync_hook(sync_hook, SYNC_DELAY_MS);
     timer_add(PERIODIC_MS, periodic, NULL, true);
     sys_add_shutdown_hook(shutdown_hook);
-    if (!P.loaded) persist_save_async();
+    if (dirty()) persist_save_async();
 }
 
 /* ---- saving ------------------------------------------------------------------------------ */
@@ -275,6 +287,7 @@ static int commit(int slot, uint32_t len, uint32_t crc) {
         P.last_save = ph->save_time;
         P.used = len;
         P.saves++;
+        P.first_start = false;        /* the slot header has no first-start mark */
     }
     kfree(ph);
     return r;

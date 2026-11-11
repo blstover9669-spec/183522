@@ -103,30 +103,44 @@ void kmain(uint32_t magic, uint32_t mbi) {
        home folders or a system file it is "No drive found"; then every bundled
        app (the app registry) needs its file in /system/apps, else "System
        requirement fail". NovaOS then loads its UI (fonts, themes, wallpapers, UI
-       settings) from /system/ui. */
+       settings) from /system/ui.
+       An installed drive starts without system files (the installer writes only
+       the boot loader and the kernel): its first start is the installation menu
+       (kernel/gui/firststart.c), which writes them - the drive checks and the
+       saving start after it. */
     vfs_init();
     vfs_populate_defaults();
     apps_init();
     bool restored = persist_restore();
     reqfail_check_drive();
-    if (!restored) sysfiles_seed();
-    nodrive_check_startup();
-    reqfail_check_apps();
+    bool first = firststart_pending();
+    if (!restored && !first) sysfiles_seed();
+    if (!first) {
+        nodrive_check_startup();
+        reqfail_check_apps();
+    }
     sysfiles_refresh();
     uifiles_load();
-    persist_start();
+    if (!first) persist_start();
     run_initcalls(INIT_FS);
     startscreen_prepare();
 
     splash_animate();
-    /* Installed drive: the loading bar loads the OS. ISO boot: no loading bar; the
-       NovaOS Drive installation follows (Install restarts into the installed system,
-       Continue ISO comes back here). */
-    bool bar = persist_active();
-    bool setup = !bar && bootsetup_wanted();
+    /* Installed drive: the loading bar loads the OS (on the first start the installation
+       menu takes over from it). ISO boot: no loading bar; the NovaOS Drive installation
+       follows (Install restarts into the installed system, Continue ISO comes back here). */
+    bool drive = persist_active(), bar = drive;
+    bool setup = !drive && bootsetup_wanted();
     if (setup) bootsetup_run();
 
-    if (bar) splash_progress(45, NULL);
+    if (bar) splash_progress(first ? 30 : 45, NULL);
+    if (first) {
+        if (firststart_run()) bar = false;     /* its last screen replaced the loading bar */
+        nodrive_check_startup();
+        reqfail_check_apps();
+        sysfiles_refresh();
+        persist_start();
+    }
     theme_render_current_wallpaper();
     if (bar) splash_progress(75, NULL);
     desktop_init();

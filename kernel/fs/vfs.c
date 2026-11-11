@@ -3,6 +3,7 @@
  * whole-tree (de)serialisation for persistence.
  */
 #include "kernel.h"
+#include "gui/bootscreen.h"
 
 typedef struct vnode {
     char name[VFS_NAME_MAX];
@@ -644,10 +645,21 @@ static bool vfs_selftest(void) {
     return ok;
 }
 
-/* ---- default content ---------------------------------------------------------------------- */
-static void put_text(const char *path, const char *text) { vfs_write_file(path, text, (uint32_t)strlen(text)); }
+/* ---- default content ----------------------------------------------------------------------
+ * The default folders and files of a new system: every start begins with them in
+ * memory; an ISO start keeps them, an installed drive replaces them with its saved
+ * files, and a drive's first start (the installation menu) writes them to the drive
+ * (vfs_write_default_files(true): only the missing ones, so files copied by the
+ * Installer app stay as they are). */
+static bool defaults_only_missing;
 
-void vfs_populate_defaults(void) {
+static void put_text(const char *path, const char *text) {
+    if (defaults_only_missing && vfs_exists(path)) return;
+    vfs_write_file(path, text, (uint32_t)strlen(text));
+}
+
+void vfs_write_default_files(bool only_missing) {
+    defaults_only_missing = only_missing;
     vfs_mkdirs("/home/user/Desktop");
     vfs_mkdirs("/home/user/Documents");
     vfs_mkdirs("/home/user/Pictures");
@@ -658,7 +670,7 @@ void vfs_populate_defaults(void) {
 
     char buf[512];
     snprintf(buf, sizeof buf, "%s %s\nKernel %s\nBuilt %s %s\n", sys_version(), sys_edition(), sys_kernel_version(), __DATE__, __TIME__);
-    put_text("/system/version.txt", buf);
+    vfs_write_file("/system/version.txt", buf, (uint32_t)strlen(buf));
     put_text("/system/motd.txt", "Welcome to NovaOS! Have a great day.\n");
 
     put_text("/home/user/README.txt",
@@ -707,12 +719,17 @@ void vfs_populate_defaults(void) {
             if (bmp) {
                 char path[VFS_PATH_MAX];
                 vfs_join("/home/user/Pictures", names[i], path);
-                vfs_write_file(path, bmp, (uint32_t)sz);
+                if (!only_missing || !vfs_exists(path)) vfs_write_file(path, bmp, (uint32_t)sz);
                 kfree(bmp);
             }
         }
         surface_destroy(s);
     }
+    defaults_only_missing = false;
+}
+
+void vfs_populate_defaults(void) {
+    vfs_write_default_files(false);
     vfs_selftest();
     synced_generation = generation;
     klog("vfs: populated, %u bytes in files", vfs_total_bytes());

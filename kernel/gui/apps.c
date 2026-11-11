@@ -12,6 +12,28 @@ static int cmp_app(const void *a, const void *b) {
     return strcasecmp(x->name, y->name);
 }
 
+/* ISO apps (OSaver: save codes for the live system, Installer: install it on a drive)
+   are hidden on installed drives - not on the desktop, in the Start menu or its search,
+   in the Run dialog - but stay registered, so /system/apps keeps their files and the
+   bundle app check (reqfail.c) still passes. The registry holds a copy of their
+   descriptor with APP_HIDDEN set. */
+static const char *const iso_apps[] = { "OSaver", "Installer" };
+
+static void hide_iso_apps(void) {
+    const char *boot = sys_cmdline_get("boot");
+    if (!boot || strcmp(boot, "disk")) return;                /* ISO start: shown */
+    for (int i = 0; i < napps; i++)
+        for (int k = 0; k < ARRAY_SIZE(iso_apps); k++) {
+            if (strcasecmp(apps[i]->name, iso_apps[k]) || (apps[i]->flags & APP_HIDDEN)) continue;
+            app_desc_t *c = kmalloc(sizeof *c);
+            if (!c) continue;
+            *c = *apps[i];
+            c->flags |= APP_HIDDEN;
+            apps[i] = c;
+            klog("apps: %s hidden (an ISO app, this is an installed drive)", c->name);
+        }
+}
+
 void apps_init(void) {
     int n = (int)(__apps_end - __apps_start);
     apps = kcalloc((size_t)MAX(n, 1), sizeof *apps);
@@ -23,6 +45,7 @@ void apps_init(void) {
         apps[napps++] = a;
     }
     qsort(apps, (size_t)napps, sizeof *apps, cmp_app);
+    hide_iso_apps();
     klog("apps: %d registered", napps);
     for (int i = 0; i < napps; i++)
         klog("  app: %-20s [%s]", apps[i]->name, apps[i]->category ? apps[i]->category : "-");
