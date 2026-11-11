@@ -63,6 +63,12 @@ enum icon_kind {
     /* security */
     ICON_SHIELD,          /* SafetyShield */
     ICON_GAMES,           /* the Games app: a gamepad */
+    /* web pages and source code */
+    ICON_FILE_HTML,       /* .html .htm (HTML Viewer)  */
+    ICON_FILE_CSS,        /* .css                      */
+    ICON_FILE_JS,         /* .js                       */
+    ICON_FILE_C,          /* .c .h                     */
+    ICON_FILE_CPP,        /* .cpp .hpp .cc             */
     ICON_COUNT
 };
 

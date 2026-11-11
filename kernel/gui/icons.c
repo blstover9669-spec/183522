@@ -62,6 +62,24 @@ static void LINE(ic_t *c, double x0, double y0, double x1, double y1, double w, 
     POLY(c, q, 4, col);
     if (caps) { CIRC(c, x0, y0, w / 2, col); CIRC(c, x1, y1, w / 2, col); }
 }
+/* Small variants: a pattern of 4x4-unit cells ('#' = filled), top-left cell at (x, y). */
+static void CELLS(ic_t *c, double x, double y, const char *const *rows, int n, uint32_t col) {
+    for (int r = 0; r < n; r++)
+        for (int k = 0; rows[r][k]; k++)
+            if (rows[r][k] == '#') R(c, x + 4 * k, y + 4 * r, 4, 4, col);
+}
+/* A stroked arc (letters): angles in degrees, 0 = right, 90 = down. */
+static void ARC(ic_t *c, double cx, double cy, double r, double a0, double a1, double w, uint32_t col) {
+    int n = (int)(fabs(a1 - a0) / 12) + 2;
+    double px = 0, py = 0;
+    for (int i = 0; i <= n; i++) {
+        double a = (a0 + (a1 - a0) * i / n) * M_PI / 180, x = cx + r * cos(a), y = cy + r * sin(a);
+        if (i) LINE(c, px, py, x, y, w, col, true);
+        px = x;
+        py = y;
+    }
+}
+
 /* Cut a soft-edged transparent hole (only valid on a private transparent surface). */
 static void PUNCH(ic_t *c, double cx, double cy, double r) {
     surface_t *s = c->s;
@@ -352,6 +370,61 @@ static void draw_page(ic_t *c, int kind) {
         if (sm) QMARK(c, 32, 29, 7, 5.5, RGB(110, 120, 140));
         else QMARK(c, 33, 29, 6.5, 4.2, RGB(120, 130, 150));
         break;
+    case ICON_FILE_HTML: {          /* an orange </> */
+        uint32_t col = RGB(228, 77, 38);
+        if (sm) {
+            static const char *const p[] = { "..#..#..", ".#....#.", "#......#", ".#....#.", "..#..#.." };
+            CELLS(c, 16, 28, p, 5, col);
+        } else {
+            LINE(c, 27, 29.5, 20, 37, 3.4, col, true); LINE(c, 20, 37, 27, 44.5, 3.4, col, true);
+            LINE(c, 39, 29.5, 46, 37, 3.4, col, true); LINE(c, 46, 37, 39, 44.5, 3.4, col, true);
+            LINE(c, 35.5, 28, 30.5, 46, 3, col, true);
+        }
+        break;
+    }
+    case ICON_FILE_CSS: {           /* a blue # */
+        uint32_t col = RGB(32, 106, 214);
+        if (sm) {
+            static const char *const p[] = { ".#..#.", "######", ".#..#.", ".#..#.", "######", ".#..#." };
+            CELLS(c, 20, 24, p, 6, col);
+        } else {
+            LINE(c, 29.5, 26, 26.5, 48, 3.2, col, true); LINE(c, 39.5, 26, 36.5, 48, 3.2, col, true);
+            LINE(c, 21.5, 32.5, 45.5, 32.5, 3.2, col, true); LINE(c, 20.5, 41.5, 44.5, 41.5, 3.2, col, true);
+        }
+        break;
+    }
+    case ICON_FILE_JS: {            /* a yellow square with a black JS */
+        uint32_t y1 = RGB(250, 220, 40), y2 = RGB(236, 196, 20), ink = RGB(36, 32, 24);
+        if (sm) {
+            R(c, 20, 24, 24, 24, RGB(200, 160, 10));
+            R(c, 24, 28, 16, 16, y1);
+        } else {
+            RRG(c, 19, 25, 28, 28, 3, y1, y2);
+            LINE(c, 30, 31.5, 30, 44, 3, ink, true);                   /* J: stem and hook */
+            ARC(c, 27, 44, 3, 0, 180, 3, ink);
+            ARC(c, 39.5, 35, 3.6, -20, -270, 3, ink);                 /* S: top bowl ...  */
+            ARC(c, 39.5, 42.2, 3.6, -90, 160, 3, ink);                /* ... bottom bowl  */
+        }
+        break;
+    }
+    case ICON_FILE_C: case ICON_FILE_CPP: {   /* a blue C; purple C++ */
+        bool pp = kind == ICON_FILE_CPP;
+        uint32_t col = pp ? RGB(120, 72, 204) : RGB(36, 104, 210);
+        if (sm) {
+            static const char *const pc[] = { "..####", ".##...", "##....", "##....", "##....", ".##...", "..####" };
+            static const char *const pcpp[] = { ".##.....", "#...#...", "#..###..", "#...#.#.", "#....###",
+                                                "#.....#.", ".##....." };
+            if (pp) CELLS(c, 16, 24, pcpp, 7, col);
+            else CELLS(c, 20, 24, pc, 7, col);
+        } else if (pp) {
+            ARC(c, 28, 37, 8, 45, 315, 4.2, col);
+            LINE(c, 36.5, 37, 42.5, 37, 2.6, col, true); LINE(c, 39.5, 34, 39.5, 40, 2.6, col, true);
+            LINE(c, 43.5, 37, 49, 37, 2.6, col, true); LINE(c, 46.25, 34, 46.25, 40, 2.6, col, true);
+        } else {
+            ARC(c, 33, 37, 9.5, 45, 315, 4.6, col);
+        }
+        break;
+    }
     default: break;
     }
 }
@@ -760,6 +833,7 @@ static void render(int kind, surface_t *s, int x, int y, int box, int final_size
         break;
     case ICON_FILE_TEXT: case ICON_FILE_CODE: case ICON_FILE_IMAGE: case ICON_FILE_AUDIO: case ICON_FILE_ARCHIVE:
     case ICON_FILE_BINARY: case ICON_FILE_UNKNOWN: case ICON_FILE_LOG: case ICON_FILE_CONFIG:
+    case ICON_FILE_HTML: case ICON_FILE_CSS: case ICON_FILE_JS: case ICON_FILE_C: case ICON_FILE_CPP:
         draw_page(&c, kind);
         break;
     case ICON_NOTE: draw_note(&c); break;
@@ -835,7 +909,7 @@ static const char *const names[ICON_COUNT] = {
     "folder-desktop", "folder-system", "folder-home", "text", "code", "image", "audio", "archive",
     "binary", "unknown", "log", "config", "note", "paint", "app", "disk", "computer", "trash", "gear",
     "service", "settings", "bell", "alarm", "clock", "search", "run", "pin", "terminal", "info",
-    "warning", "error", "question", "success", "shield", "games",
+    "warning", "error", "question", "success", "shield", "games", "html", "css", "js", "c", "cpp",
 };
 
 const char *icon_name(int kind) { return (kind >= 0 && kind < ICON_COUNT) ? names[kind] : "?"; }
@@ -845,7 +919,12 @@ int icon_for_ext(const char *ext) {
         { "txt,text,md,nfo,readme,rtf", ICON_FILE_TEXT },
         { "log", ICON_FILE_LOG },
         { "cfg,conf,ini,config,json,yaml,yml,toml", ICON_FILE_CONFIG },
-        { "c,h,cpp,hpp,cc,asm,s,py,js,sh,xml,html,htm,css,rs,go,java,lua,mk", ICON_FILE_CODE },
+        { "html,htm,xhtml", ICON_FILE_HTML },
+        { "css", ICON_FILE_CSS },
+        { "js,mjs", ICON_FILE_JS },
+        { "c,h", ICON_FILE_C },
+        { "cpp,hpp,cc,cxx,hh", ICON_FILE_CPP },
+        { "asm,s,py,sh,xml,rs,go,java,lua,mk", ICON_FILE_CODE },
         { "bmp,ppm,png,jpg,jpeg,gif,ico,tga", ICON_FILE_IMAGE },
         { "wav,mid,midi,mp3,ogg,flac,snd", ICON_FILE_AUDIO },
         { "zip,tar,gz,tgz,bz2,xz,7z,rar", ICON_FILE_ARCHIVE },
