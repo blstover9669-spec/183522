@@ -116,6 +116,7 @@ void kmain(uint32_t magic, uint32_t mbi) {
     uifiles_load();
     persist_start();
     run_initcalls(INIT_FS);
+    startscreen_prepare();
 
     splash_animate();
     /* Installed drive: the loading bar loads the OS. ISO boot: no loading bar; the
@@ -130,7 +131,10 @@ void kmain(uint32_t magic, uint32_t mbi) {
     if (bar) splash_progress(75, NULL);
     desktop_init();
     taskbar_init();
-    if (setup) bootsetup_after_desktop();      /* after Continue ISO: the save file screen */
+    /* the start screen (account, time, password) comes before the desktop opens: after
+       Continue ISO it follows the save file screen, else it is what the splash fades to */
+    if (setup) bootsetup_after_desktop();
+    else startscreen_show();
     splash_finish();
     if (sys_cmdline_get("selftest")) selftest_run();
     if (sys_cmdline_get("crashtest")) timer_add(1500, crash_cb, NULL, false);

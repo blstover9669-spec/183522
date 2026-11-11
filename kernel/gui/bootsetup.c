@@ -20,8 +20,8 @@
  *                 boots the installed NovaOS by default, so the restart goes
  *                 straight into it. Only the chosen size of the disk is used.
  *   Continue ISO  NovaOS keeps running from the ISO (nothing is saved); the save
- *                 file screen (OSaver, osaver_boot_prompt) follows, and the
- *                 desktop when that closes.
+ *                 file screen (OSaver, osaver_boot_prompt) follows, then the
+ *                 start screen (Guest) and the desktop.
  *
  * Without a hard disk the screen says so; Continue ISO still works.
  *
@@ -911,19 +911,21 @@ void bootsetup_run(void) {
     B.base = B.scene = B.drive_img = NULL;
 }
 
-/* ---- the save file screen (OSaver, item 14) ------------------------------------------------------------ */
+/* ---- the save file screen (OSaver, item 14), then the start screen -------------------------------------- */
 static void prompt_done(void *ctx) {
     (void)ctx;
     klog("bootsetup: save file screen closed");
+    startscreen_show();                        /* then the start screen (Guest) */
 }
 
 /* Called when the desktop exists but before it fades in: after Continue ISO the save
    file screen is the next thing on screen (the fade goes straight from this screen to
-   it), and the desktop shows when it closes. */
+   it); when it closes (No, or a code restored) the start screen follows, and the
+   desktop opens when that is passed. */
 void bootsetup_after_desktop(void) {
-    if (!B.continued) return;
-    if (!osaver_boot_prompt) {
-        klog("bootsetup: no save file screen in this build");
+    if (!B.continued || !osaver_boot_prompt) {
+        if (B.continued) klog("bootsetup: no save file screen in this build");
+        startscreen_show();
         return;
     }
     klog("bootsetup: save file screen");

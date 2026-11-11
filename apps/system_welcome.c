@@ -15,6 +15,7 @@
  */
 #include "system_common.h"
 #include <nova/disk.h>
+#include <nova/account.h>
 
 #define W        640
 #define H        440
@@ -671,10 +672,20 @@ static void welcome_launch(const char *arg) {
     if (arg && !strcmp(arg, "startup")) klog("welcome: first-run tour opened at startup");
 }
 
-/* ---- first run: open the tour after the desktop appears ------------------------------ */
+/* ---- first run: open the tour after NovaOS has opened ---------------------------------
+ * Not before the desktop shows: on ISO starts the NovaOS Drive installation, the
+ * save file screen and the start screen come first, on drives the installation
+ * menu and the start screen - startscreen_when_done() runs it once the start
+ * screen is passed (the desktop is there), and the tour opens a moment later. */
 static void welcome_autostart(void *ctx) {
     (void)ctx;
     app_launch_by_name("Welcome", "startup");
+}
+
+static void welcome_after_start(void *ctx) {
+    (void)ctx;
+    klog("welcome: NovaOS has opened - the tour follows");
+    timer_add(700, welcome_autostart, NULL, false);
 }
 
 static void welcome_boot(void) {
@@ -693,7 +704,7 @@ static void welcome_boot(void) {
         why = show ? "first run or switched on" : "switched off by the user";
     }
     klog("welcome: tour at startup: %s (%s)", show ? "yes" : "no", why);
-    if (show) timer_add(700, welcome_autostart, NULL, false);
+    if (show) startscreen_when_done(welcome_after_start, NULL);
 }
 REGISTER_INIT(INIT_LATE, welcome_boot);
 

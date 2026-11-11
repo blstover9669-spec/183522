@@ -13,10 +13,14 @@
  *                      its colours. /system/config/splash.cfg "noanimation=1":
  *                      the icon just appears in the middle.
  *   splash_progress()  loading bar under the icon (installed-drive boots)
- *   splash_finish()    bar to 100 %, cross-fade into the desktop
+ *   splash_finish()    bar to 100 %, cross-fade into the desktop (or the start
+ *                      screen, kernel/gui/startscreen.c, when it is shown)
+ *   splash_bar_hide()  the loading bar goes (a drive's first start: the
+ *                      installation menu takes over)
  */
 #include "wm_internal.h"
 #include "bootscreen.h"
+#include <nova/account.h>
 
 /* ---- the logo ---------------------------------------------------------------------- */
 /* Draw the logo directly (polygon edges are not anti-aliased). */
@@ -365,6 +369,15 @@ static void bar_show(void) {
     }
 }
 
+void splash_bar_hide(void) {
+    if (!S.on || !S.bar_on) return;
+    gfx_blit(wm_backbuf, S.bar.x, S.bar.y, S.bar_under);
+    present(S.bar);
+    S.bar_on = false;
+    surface_destroy(S.bar_under);
+    S.bar_under = NULL;
+}
+
 /* Move the bar to pct, smoothly (~120 ms per step). */
 void splash_progress(int pct, const char *msg) {
     (void)msg;
@@ -486,7 +499,11 @@ static void autorun_cb(void *ctx) {
     klog("NOVA: autorun done");
 }
 
-void shell_autorun(void) {
+/* After the start screen (at once when this start has none): autorun=, startmenu=1. */
+static void autorun_go(void *ctx) {
+    (void)ctx;
     if (sys_cmdline_get("autorun")) timer_add(50, autorun_cb, NULL, false);
     if (sys_cmdline_get("startmenu")) startmenu_open();
 }
+
+void shell_autorun(void) { startscreen_when_done(autorun_go, NULL); }

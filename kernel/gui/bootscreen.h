@@ -74,8 +74,9 @@ bool bootsetup_wanted(void);
    the finished screen's Restart restarts the computer into the installed system
    (Cancel or a failed installation come back to the screen). */
 void bootsetup_run(void);
-/* After Continue ISO, once the desktop exists (before it fades in): the save file
-   screen (OSaver's osaver_boot_prompt, if it is part of the build). */
+/* Once the desktop exists (before it fades in), on starts that showed the NovaOS Drive
+   installation: after Continue ISO the save file screen (OSaver's osaver_boot_prompt,
+   if it is part of the build), then the start screen. */
 void bootsetup_after_desktop(void);
 
 /* ---- firststart.c --------------------------------------------------------------------- */
