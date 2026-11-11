@@ -9,6 +9,7 @@
  * Responses the browser cannot show become downloads into ~/Downloads.
  */
 #include "browser.h"
+#include "search.h"
 
 /* ---- hosts whose bad certificate the user accepted (this session only) ------------- */
 static char allowed[8][256];
@@ -27,6 +28,8 @@ static bool host_allowed(const char *url) {
     for (int i = 0; i < nallowed; i++) if (!strcmp(allowed[i], h)) return true;
     return false;
 }
+
+bool browser_host_allowed(const char *url) { return host_allowed(url); }
 
 void browser_allow_host(const char *url) {
     char h[256];
@@ -824,6 +827,13 @@ void tab_tick(tab_t *t) {
             browser_page(t, B_DL_PAGE);
         }
     }
+    if (search_is_page(t->url) && !t->req && t->srch_gen != search_live_generation() && (int32_t)(now - t->srch_shown) >= 700) {
+        /* Browser://Search shows what a live search finds as it comes in */
+        char url[B_URL_MAX];
+        strlcpy(url, t->url, sizeof url);
+        t->req_mode = NAV_RELOAD;
+        browser_page(t, url);
+    }
     if (t->net_wait && !t->req && (net_is_up() || (int32_t)(now - t->net_wait) >= 0)) {
         char url[B_URL_MAX];
         strlcpy(url, t->req_url, sizeof url);
@@ -1049,6 +1059,8 @@ static void deliver(tab_t *t, const char *url, uint8_t *body, uint32_t len, cons
     }
     commit(t, url);
     if (kind == K_HTML) {
+        /* NovaOS Search indexes the pages you visit (like history, only when it is on) */
+        if (bdata_history_on && status == 200 && !t->req_post) search_page_visited(url, (const char *)body, len, ctype);
         show_html(t, url, (char *)body, len, ctype, false);
     } else if (kind == K_TEXT) {
         char *html = bpage_text((const char *)body, len);
@@ -1237,6 +1249,14 @@ static void about_page(tab_t *t, const char *url) {
 
 /* Browser://Downloads and its actions (browser://downloads/open?ID ...) */
 static void browser_page(tab_t *t, const char *url) {
+    if (search_is_page(url)) {
+        char *html = search_page_html(url);
+        tab_show_internal(t, url, html);
+        t->srch_gen = search_live_generation();
+        t->srch_shown = sys_uptime_ms();
+        browser_tab_changed(t);
+        return;
+    }
     if (!bdata_is_dl_page(url)) {
         char *html = bpage_error("This page does not exist", "The browser has no page at this address.", NULL, url, false);
         commit(t, url);

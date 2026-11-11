@@ -345,9 +345,9 @@ char *bpage_home(void) {
         ".home input[type=text]{font-size:16px;padding:6px}"
         ".home input[type=submit]{font-size:15px;padding:5px 14px}"
         "</style></head><body><div class=\"wrap home\"><h1>Web Browser</h1>"
-        "<form action=\"" B_SEARCH_FORM "\" method=\"get\">");
+        "<form action=\"Browser://Search\" method=\"get\">");
     bhtml_add(&b, &len, &cap,
-        "<input type=\"text\" name=\"q\" size=\"40\" placeholder=\"Search the web\"> "
+        "<input type=\"text\" name=\"q\" size=\"40\" placeholder=\"Search with NovaOS Search\"> "
         "<input type=\"submit\" value=\"Search\"></form></div></body></html>");
     return b;
 }

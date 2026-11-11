@@ -24,8 +24,7 @@
 #define B_URL_MAX    2048
 
 #define B_HOME_URL   "about:home"
-#define B_SEARCH_FORM "https://lite.duckduckgo.com/lite/"
-#define B_SEARCH_URL B_SEARCH_FORM "?q="
+#define B_SEARCH_URL "Browser://Search?q="   /* NovaOS Search (search*.c) */
 #define B_DOWNLOADS  "/home/user/Downloads"
 
 enum { NAV_NEW = 0, NAV_RELOAD, NAV_HIST, NAV_REPLACE };
@@ -97,6 +96,7 @@ typedef struct tab {
     uint32_t refresh_at;
     int sx, sy;
     uint32_t dl_gen, dl_sig, dl_shown;   /* Browser://Downloads: what it shows, when it was made */
+    uint32_t srch_gen, srch_shown;       /* Browser://Search: the live search it shows, when */
     /* security of the page shown */
     bool https, cert_ok;
     char cert_subject[128], cert_issuer[128], tls_info[96], cert_error[160];
@@ -125,7 +125,7 @@ typedef struct browser {
     int drag_off;
     char status[300];
     window_t *settings;
-    widget_t *set_hist, *set_cookies_lbl;
+    widget_t *set_hist, *set_cookies_lbl, *set_search_lbl;
 } browser_t;
 
 /* ---- shared state (browser_data.c) ---- */
@@ -191,6 +191,7 @@ void tab_submit(tab_t *t, int ctl);
 void tab_follow_link(tab_t *t, int link, bool new_tab);
 void tab_scroll_to(tab_t *t, int x, int y);
 void browser_allow_host(const char *url);
+bool browser_host_allowed(const char *url);   /* the user chose "Continue anyway" for its site */
 int  browser_downloads_active(void);
 const char *browser_download_status(void);
 void browser_dl_cancel(int id);

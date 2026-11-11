@@ -7,6 +7,7 @@
  * the built-in pages in browser_data.c, the web engine in web_*.c.
  */
 #include "browser.h"
+#include "search.h"
 
 enum { HS_NONE = 0, HS_BACK, HS_FWD, HS_RELOAD, HS_HOME, HS_LOCK, HS_STAR, HS_MENU, HS_ZOOM, HS_NEWTAB,
        HS_FPREV, HS_FNEXT, HS_FCLOSE, HS_TAB = 100, HS_TABX = 200, HS_BM = 300 };
@@ -946,11 +947,25 @@ static void clear_cookies_cb(widget_t *w, void *ctx) {
     cookies_label(b);
 }
 
+static void search_label(browser_t *b) {
+    if (!b->settings || !win_is_valid(b->settings) || !b->set_search_lbl) return;
+    char msg[80];
+    int n = search_page_count();
+    snprintf(msg, sizeof msg, n == 1 ? "1 page is in the search index." : "%d pages are in the search index.", n);
+    ui_set_text(b->set_search_lbl, msg);
+}
+
+static void clear_search_cb(widget_t *w, void *ctx) {
+    (void)w;
+    search_clear();
+    search_label(ctx);
+}
+
 static void settings_close_cb(widget_t *w, void *ctx) { (void)ctx; win_close(ui_window(w)); }
 
 static void open_settings(browser_t *b) {
     if (b->settings && win_is_valid(b->settings)) { win_focus(b->settings); return; }
-    window_t *w = win_create_dialog(b->win, "Browser settings", 400, 262, 0);
+    window_t *w = win_create_dialog(b->win, "Browser settings", 400, 356, 0);
     if (!w) return;
     b->settings = w;
     widget_t *l = ui_label(w, 18, 14, 360, 22, "History");
@@ -962,7 +977,12 @@ static void open_settings(browser_t *b) {
     b->set_cookies_lbl = ui_label(w, 18, 142, 360, 20, "");
     cookies_label(b);
     ui_button(w, 18, 168, 140, 30, "Clear cookies", clear_cookies_cb, b);
-    widget_t *c = ui_button(w, 300, 220, 84, 30, "Close", settings_close_cb, NULL);
+    l = ui_label(w, 18, 216, 360, 22, "NovaOS Search");
+    ui_set_font(l, FONT_UI_BOLD);
+    b->set_search_lbl = ui_label(w, 18, 240, 360, 20, "");
+    search_label(b);
+    ui_button(w, 18, 266, 160, 30, "Clear search index", clear_search_cb, b);
+    widget_t *c = ui_button(w, 300, 314, 84, 30, "Close", settings_close_cb, NULL);
     ui_button_set_default(c, true);
 }
 
@@ -1343,6 +1363,7 @@ static void browser_event(window_t *win, const event_t *ev) {
             if (t->loading) loading = true;
         }
         if (loading) { b->spin++; win_invalidate_rect(win, 0, 0, win_width(win), B_TAB_H); }
+        search_tick(loading);      /* NovaOS Search: crawling, reading pages (never while loading) */
         if (bv->resize_at && (int32_t)(now - bv->resize_at) >= 0) {
             bv->resize_at = 0;
             tab_t *t = cur(b);
@@ -1406,6 +1427,7 @@ static void browser_event(window_t *win, const event_t *ev) {
         bv->pc_valid = false;
         break;
     case EV_CLOSE:
+        search_browser_closed();
         for (int i = 0; i < b->ntabs; i++) tab_free(b->tabs[i]);
         b->ntabs = 0;
         if (bv->pc) surface_destroy(bv->pc);
