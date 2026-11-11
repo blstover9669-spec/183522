@@ -10,7 +10,7 @@
  *
  * Score = BM25F (title x3, address x2.5, headings x1.5, text x1; k1 1.2, b 0.75)
  *       x (all query words in the title: 1.5) x (all in the address: 1.6)
- *       x (the query is the site's name: 3 for its home page, 1.4 inside)
+ *       x (a one-word query is the site's name: 3 for its home page, 1.4 inside)
  *       x (1 + 0.35 ln(1 + PageRank x pages)), and pages missing query words
  * are ranked after the pages that have them all.
  *
@@ -471,7 +471,7 @@ int sidx_query(const srch_query_t *q, srch_hit_t *hits, int max, int *total) {
             if (in_title) s *= 1.5f;
             if (in_url) s *= 1.6f;
         }
-        if (q->joined[0]) {
+        if (q->joined[0] && q->n == 1) {
             char site[64];
             bool root;
             site_name(doc->url, site, sizeof site, &root);

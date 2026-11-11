@@ -79,6 +79,7 @@ typedef struct srch_page {
     char title[SRCH_TITLE_MAX], desc[SRCH_DESC_MAX], text[SRCH_TEXT_MAX], any[SRCH_TEXT_MAX];
     int tl, dl, xl, al;
     char base[512];          /* <base href>                               */
+    char canon[512];         /* <link rel=canonical href>                 */
     bool noindex, nofollow;  /* <meta name=robots>                        */
     uint32_t words;          /* words of text (all of them)               */
     srch_wf_t *wf;           /* hash table of the page's words            */
@@ -148,12 +149,10 @@ size_t   srch_escape(const char *s, size_t n, char *out, size_t size);
 
 /* ---- the browser side (search.c) ---- */
 #define SEARCH_PAGE "Browser://Search"
-struct tab;
 bool  search_is_page(const char *url);
 /* The results page for a Browser://Search?q=...&p=N address (HTML, 1252,
-   malloc'd); its tab title goes into title. Starts live discovery when the
-   index has few matches. */
-char *search_page_html(const char *url, char *title, size_t tsize);
+   malloc'd). Starts live discovery when the index has few matches. */
+char *search_page_html(const char *url);
 /* Changes while a live search finds pages: the results page shows them. */
 uint32_t search_live_generation(void);
 /* A page the user opened (raw bytes as received); indexed a little later. */

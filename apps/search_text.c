@@ -400,6 +400,12 @@ static void open_tag(srch_page_t *p, const char *name, const char *at, size_t an
         return;
     }
     if (!strcmp(name, "base")) { if (!p->base[0]) attr(at, an, "href", p->base, sizeof p->base); return; }
+    if (!strcmp(name, "link")) {
+        char rel[32];
+        if (!p->canon[0] && attr(at, an, "rel", rel, sizeof rel) && !strcasecmp(rel, "canonical"))
+            attr(at, an, "href", p->canon, sizeof p->canon);
+        return;
+    }
     if (!strcmp(name, "meta")) {
         char nm[64] = "", content[SRCH_DESC_MAX * 2] = "";
         if (!attr(at, an, "name", nm, sizeof nm)) attr(at, an, "property", nm, sizeof nm);
