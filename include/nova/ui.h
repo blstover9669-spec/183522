@@ -122,6 +122,12 @@ void        ui_textarea_undo(widget_t *w);
 void        ui_textarea_redo(widget_t *w);
 /* Called when the caret moves (e.g. to show "Ln 3, Col 7" in a status bar). */
 void        ui_textarea_on_cursor(widget_t *w, widget_cb cb, void *ctx);
+/* Code colours: while painting, fn is called for each line on screen (top to bottom)
+   with the whole text and the line's byte range [start, end); it fills colors[0 ..
+   end - start) with one colour per byte (0 = the normal text colour). NULL = off. */
+typedef void (*ui_textarea_color_fn)(widget_t *w, const char *text, int start, int end,
+                                     uint32_t *colors, void *ctx);
+void        ui_textarea_set_colors(widget_t *w, ui_textarea_color_fn fn, void *ctx);
 
 /* ---- lists (listbox, dropdown, tabs) --------------------------------------------------- */
 int         ui_list_add(widget_t *w, const char *text);   /* returns index */

@@ -36,6 +36,10 @@ typedef struct {
     int last_edit_kind;    /* 1 typing, 2 delete, 3 other */
     widget_cb on_cursor;
     void *on_cursor_ctx;
+    ui_textarea_color_fn color_fn;   /* code colours (ui_textarea_set_colors) */
+    void *color_ctx;
+    uint32_t *colbuf;      /* one colour per byte of the line being drawn */
+    int colcap;
 } ta_t;
 
 static ta_t *TA(widget_t *w) { return (ta_t *)w->ext; }
@@ -333,6 +337,7 @@ void textarea_free(widget_t *w) {
     for (int i = 0; i < t->nundo; i++) snap_free(&t->undo[i]);
     for (int i = 0; i < t->nredo; i++) snap_free(&t->redo[i]);
     kfree(t->lines);
+    kfree(t->colbuf);
     kfree(t);
     w->ext = NULL;
 }
@@ -343,6 +348,12 @@ void ui_textarea_set_readonly(widget_t *w, bool ro) { if (w && w->type == UI_TEX
 void ui_textarea_set_line_numbers(widget_t *w, bool on) { if (w && w->type == UI_TEXTAREA) { TA(w)->line_numbers = on; clamp_scroll(w); ui_invalidate(w); } }
 void ui_textarea_set_tab_width(widget_t *w, int n) { if (w && w->type == UI_TEXTAREA) { TA(w)->tab_width = CLAMP(n, 1, 16); reindex(w); ui_invalidate(w); } }
 void ui_textarea_on_cursor(widget_t *w, widget_cb cb, void *ctx) { if (w && w->type == UI_TEXTAREA) { TA(w)->on_cursor = cb; TA(w)->on_cursor_ctx = ctx; } }
+void ui_textarea_set_colors(widget_t *w, ui_textarea_color_fn fn, void *ctx) {
+    if (!w || w->type != UI_TEXTAREA) return;
+    TA(w)->color_fn = fn;
+    TA(w)->color_ctx = ctx;
+    ui_invalidate(w);
+}
 bool ui_textarea_modified(widget_t *w) { return w && w->type == UI_TEXTAREA && TA(w)->modified; }
 void ui_textarea_set_modified(widget_t *w, bool m) { if (w && w->type == UI_TEXTAREA) TA(w)->modified = m; }
 int  ui_textarea_length(widget_t *w) { return (w && w->type == UI_TEXTAREA) ? TA(w)->len : 0; }
@@ -461,14 +472,29 @@ void textarea_paint(surface_t *s, widget_t *w) {
             int sw = text_width(w, sa, sb) + (b > le ? font_char_width(f, ' ') / 2 + 2 : 0);
             gfx_fill_rect(s, sx, y, sw, lh, sel_bg);
         }
-        /* text */
+        /* text (in the colours the colour callback gives, if any) */
+        uint32_t *cols = NULL;
+        if (t->color_fn && w->enabled && le > ls) {
+            if (le - ls > t->colcap) {
+                int nc = MAX(le - ls, 256);
+                uint32_t *nb = krealloc(t->colbuf, sizeof(uint32_t) * (size_t)nc);
+                if (nb) { t->colbuf = nb; t->colcap = nc; }
+            }
+            if (t->colcap >= le - ls) {
+                cols = t->colbuf;
+                memset(cols, 0, sizeof(uint32_t) * (size_t)(le - ls));
+                t->color_fn(w, w->text, ls, le, cols, t->color_ctx);
+            }
+        }
         int x = 0;
         int limit = t->scroll_x + g.text.w + 64;
         for (int k = ls; k < le && x < limit; k++) {
             char c = w->text[k];
             int cw = char_w(w, c, x);
-            if (c != '\t' && x + cw >= t->scroll_x)
-                gfx_char(s, x0 + x, y, (unsigned char)c, w->enabled ? th->field_text : th->disabled_text, f);
+            if (c != '\t' && x + cw >= t->scroll_x) {
+                uint32_t col = !w->enabled ? th->disabled_text : cols && cols[k - ls] ? cols[k - ls] : th->field_text;
+                gfx_char(s, x0 + x, y, (unsigned char)c, col, f);
+            }
             x += cw;
         }
         /* caret */
