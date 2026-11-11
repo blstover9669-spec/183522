@@ -13,6 +13,9 @@
  *   - View options (monospace or proportional font, zoom, line numbers,
  *     status bar) shown with check marks in the menus;
  *   - a status bar with the caret's line/column, selection size and counts;
+ *   - code colours for .html .htm, .css, .js, .c .h and .cpp .hpp .cc files
+ *     (keywords, strings, comments, numbers and tags), worked out only for the
+ *     lines on screen;
  *   - a viewer for big files (over 2 MB, lines longer than 16 KB, or OSaver codes
  *     with their hidden separators): only the text that is on screen is loaded and
  *     drawn - scrolling up/down/left/right loads the newly visible part and drops
@@ -41,6 +44,8 @@
 #define VIEW_SB      12
 #define NP_TAB       4
 #define MSG_MS     3500             /* transient status-bar messages */
+#define HL_SCAN      32768          /* code colours: bytes looked at before the first line on screen */
+#define HL_VLINE     16384          /* ... lines longer than this are not coloured in the viewer */
 
 /* What to do once the current document has been saved or discarded. */
 enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_OPEN_PATH, ACT_CLOSE };
@@ -64,6 +69,7 @@ typedef struct {
     uint8_t *buf;                     /* index / row scratch buffer                */
     uint32_t blk_off, blk_len;        /* line-start lookup cache (in buf2)         */
     uint8_t *buf2;
+    uint32_t *cols;                   /* code colours of the row being drawn       */
 } npview_t;
 
 typedef struct notepad {
@@ -82,6 +88,11 @@ typedef struct notepad {
     uint32_t msg_until;
     int  msg_timer;
     npview_t view;                    /* big-file viewer (view.on)             */
+    int  lang;                        /* LANG_*: code colours for the file type */
+    uint32_t hl_gen;                  /* bumps with every change of the text   */
+    uint32_t hl_cgen;                 /* the colour state cache: ...           */
+    int  hl_clen, hl_top, hl_top_st;  /* ... state at the first line drawn     */
+    int  hl_next, hl_next_st;         /* ... and at the line after the last one */
     struct notepad *next;             /* list of open editors                  */
 } notepad_t;
 
@@ -98,12 +109,398 @@ static const font_t *np_font(notepad_t *np) {
     return np->zoom ? FONT_UI_LARGE : FONT_UI;
 }
 
+/* ---- code colours ------------------------------------------------------------------------
+ * Keywords, strings, comments, numbers and tags of HTML, CSS, JavaScript, C and C++.
+ * Only lines that are drawn get colours: the text area asks for each line on screen,
+ * and the state a line starts in (inside a comment, a tag, a <style> or <script>
+ * block) comes from the line above it - for the first line on screen from a scan of
+ * at most HL_SCAN bytes before it (or from where the last paint started). */
+enum { LANG_NONE = 0, LANG_C, LANG_CPP, LANG_JS, LANG_CSS, LANG_HTML };
+enum { K_KEY = 0, K_STR, K_COM, K_NUM, K_TAG, K_ATTR, K_COUNT };
+typedef struct { uint32_t c[K_COUNT]; } hl_pal_t;
+
+static const char *const lang_names[] = { "Plain text", "C", "C++", "JavaScript", "CSS", "HTML" };
+
+static int np_lang_of(const char *path) {
+    const char *e = vfs_extension(path);
+    if (!strcasecmp(e, "c") || !strcasecmp(e, "h")) return LANG_C;
+    if (!strcasecmp(e, "cpp") || !strcasecmp(e, "hpp") || !strcasecmp(e, "cc")) return LANG_CPP;
+    if (!strcasecmp(e, "js")) return LANG_JS;
+    if (!strcasecmp(e, "css")) return LANG_CSS;
+    if (!strcasecmp(e, "html") || !strcasecmp(e, "htm")) return LANG_HTML;
+    return LANG_NONE;
+}
+
+/* keyword, string, comment, number, tag, attribute / property - readable on the
+   light and the dark field background */
+static void hl_palette(hl_pal_t *p) {
+    static const uint32_t light[K_COUNT] = { RGB(0, 72, 204), RGB(178, 34, 34), RGB(0, 128, 0), RGB(0, 128, 128),
+                                             RGB(136, 18, 128), RGB(166, 74, 0) };
+    static const uint32_t dark[K_COUNT] = { RGB(110, 166, 255), RGB(236, 148, 112), RGB(112, 186, 96),
+                                            RGB(112, 212, 200), RGB(226, 140, 234), RGB(234, 186, 104) };
+    memcpy(p->c, theme_get()->dark ? dark : light, sizeof p->c);
+}
+
+#define HL_PUT(col, a, b, k) do { if (col) for (int q_ = (a); q_ < (b); q_++) (col)[q_] = P->c[k]; } while (0)
+
+static bool hl_id0(int c) { return isalpha(c) || c == '_' || c == '$'; }
+static bool hl_id(int c) { return isalnum(c) || c == '_' || c == '$'; }
+
+static const char KW_C[] = " auto break case char const continue default do double else enum extern float for goto "
+    "if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned "
+    "void volatile while bool true false NULL _Bool ";
+static const char KW_CPP[] = " class namespace template typename public private protected virtual override final "
+    "new delete this throw try catch using operator friend nullptr constexpr explicit mutable noexcept "
+    "static_cast dynamic_cast reinterpret_cast const_cast decltype ";
+static const char KW_JS[] = " break case catch class const continue debugger default delete do else export extends "
+    "finally for function if import in instanceof let new return super switch this throw try typeof var void "
+    "while with yield async await of true false null undefined NaN Infinity static get set ";
+
+static bool hl_in(const char *list, const char *w, int n) {
+    for (const char *p = list; (p = strchr(p, ' ')) && p[1]; p++)
+        if (p[1] == w[0] && !strncmp(p + 1, w, (size_t)n) && p[1 + n] == ' ') return true;
+    return false;
+}
+
+static bool hl_keyword(int lang, const char *w, int n) {
+    if (lang == LANG_JS) return hl_in(KW_JS, w, n);
+    return hl_in(KW_C, w, n) || (lang == LANG_CPP && hl_in(KW_CPP, w, n));
+}
+
+/* end of a quoted string that starts at s[i] (the quote), escapes skipped */
+static int hl_quote(const char *s, int n, int i) {
+    char q = s[i];
+    int e = i + 1;
+    while (e < n && s[e] != q) e += s[e] == '\\' ? 2 : 1;
+    return e < n ? e + 1 : n;
+}
+
+/* C, C++, JavaScript. State: 0, 1 = in a block comment, 2 = in a `template` (JS). */
+static int hl_code(const hl_pal_t *P, int lang, const char *s, int n, uint32_t *col, int st) {
+    int i = 0;
+    if (st == 0 && lang != LANG_JS) {            /* preprocessor line: #include <file> */
+        while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+        if (i < n && s[i] == '#') {
+            int e = i + 1;
+            while (e < n && (s[e] == ' ' || s[e] == '\t')) e++;
+            while (e < n && isalpha((unsigned char)s[e])) e++;
+            HL_PUT(col, i, e, K_KEY);
+            int k = e;
+            while (k < n && s[k] == ' ') k++;
+            if (k < n && s[k] == '<') {
+                int g = k;
+                while (g < n && s[g] != '>') g++;
+                HL_PUT(col, k, MIN(g + 1, n), K_STR);
+                k = MIN(g + 1, n);
+            }
+            i = k;
+        } else i = 0;
+    }
+    while (i < n) {
+        if (st == 1) {
+            int e = i;
+            while (e + 1 < n && !(s[e] == '*' && s[e + 1] == '/')) e++;
+            int end = e + 1 < n ? e + 2 : n;
+            HL_PUT(col, i, end, K_COM);
+            if (e + 1 < n) st = 0;
+            i = end;
+            continue;
+        }
+        if (st == 2) {
+            int e = i;
+            while (e < n && s[e] != '`') e += s[e] == '\\' ? 2 : 1;
+            int end = e < n ? e + 1 : n;
+            HL_PUT(col, i, end, K_STR);
+            if (e < n) st = 0;
+            i = end;
+            continue;
+        }
+        unsigned char c = (unsigned char)s[i];
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') { HL_PUT(col, i, n, K_COM); break; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') { HL_PUT(col, i, i + 2, K_COM); i += 2; st = 1; continue; }
+        if (c == '"' || c == '\'') { int e = hl_quote(s, n, i); HL_PUT(col, i, e, K_STR); i = e; continue; }
+        if (c == '`' && lang == LANG_JS) { HL_PUT(col, i, i + 1, K_STR); i++; st = 2; continue; }
+        if (isdigit(c) || (c == '.' && i + 1 < n && isdigit((unsigned char)s[i + 1]))) {
+            int e = i + 1;
+            if (c == '0' && e < n && (s[e] == 'x' || s[e] == 'X')) e++;
+            while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '.' || s[e] == '_' ||
+                             ((s[e] == '+' || s[e] == '-') && (s[e - 1] == 'e' || s[e - 1] == 'E') && s[i + 1] != 'x')))
+                e++;
+            HL_PUT(col, i, e, K_NUM);
+            i = e;
+            continue;
+        }
+        if (hl_id0(c)) {
+            int e = i + 1;
+            while (e < n && hl_id((unsigned char)s[e])) e++;
+            if (hl_keyword(lang, s + i, e - i)) HL_PUT(col, i, e, K_KEY);
+            i = e;
+            continue;
+        }
+        i++;
+    }
+    return st;
+}
+
+/* CSS. State bits: comment, block depth (0..7), which blocks hold declarations,
+   in a value, after an at-rule whose block holds rules (@media). */
+#define CS_COM      1
+#define CS_DEPTH(st) (((st) >> 1) & 7)
+#define CS_DECL(d)  (1 << (4 + (d)))
+#define CS_VALUE    (1 << 12)
+#define CS_AT       (1 << 13)
+
+static int hl_number_unit(const char *s, int n, int i) {   /* 12px 1.5em 50% */
+    int e = i + 1;
+    while (e < n && (isdigit((unsigned char)s[e]) || s[e] == '.')) e++;
+    while (e < n && (isalpha((unsigned char)s[e]) || s[e] == '%')) e++;
+    return e;
+}
+
+static int hl_css(const hl_pal_t *P, const char *s, int n, uint32_t *col, int st) {
+    int i = 0;
+    while (i < n) {
+        if (st & CS_COM) {
+            int e = i;
+            while (e + 1 < n && !(s[e] == '*' && s[e + 1] == '/')) e++;
+            int end = e + 1 < n ? e + 2 : n;
+            HL_PUT(col, i, end, K_COM);
+            if (e + 1 < n) st &= ~CS_COM;
+            i = end;
+            continue;
+        }
+        unsigned char c = (unsigned char)s[i];
+        int d = CS_DEPTH(st);
+        bool decl = d > 0 && (st & CS_DECL(d - 1));
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') { HL_PUT(col, i, i + 2, K_COM); st |= CS_COM; i += 2; continue; }
+        if (c == '"' || c == '\'') { int e = hl_quote(s, n, i); HL_PUT(col, i, e, K_STR); i = e; continue; }
+        if (c == '{') {
+            if (d < 7) {
+                st = (st & ~(7 << 1)) | ((d + 1) << 1);
+                if (st & CS_AT) st &= ~CS_DECL(d); else st |= CS_DECL(d);
+            }
+            st &= ~(CS_AT | CS_VALUE);
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            if (d > 0) st = (st & ~(7 << 1)) | ((d - 1) << 1);
+            st &= ~(CS_AT | CS_VALUE);
+            i++;
+            continue;
+        }
+        if (decl) {
+            if (c == ';') { st &= ~CS_VALUE; i++; continue; }
+            if (!(st & CS_VALUE)) {
+                if (c == ':') { st |= CS_VALUE; i++; continue; }
+                if (isalpha(c) || c == '-' || c == '_') {
+                    int e = i + 1;
+                    while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '-' || s[e] == '_')) e++;
+                    HL_PUT(col, i, e, K_ATTR);
+                    i = e;
+                    continue;
+                }
+                i++;
+                continue;
+            }
+            if (c == '!') {
+                int e = i + 1;
+                while (e < n && isalpha((unsigned char)s[e])) e++;
+                HL_PUT(col, i, e, K_KEY);
+                i = e;
+                continue;
+            }
+            if (c == '#') {
+                int e = i + 1;
+                while (e < n && isxdigit((unsigned char)s[e])) e++;
+                HL_PUT(col, i, e, K_NUM);
+                i = e > i + 1 ? e : i + 1;
+                continue;
+            }
+            if (isdigit(c) || ((c == '.' || c == '-' || c == '+') && i + 1 < n && isdigit((unsigned char)s[i + 1]))) {
+                int e = hl_number_unit(s, n, i);
+                HL_PUT(col, i, e, K_NUM);
+                i = e;
+                continue;
+            }
+            if (isalpha(c) || c == '-' || c == '_') {      /* a word: plain */
+                int e = i + 1;
+                while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '-' || s[e] == '_')) e++;
+                i = e;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        /* rules: at-rules and selectors */
+        if (c == '@') {
+            int e = i + 1;
+            while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '-')) e++;
+            HL_PUT(col, i, e, K_KEY);
+            static const char rules[] = " media supports document layer container keyframes -webkit-keyframes ";
+            if (e - i > 1 && hl_in(rules, s + i + 1, e - i - 1)) st |= CS_AT;
+            i = e;
+            continue;
+        }
+        if (c == ';') { st &= ~CS_AT; i++; continue; }
+        if (st & CS_AT) {                                  /* (min-width: 600px) */
+            if (isdigit(c)) { int e = hl_number_unit(s, n, i); HL_PUT(col, i, e, K_NUM); i = e; continue; }
+            i++;
+            continue;
+        }
+        if (isalnum(c) || c == '.' || c == '#' || c == '*' || c == '_' || c == '-' || c == ':') {
+            int e = i + 1;
+            while (e < n && s[e] && (isalnum((unsigned char)s[e]) || strchr("-_.#:*()%", s[e]))) e++;
+            HL_PUT(col, i, e, K_TAG);
+            i = e;
+            continue;
+        }
+        i++;
+    }
+    return st;
+}
+
+/* HTML. State: the mode (bits 0-2), a <script> / <style> start tag waiting for its
+   '>', an attribute value expected; bits 8+: the state of the JS / CSS inside. */
+enum { H_TEXT = 0, H_TAG, H_COMMENT, H_SCRIPT, H_STYLE };
+#define H_NEXT_SCRIPT (1 << 3)
+#define H_NEXT_STYLE  (1 << 4)
+#define H_VALUE       (1 << 5)
+
+static int hl_html(const hl_pal_t *P, const char *s, int n, uint32_t *col, int st) {
+    int i = 0;
+    while (i < n) {
+        int mode = st & 7;
+        if (mode == H_COMMENT) {
+            int e = i;
+            while (e + 2 < n && strncmp(s + e, "-->", 3)) e++;
+            int end = e + 2 < n ? e + 3 : n;
+            HL_PUT(col, i, end, K_COM);
+            if (e + 2 < n) st = H_TEXT;
+            i = end;
+            continue;
+        }
+        if (mode == H_SCRIPT || mode == H_STYLE) {        /* the content runs to its end tag */
+            const char *tag = mode == H_SCRIPT ? "</script" : "</style";
+            int tl = (int)strlen(tag), e = i;
+            while (e + tl <= n && strncasecmp(s + e, tag, (size_t)tl)) e++;
+            if (e + tl > n) e = n;
+            int sub = (int)((unsigned)st >> 8);
+            uint32_t *sc = col ? col + i : NULL;
+            sub = mode == H_SCRIPT ? hl_code(P, LANG_JS, s + i, e - i, sc, sub) : hl_css(P, s + i, e - i, sc, sub);
+            if (e < n) st = H_TEXT;
+            else st = mode | (sub << 8);
+            i = e;
+            continue;
+        }
+        unsigned char c = (unsigned char)s[i];
+        if (mode == H_TAG) {
+            if (c == '>') {
+                HL_PUT(col, i, i + 1, K_TAG);
+                st = (st & H_NEXT_SCRIPT) ? H_SCRIPT : (st & H_NEXT_STYLE) ? H_STYLE : H_TEXT;
+                i++;
+                continue;
+            }
+            if (c == '/' && i + 1 < n && s[i + 1] == '>') { HL_PUT(col, i, i + 2, K_TAG); st = H_TEXT; i += 2; continue; }
+            if (c == '"' || c == '\'') { int e = hl_quote(s, n, i); HL_PUT(col, i, e, K_STR); st &= ~H_VALUE; i = e; continue; }
+            if (c == '=') { st |= H_VALUE; i++; continue; }
+            if (isspace(c)) { i++; continue; }
+            int e = i;
+            while (e < n && !isspace((unsigned char)s[e]) && s[e] != '>' && s[e] != '=' && s[e] != '"' && s[e] != '\'' &&
+                   !(s[e] == '/' && e + 1 < n && s[e + 1] == '>'))
+                e++;
+            if (e == i) e = i + 1;
+            HL_PUT(col, i, e, (st & H_VALUE) ? K_STR : K_ATTR);
+            st &= ~H_VALUE;
+            i = e;
+            continue;
+        }
+        if (c == '<' && i + 3 < n && !strncmp(s + i, "<!--", 4)) { HL_PUT(col, i, i + 4, K_COM); st = H_COMMENT; i += 4; continue; }
+        if (c == '<' && i + 1 < n && (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '/' || s[i + 1] == '!' || s[i + 1] == '?')) {
+            bool end_tag = s[i + 1] == '/';
+            int e = i + 1;
+            if (!isalpha((unsigned char)s[e])) e++;
+            int name = e;
+            while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '-' || s[e] == ':')) e++;
+            HL_PUT(col, i, e, K_TAG);
+            st = H_TAG;
+            if (!end_tag && e - name == 6 && !strncasecmp(s + name, "script", 6)) st |= H_NEXT_SCRIPT;
+            if (!end_tag && e - name == 5 && !strncasecmp(s + name, "style", 5)) st |= H_NEXT_STYLE;
+            i = e;
+            continue;
+        }
+        if (c == '&') {                                   /* &amp; &#169; */
+            int e = i + 1;
+            while (e < n && e - i < 12 && (isalnum((unsigned char)s[e]) || s[e] == '#')) e++;
+            if (e < n && s[e] == ';' && e > i + 1) { HL_PUT(col, i, e + 1, K_NUM); i = e + 1; continue; }
+        }
+        i++;
+    }
+    return st;
+}
+#undef HL_PUT
+
+/* Colour one line (col may be NULL: only follow the state); returns the state after it. */
+static int hl_line(const hl_pal_t *P, int lang, const char *s, int n, uint32_t *col, int st) {
+    if (lang == LANG_CSS) return hl_css(P, s, n, col, st);
+    if (lang == LANG_HTML) return hl_html(P, s, n, col, st);
+    return hl_code(P, lang, s, n, col, st);
+}
+
+/* The state after the lines in text[from, to) (from is a line start), starting in st. */
+static int hl_scan(int lang, const char *text, int from, int to, int st) {
+    static const hl_pal_t none;              /* no colours are written */
+    while (from < to) {
+        const char *nl = memchr(text + from, '\n', (size_t)(to - from));
+        int e = nl ? (int)(nl - text) : to;
+        st = hl_line(&none, lang, text + from, e - from, NULL, st);
+        from = e + 1;
+    }
+    return st;
+}
+
+/* ui_textarea colour callback: called for the lines on screen, top to bottom. */
+static void np_colors(widget_t *w, const char *text, int start, int end, uint32_t *colors, void *ctx) {
+    notepad_t *np = ctx;
+    if (!np->lang) return;
+    int len = ui_textarea_length(w), st;
+    bool valid = np->hl_cgen == np->hl_gen && np->hl_clen == len;
+    if (valid && start == np->hl_next) st = np->hl_next_st;          /* the line below the last one */
+    else {
+        if (valid && np->hl_top <= start && start - np->hl_top <= HL_SCAN) st = hl_scan(np->lang, text, np->hl_top, start, np->hl_top_st);
+        else {
+            int from = start > HL_SCAN ? start - HL_SCAN : 0;
+            while (from > 0 && from < start && text[from - 1] != '\n') from++;
+            st = hl_scan(np->lang, text, from, start, 0);
+        }
+        np->hl_top = start;                                           /* first line of a paint */
+        np->hl_top_st = st;
+    }
+    hl_pal_t P;
+    hl_palette(&P);
+    np->hl_next_st = hl_line(&P, np->lang, text + start, end - start, colors, st);
+    np->hl_next = end + 1;
+    np->hl_cgen = np->hl_gen;
+    np->hl_clen = len;
+}
+
+/* Follow the file type: code colours on or off. */
+static void np_set_lang(notepad_t *np) {
+    int lang = np->path[0] ? np_lang_of(np->path) : LANG_NONE;
+    if (lang == np->lang) return;
+    np->lang = lang;
+    np->hl_gen++;
+    ui_textarea_set_colors(np->area, lang ? np_colors : NULL, np);
+    if (np->view.w) ui_invalidate(np->view.w);
+}
+
 static void np_update_title(notepad_t *np) {
     char t[VFS_NAME_MAX + 32];
     bool mod = ui_textarea_modified(np->area);
     snprintf(t, sizeof t, "%s%s - Notepad", mod ? "*" : "", np_name(np));
     win_set_title(np->win, t);
     np->shown_modified = mod;
+    np_set_lang(np);
 }
 
 static void np_message(notepad_t *np, const char *fmt, ...) PRINTF_LIKE(2, 3);
@@ -347,30 +744,55 @@ static void view_draw(widget_t *w, surface_t *s, rect_t r) {
     surface_set_clip(s, rect_intersect(old, rect_make(g.text.x - 2, g.text.y, g.text.w + 2, g.text.h)));
     uint32_t want = (uint32_t)g.cols + 64;          /* bytes per row (hidden separators take no room) */
     if (want > 256u * 1024u) want = 256u * 1024u;
+    /* code colours: each row is read whole (up to HL_VLINE bytes) and coloured in the
+       state the row above left; the first row's state comes from HL_SCAN bytes before it */
+    hl_pal_t pal;
+    int hst = 0;
+    if (np->lang && !v->cols) v->cols = malloc(HL_VLINE * sizeof(uint32_t));
+    if (np->lang && v->cols && fd >= 0) {
+        hl_palette(&pal);
+        uint32_t s0 = v->top < lines ? view_line_start(np, fd, v->top) : 0;
+        uint32_t from = s0 > HL_SCAN ? s0 - HL_SCAN : 0;
+        int got = s0 > from && vfs_seek(fd, (int32_t)from, VFS_SEEK_SET) >= 0 ? vfs_read(fd, v->buf, s0 - from) : 0;
+        int k = 0;
+        if (from > 0) { while (k < got && v->buf[k] != '\n') k++; k++; }
+        if (got > k) hst = hl_scan(np->lang, (const char *)v->buf, k, got, 0);
+    }
     for (int i = 0; fd >= 0 && i <= g.rows && v->top + (uint32_t)i < lines; i++) {
         uint32_t ln = v->top + (uint32_t)i;
         uint32_t start = view_line_start(np, fd, ln);
-        uint32_t avail;                               /* bytes of this line from hcol on */
+        uint32_t len, avail;                          /* bytes of this line (from hcol on) */
         if (ln + 1 < lines) {
             uint32_t next = view_line_start(np, fd, ln + 1);
-            uint32_t len = next > start ? next - start - 1 : 0;
-            avail = len > v->hcol ? len - v->hcol : 0;
+            len = next > start ? next - start - 1 : 0;
         } else {
-            uint32_t known = (v->indexed ? v->size : v->scan_pos) - start;
-            avail = known > v->hcol ? known - v->hcol : 0;
+            len = (v->indexed ? v->size : v->scan_pos) - start;
         }
+        avail = len > v->hcol ? len - v->hcol : 0;
+        bool coloured = np->lang && v->cols && len <= HL_VLINE;
         uint32_t n = MIN(avail, want);
-        if (!n) continue;
-        if (vfs_seek(fd, (int32_t)(start + v->hcol), VFS_SEEK_SET) < 0) continue;
-        int got = vfs_read(fd, v->buf, n);
+        int got;
+        if (coloured) {                               /* the whole line, coloured, drawn from hcol */
+            if (!len || vfs_seek(fd, (int32_t)start, VFS_SEEK_SET) < 0) continue;
+            int whole = vfs_read(fd, v->buf, len);
+            if (whole <= 0) continue;
+            hst = hl_line(&pal, np->lang, (const char *)v->buf, whole, v->cols, hst);
+            got = whole > (int)v->hcol ? (int)MIN(n, (uint32_t)whole - v->hcol) : 0;
+        } else {
+            hst = 0;
+            if (!n || vfs_seek(fd, (int32_t)(start + v->hcol), VFS_SEEK_SET) < 0) continue;
+            got = vfs_read(fd, v->buf, n);
+        }
+        const uint8_t *row = coloured ? v->buf + v->hcol : v->buf;
         if (got <= 0) continue;
         int y = g.text.y + i * g.lh, col = 0;
         for (int k = 0; k < got && col <= g.cols; k++) {
-            unsigned char c = v->buf[k];
+            unsigned char c = row[k];
             if (c == '\n') break;
             if (c == (unsigned char)NP_HS || c == '\r') continue;
             if (c == '\t') { col += NP_TAB - (int)((v->hcol + (uint32_t)col) % (uint32_t)NP_TAB); continue; }
-            if (c != ' ' && c) gfx_char(s, g.text.x + col * g.cw, y, c, th->field_text, f);
+            uint32_t ink = coloured && v->cols[v->hcol + (uint32_t)k] ? v->cols[v->hcol + (uint32_t)k] : th->field_text;
+            if (c != ' ' && c) gfx_char(s, g.text.x + col * g.cw, y, c, ink, f);
             col++;
         }
     }
@@ -484,6 +906,7 @@ static void view_close(notepad_t *np) {
     if (v->timer) { win_kill_timer(np->win, v->timer); v->timer = 0; }
     free(v->buf); v->buf = NULL;
     free(v->buf2); v->buf2 = NULL;
+    free(v->cols); v->cols = NULL;
     free(v->cp); v->cp = NULL;
     v->ncp = v->capcp = 0;
     ui_set_visible(v->w, false);
@@ -525,6 +948,7 @@ static void np_set_document(notepad_t *np, const char *path, const char *text) {
     view_close(np);
     if (was_view) np_build_menus(np);
     strlcpy(np->path, path ? path : "", sizeof np->path);
+    np->hl_gen++;
     ui_set_text(np->area, text ? text : "");
     ui_textarea_set_modified(np->area, false);
     ui_textarea_set_cursor(np->area, 0, 0);
@@ -959,6 +1383,7 @@ static void np_build_menus(notepad_t *np) {
 /* ---- text area callbacks ----------------------------------------------------------- */
 static void np_on_edit(widget_t *w, void *ctx) {
     notepad_t *np = ctx;
+    np->hl_gen++;                      /* code colours: the cached line states are stale */
     if (ui_textarea_modified(w) != np->shown_modified) np_update_title(np);
     ui_invalidate(np->status);
 }
@@ -1019,7 +1444,7 @@ static void np_status_draw(widget_t *w, surface_t *s, rect_t r) {
         int lines = ui_textarea_line_count(np->area), chars = ui_textarea_length(np->area);
         snprintf(cells[1], sizeof cells[1], "%d line%s, %d char%s", lines, lines == 1 ? "" : "s", chars, chars == 1 ? "" : "s");
         snprintf(cells[2], sizeof cells[2], "%s", np->zoom ? (np->mono ? "200%" : "140%") : "100%");
-        snprintf(cells[3], sizeof cells[3], "%s", np->mono ? "Plain text" : "Plain text (proportional)");
+        snprintf(cells[3], sizeof cells[3], np->mono ? "%s" : "%s (proportional)", lang_names[np->lang]);
     }
 
     /* right-aligned cells separated by hairlines */
@@ -1208,6 +1633,16 @@ static void np_icon(surface_t *s, int x, int y, int size) {
 #undef P
 #undef U
 }
+
+/* Source files Notepad shows in colour (.c and .h are built in: kernel/shell/assoc.c).
+   Web pages open in HTML Viewer; Notepad is offered for them in Open With. */
+REGISTER_FILETYPE("css", "Notepad", "CSS stylesheet", ICON_FILE_CSS);
+REGISTER_FILETYPE("js", "Notepad", "JavaScript file", ICON_FILE_JS);
+REGISTER_FILETYPE("cpp", "Notepad", "C++ source file", ICON_FILE_CPP);
+REGISTER_FILETYPE("hpp", "Notepad", "C++ source file", ICON_FILE_CPP);
+REGISTER_FILETYPE("cc", "Notepad", "C++ source file", ICON_FILE_CPP);
+REGISTER_FILETYPE_ALT("html", "Notepad", NULL, 0);
+REGISTER_FILETYPE_ALT("htm", "Notepad", NULL, 0);
 
 REGISTER_APP(.name = "Notepad", .category = CAT_ACCESSORIES,
              .description = "Edit plain text files",
