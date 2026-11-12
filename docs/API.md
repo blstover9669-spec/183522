@@ -1297,6 +1297,23 @@ and at shut down) and so survive restarts on an installed system; session
 cookies live until shut down. `cookies_count()`, `cookies_clear()` (memory
 and file - the browser's *Clear cookies* button).
 
+**NovaOS Search** (the Web Browser's own search engine, `apps/search*.c`; no
+outside search service is used). While a browser window is open it crawls the
+web from a built-in list of well-known sites, breadth first, as
+`User-Agent: NovaOS-Search/2.5`: robots.txt (groups for `NovaOS-Search` or
+`*`, Allow / Disallow with `*` and `$`, Crawl-delay) and `<meta name=robots>`
+are obeyed, a site gets at most one request every 3 s, no cookies are sent or
+kept, and nothing is fetched while a tab is loading. Pages the user opens are
+indexed too when history is on. The index (`/home/user/.search/index`, plus
+`frontier` for the addresses still to crawl) is capped at 8 MB on an installed
+system and 3 MB when running from the CD; Browser settings > *Clear search
+index* empties it. Searches go to `Browser://Search?q=...&p=N` (BM25 over
+title, headings, address and text, title / address / site-name boosts,
+PageRank over the crawled links). The crawler skips sites whose certificate
+fails the check unless the user chose *Continue anyway* for them; a network
+that intercepts TLS (some test sandboxes) needs the kernel option
+`search_allow_bad_certs=1`.
+
 **URL helpers.** `url_parse(s, &u)` splits an absolute URL into `url_t`
 `{scheme, host (lower case), port, path ("/" at least, with "?query", without
 "#fragment")}` - "example.com/x" is taken as http; false for other schemes.

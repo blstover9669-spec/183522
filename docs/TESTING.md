@@ -379,6 +379,16 @@ tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Web_Browser:http://10
   (bookmark), Alt+Left / Alt+Right, F5, PgUp / PgDn / Space.
 * `scroll:N` with a positive N scrolls **up** (QEMU sends wheel-up), so use
   `scroll:-5` to scroll a page down.
+* NovaOS Search: `gcc -O2 -Wall -Wextra -DSEARCH_HOST -Iapps -o /tmp/search_test
+  tools/search_test.c apps/search_text.c apps/search_index.c -lm && /tmp/search_test`
+  runs the host tests of the words, page reader, index and ranking ("ALL
+  PASSED"). In QEMU type a query into the address bar (Ctrl+L) and watch
+  `search:` lines in the serial log (`search: indexed URL (N words, M links)`
+  for each page read, `search: looking on the web for "..."` for a live
+  search, `search: saved N pages`); a timer tick that takes over 40 ms logs
+  `search: a timer tick took N ms`. Boot with `search_allow_bad_certs=1` when
+  the test network intercepts TLS, and use `monitor:set_link e1000.0 off` to
+  check that searches still work offline from the index.
 * Real sites: mirror a page with its stylesheets and pictures on the host
   (`wget -p -k -E -U "Mozilla/5.0 (NovaOS 2.5; i686) NovaBrowser/2.5" URL`)
   and serve the copy, or browse the live site when the test machine has
