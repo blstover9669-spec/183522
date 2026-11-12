@@ -23,6 +23,12 @@
  *                 risk levels and what they mean, a Scan button, the
  *                 "Recent scanned files" list and a bar with the files
  *                 scanned / all files in the OS (empty until a scan runs).
+ *   Account     - the account (include/nova/account.h): change the account
+ *                 name, the profile picture (the person icon, the built-in
+ *                 pictures or a picture from Pictures) and the password (set,
+ *                 change or remove it - changing or removing needs the current
+ *                 one). On ISO starts the account is "Guest" with the person
+ *                 icon and everything is disabled.
  *   About       - version, processor (CPUID vendor, family/model/stepping,
  *                 feature flags, hypervisor), memory, display, storage,
  *                 uptime; "Copy details" puts it all on the clipboard.
@@ -34,12 +40,13 @@
  * (dark=, wallpaper=, mousespeed=) win over saved settings.
  *
  * autorun=Settings:mouse opens a page directly (appearance, styles, mouse,
- * time, sound, safetyshield, about).
+ * time, sound, safetyshield, account, about).
  */
 #include "system_common.h"
 #include <nova/disk.h>
 #include <nova/safetyshield.h>
 #include <nova/screensaver.h>
+#include <nova/account.h>
 
 #define SW       780
 #define SH       520
@@ -113,10 +120,21 @@
 #define SPL_CB_Y 416
 #define RST_Y    452
 
-enum { PG_APPEARANCE, PG_STYLES, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_SAFETY, PG_ABOUT, PG_COUNT };
+/* account layout */
+#define AC_PIC_Y   96
+#define AC_NAME_Y  198
+#define AC_TILE_Y  264
+#define AC_TILE    36
+#define AC_TGAP    10
+#define AC_PW_Y    336
+#define AC_PW2_Y   374
+#define AC_BTN_Y   414
+#define AC_MSG_Y   458
+
+enum { PG_APPEARANCE, PG_STYLES, PG_MOUSE, PG_DATETIME, PG_SOUND, PG_SAFETY, PG_ACCOUNT, PG_ABOUT, PG_COUNT };
 
 static const char *const page_names[PG_COUNT] = { "Appearance", "Styles", "Mouse", "Date & Time", "Sound",
-                                                  "SafetyShield", "About" };
+                                                  "SafetyShield", "Account", "About" };
 static const char *const page_subtitles[PG_COUNT] = {
     "Choose light or dark mode, an accent colour and a wallpaper.",
     "Choose a screensaver and how the splash screen starts.",
@@ -124,10 +142,11 @@ static const char *const page_subtitles[PG_COUNT] = {
     "The system clock, read from the computer's real-time clock.",
     "System sounds, played on the PC speaker.",
     "Scans every file in NovaOS for threats automatically every 1 minute.",
+    "Your account name, profile picture and password.",
     "Information about NovaOS and this computer.",
 };
 static const char *const page_keys[PG_COUNT] = { "appearance", "styles", "mouse", "time", "sound", "safetyshield",
-                                                 "about" };
+                                                 "account", "about" };
 
 static const uint32_t solid_colors[NSOLID] = {
     RGB(40, 90, 150), RGB(24, 118, 128), RGB(44, 112, 72), RGB(106, 64, 140),
@@ -184,6 +203,12 @@ typedef struct {
     bool pv_full;
     int hov_style;
     bool restart_needed;            /* splash setting differs from the one this boot started with */
+    /* account */
+    widget_t *w_ac_name, *w_ac_rename, *w_ac_tiles, *w_ac_file, *w_ac_cur, *w_ac_new, *w_ac_new2, *w_ac_set, *w_ac_remove;
+    uint32_t ac_serial;
+    int ac_hov;
+    char ac_msg[96];
+    bool ac_err;
     /* about */
     sys_cpu_info_t cpu;
 } st_t;
@@ -376,11 +401,12 @@ static void settings_icon(surface_t *s, int x, int y, int size) {
 static void page_icon(surface_t *s, int page, int x, int y, int sz) {
     static const uint32_t top[PG_COUNT] = { RGB(176, 116, 250), RGB(52, 206, 170), RGB(70, 156, 252),
                                             RGB(252, 168, 64), RGB(250, 98, 126), RGB(70, 170, 252),
-                                            RGB(146, 154, 170) };
+                                            RGB(206, 213, 225), RGB(146, 154, 170) };
     static const uint32_t bot[PG_COUNT] = { RGB(120, 72, 222), RGB(16, 150, 132), RGB(36, 104, 228),
                                             RGB(236, 112, 30), RGB(222, 52, 88), RGB(36, 128, 232),
-                                            RGB(96, 104, 122) };
+                                            RGB(160, 171, 191), RGB(96, 104, 122) };
     if (page == PG_SAFETY) { icon_draw(ICON_SHIELD, s, x, y, sz); return; }
+    if (page == PG_ACCOUNT) { account_draw_builtin(ACCOUNT_PIC_PERSON, s, x, y, sz); return; }
     sys_tile(s, x, y, sz, top[page], bot[page]);
     double cx = x + sz / 2.0, cy = y + sz / 2.0, u = sz / 22.0;
     uint32_t W = COLOR_WHITE;
@@ -459,6 +485,198 @@ static const char *vendor_name(const char *v) {
     if (!strcmp(v, "CyrixInstead")) return "Cyrix";
     if (!strcmp(v, "GenuineTMx86")) return "Transmeta";
     return NULL;
+}
+
+/* ======================================================================================
+ * Account (include/nova/account.h)
+ * ==================================================================================== */
+static void add_pw(st_t *st, int page, widget_t *w);
+
+static void account_msg(st_t *st, bool err, const char *msg) {
+    strlcpy(st->ac_msg, msg, sizeof st->ac_msg);
+    st->ac_err = err;
+    if (err) sys_alert_sound();
+    win_invalidate_rect(st->win, CX, AC_PIC_Y, CW, AC_MSG_Y + 24 - AC_PIC_Y);
+}
+
+/* The widgets follow the account (changed here, or the file changed). */
+static void account_sync(st_t *st, bool force) {
+    if (!st->w_ac_name) return;
+    uint32_t serial = account_serial();
+    if (!force && serial == st->ac_serial) return;
+    st->ac_serial = serial;
+    bool guest = account_is_guest(), pw = account_has_password();
+    ui_set_text(st->w_ac_name, account_name());
+    widget_t *all[] = { st->w_ac_name, st->w_ac_rename, st->w_ac_tiles, st->w_ac_file, st->w_ac_cur, st->w_ac_new,
+                        st->w_ac_new2, st->w_ac_set, st->w_ac_remove };
+    for (int i = 0; i < (int)ARRAY_SIZE(all); i++) ui_set_enabled(all[i], !guest);
+    ui_set_enabled(st->w_ac_cur, !guest && pw);
+    ui_set_enabled(st->w_ac_remove, !guest && pw);
+    ui_set_text(st->w_ac_set, pw ? "Change password" : "Set password");
+    if (st->page == PG_ACCOUNT) win_invalidate(st->win);
+}
+
+static void on_ac_rename(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    (void)w;
+    int r = account_set_name(ui_get_text(st->w_ac_name));
+    account_msg(st, r != ACCOUNT_OK, r == ACCOUNT_OK ? "The account name is changed." : account_strerror(r));
+    account_sync(st, true);
+}
+
+static void on_ac_picture_chosen(const char *path, void *ctx) {
+    st_t *st = ctx;
+    if (!path) return;
+    int r = account_set_picture_file(path);
+    account_msg(st, r != ACCOUNT_OK, r == ACCOUNT_OK ? "The profile picture is changed." : account_strerror(r));
+    account_sync(st, true);
+}
+
+static void on_ac_file(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    (void)w;
+    const char *start = vfs_is_dir("/home/user/Pictures") ? "/home/user/Pictures" : "/home/user";
+    ui_file_dialog(st->win, UI_FILE_OPEN, "Choose a profile picture", start, "bmp,ppm", on_ac_picture_chosen, st);
+}
+
+static void ac_clear_passwords(st_t *st) {
+    ui_set_text(st->w_ac_cur, "");
+    ui_set_text(st->w_ac_new, "");
+    ui_set_text(st->w_ac_new2, "");
+}
+
+static void on_ac_set(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    (void)w;
+    const char *cur = ui_get_text(st->w_ac_cur), *n1 = ui_get_text(st->w_ac_new), *n2 = ui_get_text(st->w_ac_new2);
+    bool had = account_has_password();
+    if (!n1 || !*n1) { account_msg(st, true, "Type the new password."); ui_focus(st->w_ac_new); return; }
+    if (strcmp(n1, n2 ? n2 : "")) {
+        account_msg(st, true, "The new passwords do not match.");
+        ui_set_text(st->w_ac_new2, "");
+        ui_focus(st->w_ac_new2);
+        return;
+    }
+    int r = account_set_password(cur, n1);
+    if (r == ACCOUNT_EWRONG) {
+        account_msg(st, true, account_strerror(r));
+        ui_set_text(st->w_ac_cur, "");
+        ui_focus(st->w_ac_cur);
+        return;
+    }
+    ac_clear_passwords(st);
+    account_msg(st, r != ACCOUNT_OK, r != ACCOUNT_OK ? account_strerror(r) :
+                had ? "The password is changed." : "The password is set. It is asked on the start screen.");
+    account_sync(st, true);
+}
+
+static void on_ac_remove(widget_t *w, void *ctx) {
+    st_t *st = ctx;
+    (void)w;
+    int r = account_set_password(ui_get_text(st->w_ac_cur), NULL);
+    if (r == ACCOUNT_EWRONG) {
+        account_msg(st, true, account_strerror(r));
+        ui_set_text(st->w_ac_cur, "");
+        ui_focus(st->w_ac_cur);
+        return;
+    }
+    ac_clear_passwords(st);
+    account_msg(st, r != ACCOUNT_OK, r == ACCOUNT_OK ? "The password is removed." : account_strerror(r));
+    account_sync(st, true);
+}
+
+/* the built-in pictures: a row of round tiles */
+static int ac_tile_at(int x, int y) {
+    for (int i = 0; i < ACCOUNT_PIC_BUILTIN; i++)
+        if (rect_contains(rect_make(CX + i * (AC_TILE + AC_TGAP), AC_TILE_Y, AC_TILE, AC_TILE), x, y)) return i;
+    return -1;
+}
+
+static void ac_tiles_draw(widget_t *w, surface_t *s, rect_t r) {
+    st_t *st = ui_get_ctx(w);
+    const theme_t *t = theme_get();
+    bool guest = account_is_guest();
+    int cur = account_picture();
+    for (int i = 0; i < ACCOUNT_PIC_BUILTIN; i++) {
+        int x = r.x + i * (AC_TILE + AC_TGAP);
+        account_draw_builtin(i, s, x, r.y, AC_TILE);
+        double cx = x + AC_TILE / 2.0, cy = r.y + AC_TILE / 2.0;
+        if (i == cur) gfx_circle_aa(s, cx, cy, AC_TILE / 2.0 + 3, 2.2, t->accent);
+        else if (i == st->ac_hov && !guest) gfx_circle_aa(s, cx, cy, AC_TILE / 2.0 + 3, 1.4, sys_text_dim(t));
+        if (guest && i != cur) gfx_fill_circle_aa(s, cx, cy, AC_TILE / 2.0 + 0.5, color_alpha(t->window_bg, 150));
+    }
+}
+
+static bool ac_tiles_event(widget_t *w, const event_t *ev) {
+    st_t *st = ui_get_ctx(w);
+    int h = ac_tile_at(ev->x, ev->y);
+    switch (ev->type) {
+    case EV_MOUSE_MOVE:
+        if (h != st->ac_hov) { st->ac_hov = h; ui_invalidate(w); }
+        return true;
+    case EV_MOUSE_LEAVE:
+        if (st->ac_hov >= 0) { st->ac_hov = -1; ui_invalidate(w); }
+        return true;
+    case EV_MOUSE_DOWN:
+        if (ev->button == MOUSE_LEFT && h >= 0 && !account_is_guest()) {
+            int r = account_set_picture(h);
+            account_msg(st, r != ACCOUNT_OK, r == ACCOUNT_OK ? "The profile picture is changed." : account_strerror(r));
+            account_sync(st, true);
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void paint_account(st_t *st, surface_t *s) {
+    const theme_t *t = theme_get();
+    bool guest = account_is_guest();
+    account_draw_picture(s, CX, AC_PIC_Y, 72);
+    gfx_text(s, CX + 92, AC_PIC_Y + 12, account_name(), t->window_text, FONT_UI_TITLE);
+    gfx_text(s, CX + 94, AC_PIC_Y + 50,
+             guest ? "The Guest account of the ISO - it can't be changed."
+                   : account_has_password() ? "Your account on this drive, with a password."
+                                            : "Your account on this drive, without a password.",
+             sys_text_dim(t), FONT_UI);
+    section(s, CX, AC_NAME_Y - 22, "Account name");
+    section(s, CX, AC_TILE_Y - 22, "Profile picture");
+    section(s, CX, AC_PW_Y - 22, "Password");
+    if (st->ac_msg[0]) {
+        uint32_t c = st->ac_err ? RGB(220, 70, 70) : RGB(40, 160, 90);
+        ui_draw_glyph(s, st->ac_err ? UI_GLYPH_WARNING : UI_GLYPH_CHECK, CX, AC_MSG_Y, 16, c);
+        gfx_text(s, CX + 24, AC_MSG_Y, st->ac_msg, c, FONT_UI_BOLD);
+    }
+}
+
+static void build_account(st_t *st) {
+    window_t *win = st->win;
+    st->ac_hov = -1;
+    st->w_ac_name = ui_textbox(win, CX, AC_NAME_Y, 300, 30, account_name());
+    ui_textbox_set_maxlen(st->w_ac_name, ACCOUNT_NAME_MAX);
+    ui_textbox_on_submit(st->w_ac_name, on_ac_rename, st);
+    st->w_ac_rename = ui_button(win, CX + 310, AC_NAME_Y, 130, 30, "Change name", on_ac_rename, st);
+    int tw = ACCOUNT_PIC_BUILTIN * (AC_TILE + AC_TGAP) - AC_TGAP;
+    st->w_ac_tiles = ui_custom(win, CX, AC_TILE_Y, tw, AC_TILE, ac_tiles_draw, ac_tiles_event, st);
+    st->w_ac_file = ui_button(win, CX + tw + 16, AC_TILE_Y + 3, 150, 30, "From Pictures...", on_ac_file, st);
+    st->w_ac_cur = ui_textbox(win, CX, AC_PW_Y, 250, 30, "");
+    ui_textbox_set_placeholder(st->w_ac_cur, "Current password");
+    st->w_ac_new = ui_textbox(win, CX, AC_PW2_Y, 250, 30, "");
+    ui_textbox_set_placeholder(st->w_ac_new, "New password");
+    st->w_ac_new2 = ui_textbox(win, CX + 266, AC_PW2_Y, 250, 30, "");
+    ui_textbox_set_placeholder(st->w_ac_new2, "Confirm new password");
+    widget_t *pws[] = { st->w_ac_cur, st->w_ac_new, st->w_ac_new2 };
+    for (int i = 0; i < 3; i++) {
+        ui_textbox_set_password(pws[i], true);
+        ui_textbox_set_maxlen(pws[i], ACCOUNT_PASS_MAX);
+    }
+    ui_textbox_on_submit(st->w_ac_new2, on_ac_set, st);
+    st->w_ac_set = ui_button(win, CX, AC_BTN_Y, 160, 32, "Set password", on_ac_set, st);
+    st->w_ac_remove = ui_button(win, CX + 170, AC_BTN_Y, 160, 32, "Remove password", on_ac_remove, st);
+    widget_t *all[] = { st->w_ac_name, st->w_ac_rename, st->w_ac_tiles, st->w_ac_file, st->w_ac_cur, st->w_ac_new,
+                        st->w_ac_new2, st->w_ac_set, st->w_ac_remove };
+    for (int i = 0; i < (int)ARRAY_SIZE(all); i++) add_pw(st, PG_ACCOUNT, all[i]);
+    account_sync(st, true);
 }
 
 /* ======================================================================================
@@ -1990,6 +2208,9 @@ static void paint_page(st_t *st, surface_t *s) {
     case PG_SAFETY:
         paint_safety(st, s);
         break;
+    case PG_ACCOUNT:
+        paint_account(st, s);
+        break;
     case PG_ABOUT:
         paint_about(st, s);
         break;
@@ -2040,6 +2261,7 @@ static void tick(st_t *st) {
         if (n != last_total) { last_total = n; invalidate_progress(st); }
     }
     sync_controls(st);
+    account_sync(st, false);
     /* the solid colour can change without a theme event (wallpaper setters only repaint) */
     const theme_t *t = theme_get();
     if (st->thumb_color != t->wallpaper_color || st->thumb_accent != t->accent) {
@@ -2224,6 +2446,7 @@ static void settings_launch(const char *arg) {
     build_datetime(st);
     build_sound(st);
     build_safety(st);
+    build_account(st);
     build_about(st);
 
     int page = PG_APPEARANCE;
