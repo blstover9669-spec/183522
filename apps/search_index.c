@@ -594,9 +594,17 @@ void sidx_snippet(int doc, const srch_query_t *q, char *out, size_t size) {
 /* ---- saving and loading ------------------------------------------------------------------- */
 typedef struct obuf { uint8_t *b; size_t n, cap; bool bad; } obuf_t;
 
-static void put(obuf_t *o, const void *p, size_t n) {
+static void grow(obuf_t *o, size_t n);
+static inline void put(obuf_t *o, const void *p, size_t n) {
+    if (!n) return;
+    if (o->n + n > o->cap) grow(o, n);
     if (o->bad) return;
-    if (o->n + n > o->cap) {
+    memcpy(o->b + o->n, p, n);
+    o->n += n;
+}
+static void grow(obuf_t *o, size_t n) {
+    if (o->bad) return;
+    {
         size_t nc = o->cap ? o->cap * 2 : 1 << 20;
         while (nc < o->n + n) nc *= 2;
         uint8_t *nb = realloc(o->b, nc);
@@ -604,18 +612,22 @@ static void put(obuf_t *o, const void *p, size_t n) {
         o->b = nb;
         o->cap = nc;
     }
-    memcpy(o->b + o->n, p, n);
-    o->n += n;
 }
 static void put32(obuf_t *o, uint32_t v) { uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; put(o, b, 4); }
 static void put16(obuf_t *o, uint32_t v) { uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) }; put(o, b, 2); }
-static void put8(obuf_t *o, uint32_t v) { uint8_t b = (uint8_t)v; put(o, &b, 1); }
+static inline void put8(obuf_t *o, uint32_t v) {
+    if (o->n < o->cap) o->b[o->n++] = (uint8_t)v;
+    else { uint8_t b = (uint8_t)v; put(o, &b, 1); }
+}
 static void putv(obuf_t *o, uint32_t v) { while (v >= 0x80) { put8(o, (v & 0x7F) | 0x80); v >>= 7; } put8(o, v); }
 static void puts8(obuf_t *o, const char *s) { size_t n = strlen(s); if (n > 255) n = 255; put8(o, (uint32_t)n); put(o, s, n); }
 static void puts16(obuf_t *o, const char *s) { size_t n = strlen(s); if (n > 65535) n = 65535; put16(o, (uint32_t)n); put(o, s, n); }
 
 bool sidx_save(const char *path) {
     obuf_t o = { 0 };
+    o.cap = sidx_bytes() + sidx_bytes() / 4 + 65536;     /* (one allocation) */
+    o.b = malloc(o.cap);
+    if (!o.b) o.cap = 0;
     /* the words still used, numbered again in order */
     uint32_t *map = malloc(sizeof *map * (size_t)(nterms ? nterms : 1));
     if (!map) return false;

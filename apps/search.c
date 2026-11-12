@@ -44,7 +44,7 @@
 #define LIVE_DELAY  1000
 #define MAX_BODY    (1536u << 10)
 #define SLICE       (24u << 10) /* HTML read per timer tick                  */
-#define SAVE_MS     90000
+#define SAVE_MS     180000
 #define REQ_MAX     5           /* two crawling, up to three live            */
 #define CRAWL_REQS  2
 #define LIVE_REQS   3
