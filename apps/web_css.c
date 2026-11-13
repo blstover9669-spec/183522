@@ -3133,7 +3133,7 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         } else if (v->t == CV_NUM && v->f > 0) {
             fs = (int)lroundf(v->f * cx->c->zoom / 100.0f);
         }
-        st->fsize = (int16_t)CLAMP(fs, 1, 400);
+        st->fsize = (int16_t)CLAMP(fs, 0, 400);      /* (0: text not shown, like browsers) */
         if (n->tag == T_HTML) cx->root_fs = st->fsize;
         break;
     }
@@ -3757,7 +3757,9 @@ static void style_init(web_style_t *st, const web_style_t *ps, const web_node_t 
 }
 
 /* after the declarations: borders, and boxes hidden in the ways pages hide them */
-static void style_finish(web_style_t *st, const web_node_t *n) {
+/* keep_clear: elements made fully transparent (opacity: 0) stay in the layout, unseen
+   (pages with scripts: they are still clicked, e.g. check boxes drawn by the page) */
+static void style_finish(web_style_t *st, const web_node_t *n, bool keep_clear) {
     int tag = n ? n->tag : T_UNKNOWN;
     /* finish borders: a width only counts with a style */
     for (int i = 0; i < 4; i++) {
@@ -3771,10 +3773,10 @@ static void style_finish(web_style_t *st, const web_node_t *n) {
     if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
         ((st->left.u == U_PX && st->left.v < -500) || (st->top.u == U_PX && st->top.v < -500)))
         st->display = D_NONE;
-    if (st->visibility_hidden >= 2 || (st->overflow_hidden && st->width.u == U_PX && st->width.v <= 1 &&
-                                       st->height.u == U_PX && st->height.v <= 1))
+    if (st->visibility_hidden == 3 && keep_clear) st->fade = 255;
+    else if (st->visibility_hidden >= 2 || (st->overflow_hidden && st->width.u == U_PX && st->width.v <= 1 &&
+                                            st->height.u == U_PX && st->height.v <= 1))
         st->display = D_NONE;
-    if (st->visibility_hidden == 3 && (st->position == POS_ABSOLUTE || st->position == POS_FIXED)) st->display = D_NONE;
     /* out-of-flow boxes that are hidden or slid out of view (dropdowns, off-canvas menus) take no room */
     if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) &&
         (st->offscreen || st->visibility_hidden == 1 ||
@@ -3800,7 +3802,7 @@ static void style_pseudo(cctx_t *cx, web_node_t *n, int k) {
         for (int i = 0; i < cx->nmp[k]; i++) apply_decl(cx, n, st, ps, cx->mp[k][i].d, pass);
         if (pass == 0) resolve_vars(cx, st, ps);
     }
-    style_finish(st, NULL);
+    style_finish(st, NULL, false);
     if (!st->content || st->display == D_NONE) return;
     web_node_t *pn = wa_alloc(&cx->doc->sar, sizeof *pn);
     if (!pn) return;
@@ -3881,7 +3883,7 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
         for (int i = split; i < cx->nm; i++) apply_decl(cx, n, st, ps, cx->m[i].d, pass);
         if (pass == 0) resolve_vars(cx, st, ps);
     }
-    style_finish(st, n);
+    style_finish(st, n, cx->doc->scripting);
     if (n->tag == T_NOSCRIPT && cx->doc->scripting) st->display = D_NONE;
     n->st = st;
     style_pseudo(cx, n, 0);

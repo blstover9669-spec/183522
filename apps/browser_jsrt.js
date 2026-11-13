@@ -2425,6 +2425,12 @@ function key(type, k, repeat, mods, code, rawmods) {
     dispatch(t, ev);
     keyBlocked = ev.defaultPrevented;
     if (keyBlocked) return true;
+    if (k === 'Enter') {                            /* (Enter makes a character: keypress too) */
+        const kp = mk(2, 'keypress', true, true, k, repeat, 0, 0, mods);
+        dispatch(t, kp);
+        if (kp.defaultPrevented) return true;
+        if (N.active() !== t && t !== document.body) return true;
+    }
     if (k === 'Tab') {
         const all = Array.from(document.querySelectorAll('input,select,textarea,button,a[href],[tabindex]')).filter((e) => focusable(e) && e.tabIndex >= 0 && N.rect(e));
         if (!all.length) return false;

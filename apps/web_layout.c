@@ -589,6 +589,7 @@ static int tt_width(const font_t *f, const char *s, int n, int tt) {
 }
 
 static void meas_text(lctx_t *lc, meas_t *m, const web_node_t *t, const web_style_t *st) {
+    if (st->fsize <= 0) return;
     const font_t *f = sfont(lc, st);
     int spw = font_char_width(f, ' ');
     const char *s = t->text;
@@ -1501,6 +1502,7 @@ static void add_word(ifc_t *f, const char *s, int len, const web_style_t *st, co
 
 static void add_text(ifc_t *f, const web_node_t *t, const web_style_t *st) {
     lctx_t *lc = f->lc;
+    if (st->fsize <= 0) return;                      /* font-size: 0 */
     /* (runs of different elements stay apart on pages with scripts: they find them) */
     if (lc->pg->want_boxes) f->cur_node = t->parent && t->parent->type == WN_ELEM ? t->parent : NULL;
     const font_t *font = sfont(lc, st);

@@ -403,6 +403,7 @@ void web_paint(web_page_t *pg, surface_t *s, rect_t view, int sx, int sy, const 
                     gfx_rounded_rect(s, X - 1, Y - 1, it->w + 2, it->h + 2, 4, FOCUS_RING);
                 break;
             }
+            if (it->alpha >= 250) break;       /* opacity: 0 (pages with scripts: still clicked) */
             if (it->ref >= 0 && it->ref < pg->nctrls)
                 web_paint_ctrl(pg, &pg->ctrls[it->ref], s, X, Y, o && o->focus_ctrl == it->ref, o && o->caret_on);
             break;
