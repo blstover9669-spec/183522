@@ -54,3 +54,12 @@ Promise.resolve().then(() => order.push(2));
 setTimeout(() => eq(order.join(), '1,2,3,4', 'microtask interleaving'), 1);
 var unh = Promise.reject(new Error('handled later'));
 unh.catch(() => {});
+/* async arrows with parenthesized parameters (an early browser test found these missing) */
+var arrows = [];
+(async () => { arrows.push('iife'); })();
+var aa = async (a, b = 2, ...rest) => a + b + rest.length;
+aa(1, undefined, 7, 8).then((v) => arrows.push(v));
+Promise.all([1, 2].map(async (x) => x * 10)).then((v) => arrows.push(v.join('+')));
+var async = (q) => q * 3;
+arrows.push(async(5));
+setTimeout(() => deq(arrows, ['iife', 15, 5, '10+20'], 'async (params) => body'), 5);

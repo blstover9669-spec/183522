@@ -1106,6 +1106,9 @@ static Node *parse_args(Parser *p, Node *call) {
 }
 
 static Node *parse_lhs(Parser *p, bool allow_call) {
+    uint32_t x_start = p->tok.start;
+    int x_line = p->tok.line;
+    bool async_ok = p->tok.t == TK_IDENT && !p->tok.esc && p->tok.v == p->kw[KW_async];
     Node *x = parse_primary(p);
     bool chain = false;
     for (;;) {
@@ -1185,7 +1188,18 @@ static Node *parse_lhs(Parser *p, bool allow_call) {
             Node *c = nnew(p, N_CALL);
             c->a = x; c->line = line;
             if (x->k == N_IDENT && x->v == p->kw[KW_eval]) c->flags |= NF_DIRECTEVAL;
+            bool async_arrow = async_ok && x->k == N_IDENT && x->v == p->kw[KW_async] && line == x_line && !chain;
             x = parse_args(p, c);
+            if (async_arrow && is(p, TK_ARROW) && !p->tok.nl) {
+                /* async (a, b) => ...: the arguments were the parameters */
+                for (Node *a = c->b; a; a = a->next)
+                    if (a->k == N_SPREAD) {
+                        if (a->next) { ERR("Rest parameter must be last formal parameter"); return x; }
+                        a->k = N_REST;
+                        a->a = to_pattern(p, a->a, true);
+                    }
+                return parse_arrow_from(p, c->b, F_ASYNC, x_start, x_line);
+            }
             continue;
         }
         break;

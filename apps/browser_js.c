@@ -621,6 +621,8 @@ static bool may_insert(bjs_t *J, web_node_t *p, web_node_t *n, web_node_t *ref, 
     return true;
 }
 
+static void attrs_derived(web_node_t *n);
+
 static bool own_attrs(bjs_t *J, web_node_t *n) {
     if (n->jsf & WNJ_ATTRS) return true;
     web_attr_t *a = NULL;
@@ -634,6 +636,7 @@ static bool own_attrs(bjs_t *J, web_node_t *n) {
     n->ncls = 0;
     n->jsf |= WNJ_ATTRS;
     hs_add(J, n);
+    attrs_derived(n);          /* (id and class names now point into the copies) */
     return true;
 }
 
