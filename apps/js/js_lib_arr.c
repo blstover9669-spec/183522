@@ -924,9 +924,17 @@ JSValue js_get_iterator(JSContext *ctx, JSValue obj, JSValue *next, bool async) 
         m = js_get_method(ctx, obj, ctx->wk[WK_ASYNC_ITERATOR]);
         if (JS_IsException(m)) return m;
         if (JS_IsUndefined(m)) {
-            /* CreateAsyncFromSyncIterator: the sync iterator's results are awaited by the loop */
-            JSValue it = js_get_iterator(ctx, obj, next, false);
-            return it;
+            /* CreateAsyncFromSyncIterator */
+            JSValue snext;
+            JSValue sit = js_get_iterator(ctx, obj, &snext, false);
+            if (JS_IsException(sit)) return sit;
+            JSValue w = js_new_iter(ctx, ctx->proto_async_from_sync, sit, ITT_ASYNC_FROM_SYNC, 0);
+            if (JS_IsException(w)) return w;
+            ((JSIter *)OBJ(w)->u.p)->extra = snext;
+            JSValue nx = js_getp(ctx, w, ctx->a[A_next]);
+            if (JS_IsException(nx)) return nx;
+            *next = nx;
+            return w;
         }
     } else {
         m = js_get_method(ctx, obj, ctx->wk[WK_ITERATOR]);
@@ -1023,6 +1031,51 @@ FN(gen_method) {
     if (JS_IsException(r)) return r;
     if (ctx->gen_raw) { ctx->gen_raw = false; return r; }
     return js_iter_result(ctx, r, done);
+}
+
+/* ---- async-from-sync iterators (for await over a sync iterable) ---- */
+FN(afs_unwrap) { return js_iter_result(ctx, A(0), js_func_data(ctx) == JS_TRUE); }
+
+static JSValue rejected(JSContext *ctx) {
+    JSValue e = js_take_exception(ctx);
+    if (ctx->killed) return js_throw(ctx, e);
+    JSValue res, rej;
+    JSValue p = js_promise_new(ctx, &res, &rej);
+    if (JS_IsException(p)) return p;
+    js_callv(ctx, rej, JS_UNDEFINED, 1, &e);
+    return p;
+}
+
+/* next 0, return 1, throw 2 */
+FN(afs_method) {
+    if (!js_is_cls(this_val, CL_ITER) || ((JSIter *)OBJ(this_val)->u.p)->type != ITT_ASYNC_FROM_SYNC)
+        return js_throw_type(ctx, "not an async-from-sync iterator");
+    JSIter *it = OBJ(this_val)->u.p;
+    JSValue r;
+    if (magic == 0) r = js_callv(ctx, it->extra, it->target, argc ? 1 : 0, argv);
+    else {
+        JSValue m = js_get_method(ctx, it->target, ctx->a[magic == 1 ? A_return : A_throw]);
+        if (JS_IsException(m)) return rejected(ctx);
+        if (JS_IsUndefined(m)) {
+            if (magic == 2) { js_throw_type(ctx, "The iterator does not provide a 'throw' method"); return rejected(ctx); }
+            JSValue res = js_iter_result(ctx, A(0), true);
+            if (JS_IsException(res)) return res;
+            return js_promise_resolve_value(ctx, res);
+        }
+        r = js_callv(ctx, m, it->target, argc ? 1 : 0, argv);
+    }
+    if (JS_IsException(r)) return rejected(ctx);
+    if (!JS_IsObject(r)) { js_throw_type(ctx, "Iterator result is not an object"); return rejected(ctx); }
+    JSValue d = js_getp(ctx, r, ctx->a[A_done]);
+    if (JS_IsException(d)) return rejected(ctx);
+    JSValue v = js_getp(ctx, r, ctx->a[A_value]);
+    if (JS_IsException(v)) return rejected(ctx);
+    JSValue vp = js_promise_resolve_value(ctx, v);
+    if (JS_IsException(vp)) return rejected(ctx);
+    JSValue fn = js_mk_native(ctx, afs_unwrap, ctx->empty_str, 1, 0);
+    if (JS_IsException(fn)) return fn;
+    OBJ(fn)->u.n.data = JS_BOOL(js_truthy(d));
+    return js_invoke(ctx, vp, ctx->a[A_then], 1, &fn);
 }
 
 /* ---- Iterator helpers (Iterator.prototype.toArray / forEach / map ...) ---- */
@@ -1472,6 +1525,11 @@ void js_init_lib_arr(JSContext *ctx) {
     ctx->proto_array_iter = js_obj_alloc(ctx, CL_OBJECT, ctx->proto_iterator);
     ctx->array_iter_next = js_def_native(ctx, JS_MKOBJ(ctx->proto_array_iter), "next", arr_iter_next, 0, 0);
     js_add_prop(ctx, ctx->proto_array_iter, ctx->wk[WK_TO_STRING_TAG], js_atomc(ctx, "Array Iterator"), P_C);
+    /* async-from-sync iterator */
+    ctx->proto_async_from_sync = js_obj_alloc(ctx, CL_OBJECT, ctx->proto_object);
+    js_def_native(ctx, JS_MKOBJ(ctx->proto_async_from_sync), "next", afs_method, 1, 0);
+    js_def_native(ctx, JS_MKOBJ(ctx->proto_async_from_sync), "return", afs_method, 1, 1);
+    js_def_native(ctx, JS_MKOBJ(ctx->proto_async_from_sync), "throw", afs_method, 1, 2);
     /* generators */
     ctx->proto_generator = js_obj_alloc(ctx, CL_OBJECT, ctx->proto_iterator);
     JSValue gp = JS_MKOBJ(ctx->proto_generator);

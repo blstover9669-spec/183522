@@ -168,6 +168,16 @@ static double js_round(double x) {
     return r;
 }
 
+static double cbrt_(double x) {
+    if (x == 0 || !isfinite(x)) return x;
+    double a = fabs(x);
+    double r = pow(a, 1.0 / 3.0);
+    r = r - (r * r * r - a) / (3 * r * r);
+    double ri = round(r);
+    if (ri * ri * ri == a) r = ri;
+    return x < 0 ? -r : r;
+}
+
 static double log1p_(double x) {
     double u = 1 + x;
     if (u == 1) return x;
@@ -192,7 +202,7 @@ FN(math_fn1) {
     case 4: r = x == 0 ? x : (isinf(x) ? x : copysign(log(fabs(x) + sqrt(x * x + 1)), x)); break;
     case 5: r = atan(x); break;
     case 6: r = (x == 0) ? x : 0.5 * log1p_(2 * x / (1 - x)); break;
-    case 7: r = cbrt(x); break;
+    case 7: r = cbrt_(x); break;
     case 8: r = ceil(x); break;
     case 9: r = cos(x); break;
     case 10: r = cosh(x); break;

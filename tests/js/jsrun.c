@@ -125,7 +125,7 @@ static JSContext *make_ctx(void) {
     h.mono_ms = mono_ms;
     h.mem_limit = 512u << 20;
     h.slice_ms = 50;
-    h.nested_limit_ms = 20000;
+    h.nested_limit_ms = getenv("JS_NESTED_MS") ? (uint32_t)atoi(getenv("JS_NESTED_MS")) : 20000;
     h.stack_top = (uintptr_t)&top_marker + 4096;
     JSContext *ctx = js_new_context(&h);
     if (!ctx) return NULL;
@@ -193,6 +193,34 @@ int main(int argc, char **argv) {
         free(s);
         js_free_context(ctx);
         return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "-runaway")) {
+        /* a runaway loop yields every slice and can be stopped; the context stays usable */
+        JSContext *ctx = make_ctx();
+        const char *loop = "var spins = 0; for (;;) spins++;";
+        double t0 = mono_ms(NULL);
+        int st = js_eval_task(ctx, loop, strlen(loop), "loop.js", 1);
+        int slices = 0;
+        while (st == JS_SUSPENDED && slices < 20) { slices++; st = js_resume(ctx); }
+        double el = mono_ms(NULL) - t0;
+        bool ok1 = st == JS_SUSPENDED && js_busy(ctx);
+        printf("runaway: %d slices in %.0f ms, still suspended: %s\n", slices, el, ok1 ? "yes" : "NO");
+        js_kill(ctx);
+        const char *after = "var after = 6 * 7;";
+        int st2 = drive(ctx, js_eval_task(ctx, after, strlen(after), "after.js", 1));
+        JSValue a = js_get(ctx, js_global(ctx), "after");
+        bool ok2 = st2 == JS_DONE && JS_IsNumber(a) && js_num(a) == 42;
+        printf("after kill: %s\n", ok2 ? "ok" : "FAIL");
+        /* a runaway inside a native callback cannot yield: stopped after nested_limit_ms */
+        const char *nested = "[1].forEach(function () { for (;;) {} });";
+        t0 = mono_ms(NULL);
+        int st3 = drive(ctx, js_eval_task(ctx, nested, strlen(nested), "nested.js", 1));
+        el = mono_ms(NULL) - t0;
+        printf("nested runaway: %s after %.0f ms\n", st3 == JS_KILLED ? "killed" : "NOT killed", el);
+        int st4 = drive(ctx, js_eval_task(ctx, after, strlen(after), "after2.js", 1));
+        printf("after nested kill: %s\n", st4 == JS_DONE ? "ok" : "FAIL");
+        js_free_context(ctx);
+        return ok1 && ok2 && st3 == JS_KILLED && st4 == JS_DONE ? 0 : 1;
     }
     const char *harness = NULL;
     int fails = 0, n = 0;

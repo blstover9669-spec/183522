@@ -109,7 +109,7 @@ typedef struct JSIter {   /* built-in iterators */
     JSValue extra;        /* regexp string iterator: the string; for-in: key list */
 } JSIter;
 enum { IT_KEYS = 0, IT_VALUES, IT_ENTRIES };
-enum { ITT_ARRAY = 0, ITT_MAP, ITT_SET, ITT_STRING, ITT_REGEXP, ITT_FORIN, ITT_TYPED };
+enum { ITT_ARRAY = 0, ITT_MAP, ITT_SET, ITT_STRING, ITT_REGEXP, ITT_FORIN, ITT_TYPED, ITT_ASYNC_FROM_SYNC };
 
 struct JSObject {
     GCHdr h;              /* h.cls = CL_*, h.flags = OF_*            */

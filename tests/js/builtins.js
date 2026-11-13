@@ -1,0 +1,118 @@
+// builtins.js - library objects and number conversion
+// shortest round trip
+var nums = [0.1, 0.2, 0.3, 1 / 3, 2 / 3, 1e-7, 1.5e-10, 123.456, 5e-324, 1.7976931348623157e308, 9007199254740993, 4.35, 0.000001, 1e21, 1e-6, 123e20, 2 ** -1074, 2 ** 53 + 2];
+for (var n of nums) eq(Number(String(n)), n, 'round trip ' + n);
+eq(String(5e-324), '5e-324', 'min denormal'); eq(String(1.7976931348623157e308), '1.7976931348623157e+308', 'max');
+eq(String(123e20), '1.23e+22', 'exp'); eq(String(0.000001), '0.000001', 'small'); eq(String(1e-7), '1e-7', 'smaller');
+eq(String(2 ** 53 + 2), '9007199254740994', '2^53+2');
+eq(Number('1.7976931348623159e308'), Infinity, 'overflow parse');
+eq(Number('2.4703282292062328e-324'), 5e-324, 'round up to min denormal');
+eq(Number('2.4703282292062327e-324'), 0, 'round down to zero');
+eq(Number('0.1e1'), 1, 'exp parse'); eq(Number('  12  '), 12, 'ws'); eq(Number(''), 0, 'empty'); eq(Number('1_000'), NaN, 'no separators');
+eq(Number('-0x10'), NaN, 'signed hex'); eq(Number('0b101'), 5, 'binary'); eq(Number('Infinity'), Infinity, 'Infinity');
+eq(1_000_000, 1000000, 'numeric separator literal');
+eq((0.5).toFixed(0), '1', 'toFixed half up'); eq((2.5).toFixed(0), '3', 'toFixed 2.5'); eq((1.45).toFixed(1), '1.4', 'toFixed binary');
+eq((1e21).toFixed(2), '1e+21', 'toFixed big'); eq((-1.5).toFixed(0), '-2', 'toFixed negative'); eq((0).toFixed(2), '0.00', 'toFixed zero');
+eq((123.456).toExponential(), '1.23456e+2', 'toExponential default'); eq((0).toExponential(2), '0.00e+0', 'toExponential 0');
+eq((0.00001).toPrecision(1), '0.00001', 'toPrecision small'); eq((1e-7).toPrecision(2), '1.0e-7', 'toPrecision exp');
+eq((255).toString(2), '11111111', 'binary str'); eq((0.5).toString(2), '0.1', 'binary frac'); eq((-255).toString(36), '-73', 'base36');
+eq((1234567.891).toLocaleString(), '1,234,567.891', 'toLocaleString');
+eq(Math.round(-0.5), -0, 'round -0.5'); eq(Math.round(2.5), 3, 'round 2.5'); eq(Math.round(0.49999999999999994), 0, 'round edge');
+eq(Math.sign(-3), -1, 'sign'); eq(Math.trunc(-4.7), -4, 'trunc'); eq(Math.hypot(3, 4), 5, 'hypot'); eq(Math.clz32(1), 31, 'clz32');
+eq(Math.imul(0xffffffff, 5), -5, 'imul'); eq(Math.fround(5.5), 5.5, 'fround'); eq(Math.cbrt(27), 3, 'cbrt');
+var r1 = Math.random(); check(r1 >= 0 && r1 < 1, 'random range');
+// arrays
+var a = [5, 1, 4, 2, 3];
+deq(a.slice().sort((x, y) => x - y), [1, 2, 3, 4, 5], 'sort fn');
+deq([10, 9, 1, 100].sort(), [1, 10, 100, 9], 'sort default string');
+var stable = [{ k: 1, v: 'a' }, { k: 0, v: 'b' }, { k: 1, v: 'c' }, { k: 0, v: 'd' }].sort((x, y) => x.k - y.k).map(x => x.v).join('');
+eq(stable, 'bdac', 'stable sort');
+deq(a.splice(1, 2, 'x', 'y', 'z'), [1, 4], 'splice removed'); deq(a, [5, 'x', 'y', 'z', 2, 3], 'splice result');
+deq([1, 2, 3, 4].filter(x => x % 2), [1, 3], 'filter');
+eq([1, 2, 3].reduce((s, x) => s + x), 6, 'reduce'); eq([[1], [2]].reduceRight((s, x) => s.concat(x)).join(), '2,1', 'reduceRight');
+eq([1, 2, 3].findLast(x => x < 3), 2, 'findLast'); eq([1, 2, 3].findIndex(x => x == 3), 2, 'findIndex');
+deq([1, [2, 3]].flatMap(x => x), [1, 2, 3], 'flatMap'); deq(Array.of(7, 8), [7, 8], 'of');
+deq([1, 2, 3].fill(0, 1), [1, 0, 0], 'fill'); deq([1, 2, 3, 4, 5].copyWithin(0, 3), [4, 5, 3, 4, 5], 'copyWithin');
+deq([1, 2, 3].toReversed(), [3, 2, 1], 'toReversed'); deq([3, 1, 2].toSorted(), [1, 2, 3], 'toSorted'); deq([1, 2, 3].with(1, 9), [1, 9, 3], 'with');
+var holes = [1, , 3]; eq(holes.length, 3, 'holes length'); eq(1 in holes, false, 'hole'); eq(holes.indexOf(undefined), -1, 'indexOf skips holes');
+var big = []; big[5] = 1; eq(big.length, 6, 'sparse length'); big.length = 2; eq(big[5], undefined, 'truncate');
+var arr2 = [1, 2, 3]; arr2.length = 0; eq(arr2.join(), '', 'length 0');
+eq(Array.isArray([]), true, 'isArray'); eq([].concat([1], 2, [[3]]).length, 3, 'concat');
+eq([1, 2, 3].join('-'), '1-2-3', 'join'); eq([null, undefined, 1].join(), ',,1', 'join nullish');
+var cyc = [1]; cyc.push(cyc); eq(cyc.join(), '1,', 'join cycle');
+deq([...[1, 2, 3].entries()], [[0, 1], [1, 2], [2, 3]], 'entries');
+deq(Object.keys([4, 5]), ['0', '1'], 'array keys');
+deq(Object.keys({ b: 1, 2: 1, a: 1, 1: 1 }), ['1', '2', 'b', 'a'], 'key order');
+// strings
+eq('abc'.at(-1), 'c', 'str at'); eq('abc'.charCodeAt(1), 98, 'charCodeAt'); eq('\u{1F600}'.codePointAt(0), 0x1F600, 'codePointAt');
+eq('\u{1F600}'.length, 2, 'surrogate length'); eq([...'a\u{1F600}b'].length, 3, 'string iterator code points');
+eq(String.fromCodePoint(0x1F600).length, 2, 'fromCodePoint'); eq(String.fromCharCode(72, 105), 'Hi', 'fromCharCode');
+eq(' x '.trim() + '|', 'x|', 'trim'); eq('abc'.substring(2, 0), 'ab', 'substring swap'); eq('abc'.substr(-2, 1), 'b', 'substr');
+eq('abc'.slice(-2), 'bc', 'slice neg'); eq('a,b'.split(',').length, 2, 'split'); eq('abc'.split('').join('.'), 'a.b.c', 'split chars');
+eq('Straße'.toUpperCase(), 'STRASSE', 'sharp s upper'); eq('ÀÉÎ'.toLowerCase(), 'àéî', 'latin1 lower'); eq('ΑΒΓ'.toLowerCase(), 'αβγ', 'greek');
+eq('a'.localeCompare('b'), -1, 'localeCompare'); eq('abc'.startsWith('ab'), true, 'startsWith'); eq('abc'.endsWith('bc'), true, 'endsWith');
+eq('abc'.lastIndexOf('c'), 2, 'lastIndexOf'); eq('ab'.concat('c', 1), 'abc1', 'concat'); eq('5'.padEnd(3, '0'), '500', 'padEnd');
+// JSON
+eq(JSON.stringify({ a: [1, { b: 2 }] }, null, 2), '{\n  "a": [\n    1,\n    {\n      "b": 2\n    }\n  ]\n}', 'stringify indent');
+eq(JSON.stringify({ a: undefined, b: function () {}, c: NaN }), '{"c":null}', 'stringify skips');
+eq(JSON.stringify(' "\n'), '" \\"\\n"', 'stringify escapes');
+eq(JSON.stringify({ d: new Date(0) }), '{"d":"1970-01-01T00:00:00.000Z"}', 'toJSON date');
+eq(JSON.stringify({ a: 1, b: 2 }, ['b']), '{"b":2}', 'replacer array');
+eq(JSON.stringify({ a: 1 }, (k, v) => typeof v === 'number' ? v * 2 : v), '{"a":2}', 'replacer fn');
+eq(JSON.parse('[1,2]', (k, v) => Array.isArray(v) ? v : v * 10)[1], 20, 'reviver');
+throws(() => JSON.parse('{bad'), SyntaxError, 'parse error');
+var circ = {}; circ.self = circ; throws(() => JSON.stringify(circ), TypeError, 'circular');
+eq(JSON.parse('"\\u0041\\n"'), 'A\n', 'parse escapes');
+// Date
+var dt = new Date(Date.UTC(2026, 10, 13, 8, 5, 3, 7));
+eq(dt.toISOString(), '2026-11-13T08:05:03.007Z', 'toISOString'); eq(dt.getUTCDay(), 5, 'weekday');
+eq(new Date('2026-11-13T08:05:03Z').getTime(), Date.UTC(2026, 10, 13, 8, 5, 3), 'parse iso');
+eq(new Date('2026-11-13').getUTCDate(), 13, 'parse date only');
+eq(Date.parse('Fri, 13 Nov 2026 08:05:03 GMT'), Date.UTC(2026, 10, 13, 8, 5, 3), 'parse rfc');
+eq(Date.parse('Nov 13, 2026'), Date.UTC(2026, 10, 13), 'parse loose');
+eq(new Date(2026, 0, 31).getMonth(), 0, 'local ctor'); var d2 = new Date(2026, 0, 31); d2.setMonth(1); eq(d2.getDate(), 3, 'setMonth overflow');
+eq(String(new Date(NaN)), 'Invalid Date', 'invalid date'); eq(new Date(0).getTimezoneOffset(), 0, 'utc offset');
+check(Math.abs(Date.now() - new Date().getTime()) < 1000, 'Date.now');
+eq(new Date(0).toUTCString(), 'Thu, 01 Jan 1970 00:00:00 GMT', 'toUTCString');
+// objects, properties, Reflect, Proxy
+var o = {};
+Object.defineProperty(o, 'ro', { value: 1, enumerable: false });
+o.ro = 2; eq(o.ro, 1, 'non-writable'); eq(Object.keys(o).length, 0, 'non-enumerable');
+eq(JSON.stringify(Object.getOwnPropertyDescriptor(o, 'ro')), '{"value":1,"writable":false,"enumerable":false,"configurable":false}', 'descriptor');
+throws(() => { 'use strict'; Object.defineProperty(o, 'ro', { value: 3 }); }, TypeError, 'redefine');
+var acc = { _v: 1, get v() { return this._v; }, set v(x) { this._v = x * 2; } }; acc.v = 5; eq(acc.v, 10, 'accessor');
+var logp = [];
+var px = new Proxy({ a: 1 }, { get(t, k, r) { logp.push(k); return k in t ? t[k] : 'def'; }, has(t, k) { return k === 'magic' || k in t; } });
+eq(px.a, 1, 'proxy get'); eq(px.zz, 'def', 'proxy default'); eq('magic' in px, true, 'proxy has');
+eq(Reflect.ownKeys({ a: 1, [Symbol.iterator]: 2 }).length, 2, 'Reflect.ownKeys');
+eq(Reflect.apply(Math.max, null, [1, 3]), 3, 'Reflect.apply');
+eq(Reflect.construct(Date, [0]).getTime(), 0, 'Reflect.construct');
+var sealed = Object.seal({ s: 1 }); sealed.s = 2; delete sealed.s; eq(sealed.s, 2, 'seal'); eq(Object.isSealed(sealed), true, 'isSealed');
+eq(Object.getPrototypeOf(Object.create(null)), null, 'create null');
+eq({}.toString.call([]), '[object Array]', 'toString tag'); eq(Object.prototype.toString.call(null), '[object Null]', 'toString null');
+eq(String(Symbol.iterator), 'Symbol(Symbol.iterator)', 'well-known symbol');
+var bound = function (a, b) { return this.x + a + b; }.bind({ x: 1 }, 2); eq(bound(3), 6, 'bind'); eq(bound.name, 'bound ', 'bound name');
+eq((function namedFn() {}).name, 'namedFn', 'fn name'); eq((() => {}).length, 0, 'arrow length'); eq(function (a, b = 1) {}.length, 1, 'length defaults');
+eq(Function('a', 'b', 'return a + b')(2, 3), 5, 'Function ctor');
+eq(eval('1 + 1'), 2, 'eval'); var ev = 'outer'; eq((0, eval)('typeof ev'), 'string', 'indirect eval sees globals');
+eq(typeof globalThis, 'object', 'globalThis');
+eq(encodeURIComponent('a b&c/é'), 'a%20b%26c%2F%C3%A9', 'encodeURIComponent'); eq(decodeURIComponent('%C3%A9%20'), 'é ', 'decodeURIComponent');
+eq(encodeURI('http://x.y/a b?q=1&r'), 'http://x.y/a%20b?q=1&r', 'encodeURI'); eq(escape('a b'), 'a%20b', 'escape');
+// typed arrays
+var u8 = new Uint8Array([1, 2, 300]); eq(u8[2], 44, 'uint8 wrap'); eq(u8.length, 3, 'ta length');
+var f64 = new Float64Array(2); f64[0] = 1.5; eq(f64[0], 1.5, 'float64');
+var buf = new ArrayBuffer(4), dv = new DataView(buf); dv.setUint16(0, 0x1234); eq(dv.getUint8(0), 0x12, 'DataView big endian');
+eq(new Uint8ClampedArray([300, -5, 1.5])[0], 255, 'clamped'); eq(Array.from(new Int16Array([1, -2])).join(), '1,-2', 'Array.from ta');
+eq(new Uint8Array([3, 1, 2]).sort().join(), '1,2,3', 'ta sort'); eq(new Uint8Array(8).subarray(2, 4).length, 2, 'subarray');
+// URL, TextEncoder
+var u = new URL('../c/d?x=1#h', 'https://Example.com/a/b/e');
+eq(u.href, 'https://example.com/a/c/d?x=1#h', 'URL resolve'); eq(u.searchParams.get('x'), '1', 'searchParams'); eq(u.origin, 'https://example.com', 'origin');
+u.searchParams.append('y', 'a b'); eq(u.search, '?x=1&y=a+b', 'searchParams update');
+eq(new URLSearchParams({ a: '1', b: 'x y' }).toString(), 'a=1&b=x+y', 'URLSearchParams object');
+eq(new URL('http://h:80/p').host, 'h', 'default port dropped');
+throws(() => new URL('not a url'), TypeError, 'invalid URL');
+eq(new TextEncoder().encode('é').join(), '195,169', 'TextEncoder'); eq(new TextDecoder().decode(new Uint8Array([195, 169])), 'é', 'TextDecoder');
+eq(btoa('hello'), 'aGVsbG8=', 'btoa'); eq(atob('aGVsbG8='), 'hello', 'atob');
+var sc = structuredClone({ a: [1, { b: new Date(5) }], m: new Map([[1, 2]]) }); eq(sc.a[1].b.getTime(), 5, 'structuredClone'); eq(sc.m.get(1), 2, 'clone map');
+eq(new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(1234.5), '$1,234.50', 'Intl currency');
+print('builtins done');

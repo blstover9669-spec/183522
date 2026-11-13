@@ -186,3 +186,4 @@ jstest:
 	@gcc -m32 -mfpmath=387 -DJSRUN_X87 $(JSTEST_FLAGS) -o $(JSTEST_DIR)/jsrun32 $(JSTEST_SRC) -lm
 	@$(JSTEST_DIR)/jsrun -h tests/js/harness.js $(JSTEST_FILES)
 	@$(JSTEST_DIR)/jsrun32 -h tests/js/harness.js $(JSTEST_FILES) | tail -1
+	@JS_NESTED_MS=500 $(JSTEST_DIR)/jsrun -runaway
