@@ -1,9 +1,94 @@
 /*
  * vfs.c - in-memory hierarchical filesystem (ramfs) with file descriptors and
  * whole-tree (de)serialisation for persistence.
+ *
+ * File protection (NovaOS 2.5): the system files (/system/boot, /system/ui,
+ * /system/apps and the manifest /system/manifest.sha256) change only through
+ * NovaOS's privileged path (vfs_privileged: the ISO start, the drive's first
+ * start); the top-level folders /, /system, /home and /home/user can't be
+ * deleted, renamed or moved; and apps (the Terminal, Files, Notepad ...) can't
+ * create, overwrite, delete, rename or move anything inside /system. NovaOS's
+ * own code (the kernel: services, the shell's settings, the account) keeps
+ * writing its settings and logs in /system, and of the apps Settings, Welcome,
+ * OSaver (restoring a code) and the Web Browser write their own settings files
+ * in /system/config. Whether a call comes from an app is told by where it comes
+ * from: the apps' code is linked after the kernel's (kernel/zz_app_text.c marks
+ * the boundary). A refused operation returns VFS_EPROTECTED ("This is a
+ * protected system file"), plays the alert sound and is logged.
  */
 #include "kernel.h"
 #include "gui/bootscreen.h"
+
+/* ---- file protection ------------------------------------------------------------------ */
+enum { OP_WRITE, OP_DELETE, OP_MOVE };
+
+extern void kernel_text_end(void);                  /* kernel/zz_app_text.c                */
+extern const app_desc_t *const __apps_start[];      /* linker.ld: after .text and .rodata  */
+extern const app_desc_t *wm_current_app;            /* kernel/gui/wm.c                     */
+static int privileged;
+
+void vfs_privileged(bool on) {
+    privileged += on ? 1 : -1;
+    if (privileged < 0) privileged = 0;
+}
+
+static bool under(const char *p, const char *dir) {
+    size_t n = strlen(dir);
+    return !strncmp(p, dir, n) && (p[n] == 0 || p[n] == '/');
+}
+
+bool vfs_is_system_file(const char *norm) {
+    return under(norm, "/system/boot") || under(norm, "/system/ui") || under(norm, "/system/apps") ||
+           !strcmp(norm, SYSFILES_MANIFEST);
+}
+
+static bool top_folder(const char *p) {
+    return !strcmp(p, "/") || !strcmp(p, "/system") || !strcmp(p, "/home") || !strcmp(p, "/home/user");
+}
+
+/* The caller's code is an app's (linked after the kernel), running for an app. */
+static bool from_app(void *ra) {
+    uintptr_t a = (uintptr_t)ra;
+    return a >= (uintptr_t)kernel_text_end && a < (uintptr_t)__apps_start && wm_current_app;
+}
+
+/* NovaOS's own apps writing their settings files in /system/config. */
+static bool app_may_write(const char *p) {
+    static const struct { const char *app, *path; bool prefix; } allow[] = {
+        { "Settings", "/system/config", true },          /* settings, splash.cfg ...        */
+        { "OSaver", "/system/config", true },            /* restoring a code: its settings  */
+        { "Welcome", "/system/config/settings", false }, /* "Show this tour when ..."       */
+        { "Web Browser", "/system/config/browser.cfg", false },
+    };
+    const char *name = wm_current_app && wm_current_app->name ? wm_current_app->name : "";
+    for (int i = 0; i < ARRAY_SIZE(allow); i++)
+        if (!strcmp(name, allow[i].app) && (allow[i].prefix ? under(p, allow[i].path) && strcmp(p, allow[i].path)
+                                                            : !strcmp(p, allow[i].path)))
+            return true;
+    return false;
+}
+
+static int protect_check(const char *path, int op, void *ra) {
+    if (privileged > 0 || !path) return 0;
+    char p[VFS_PATH_MAX];
+    if (vfs_normalize(NULL, path, p) != 0) return 0;          /* the operation fails by itself */
+    bool app = from_app(ra);
+    bool refuse = ((op == OP_DELETE || op == OP_MOVE) && top_folder(p)) || vfs_is_system_file(p) ||
+                  (app && under(p, "/system") && !app_may_write(p));
+    if (!refuse) return 0;
+    static const char *const ops[] = { "write", "delete", "move" };
+    klog("vfs: protected: %s %s refused (%s)", ops[op], p,
+         app ? wm_current_app->name : "NovaOS without the privileged path");
+    static uint32_t last_sound;
+    if (!last_sound || g_ticks - last_sound > 400) { last_sound = g_ticks ? g_ticks : 1; sys_alert_sound(); }
+    return VFS_EPROTECTED;
+}
+
+#define PROTECT(path, op)                                                          \
+    do {                                                                           \
+        int _pe = protect_check((path), (op), __builtin_return_address(0));       \
+        if (_pe) return _pe;                                                       \
+    } while (0)
 
 typedef struct vnode {
     char name[VFS_NAME_MAX];
@@ -187,6 +272,7 @@ bool vfs_exists(const char *path) { return lookup(path) != NULL; }
 bool vfs_is_dir(const char *path) { vnode_t *n = lookup(path); return n && n->is_dir; }
 
 int vfs_mkdir(const char *path) {
+    if (!vfs_is_dir(path)) PROTECT(path, OP_WRITE);
     char name[VFS_NAME_MAX];
     vnode_t *p = lookup_parent(path, name);
     if (!p) return VFS_ENOENT;
@@ -202,6 +288,7 @@ int vfs_mkdir(const char *path) {
 int vfs_mkdirs(const char *path) {
     char norm[VFS_PATH_MAX];
     if (vfs_normalize(NULL, path, norm) != 0) return VFS_EINVAL;
+    if (!vfs_is_dir(norm)) PROTECT(norm, OP_WRITE);
     char partial[VFS_PATH_MAX] = "";
     size_t pos = 0;
     char *save, *tok = strtok_r(norm, "/", &save);
@@ -220,6 +307,7 @@ int vfs_mkdirs(const char *path) {
 }
 
 int vfs_create(const char *path) {
+    PROTECT(path, OP_WRITE);
     vnode_t *n = lookup(path);
     if (n) return n->is_dir ? VFS_EISDIR : 0;
     char name[VFS_NAME_MAX];
@@ -233,6 +321,7 @@ int vfs_create(const char *path) {
 }
 
 int vfs_remove(const char *path) {
+    PROTECT(path, OP_DELETE);
     vnode_t *n = lookup(path);
     if (!n) return VFS_ENOENT;
     if (n == root) return VFS_EBUSY;
@@ -245,6 +334,7 @@ int vfs_remove(const char *path) {
 }
 
 int vfs_remove_recursive(const char *path) {
+    PROTECT(path, OP_DELETE);
     vnode_t *n = lookup(path);
     if (!n) return VFS_ENOENT;
     if (n == root) return VFS_EBUSY;
@@ -256,6 +346,8 @@ int vfs_remove_recursive(const char *path) {
 }
 
 int vfs_rename(const char *from, const char *to) {
+    PROTECT(from, OP_MOVE);
+    PROTECT(to, OP_WRITE);
     vnode_t *n = lookup(from);
     if (!n) return VFS_ENOENT;
     if (n == root) return VFS_EBUSY;
@@ -300,6 +392,7 @@ static int copy_node(vnode_t *src, vnode_t *dstdir, const char *name) {
 }
 
 int vfs_copy(const char *from, const char *to) {
+    PROTECT(to, OP_WRITE);
     vnode_t *src = lookup(from);
     if (!src) return VFS_ENOENT;
     char name[VFS_NAME_MAX];
@@ -356,10 +449,15 @@ void *vfs_read_file(const char *path, uint32_t *size) {
     if (n->size) memcpy(buf, n->data, n->size);
     buf[n->size] = 0;
     if (size) *size = n->size;
+    /* a system file that is loaded is checked against the manifest (kernel panic when
+       it is damaged) - kernel/fs/sysfiles.c */
+    char norm[VFS_PATH_MAX];
+    if (vfs_normalize(NULL, path, norm) == 0 && vfs_is_system_file(norm)) sysfiles_check_loaded(norm, buf, n->size);
     return buf;
 }
 
 int vfs_write_file(const char *path, const void *data, uint32_t size) {
+    PROTECT(path, OP_WRITE);
     int r = vfs_create(path);
     if (r) return r;
     vnode_t *n = lookup(path);
@@ -374,10 +472,16 @@ int vfs_write_file(const char *path, const void *data, uint32_t size) {
     if (size) memcpy(n->data, data, size);
     n->size = size;
     touch(n);
+    if (privileged) {                          /* NovaOS wrote a system file: the manifest follows */
+        char norm[VFS_PATH_MAX];
+        if (vfs_normalize(NULL, path, norm) == 0 && vfs_is_system_file(norm) && strcmp(norm, SYSFILES_MANIFEST))
+            sysfiles_note_write(norm, data, size);
+    }
     return 0;
 }
 
 int vfs_append_file(const char *path, const void *data, uint32_t size) {
+    PROTECT(path, OP_WRITE);
     int r = vfs_create(path);
     if (r) return r;
     vnode_t *n = lookup(path);
@@ -391,6 +495,7 @@ int vfs_append_file(const char *path, const void *data, uint32_t size) {
 
 /* ---- descriptors ------------------------------------------------------------------- */
 int vfs_open(const char *path, int flags) {
+    if (flags & (VFS_O_WRITE | VFS_O_CREATE | VFS_O_TRUNC | VFS_O_APPEND)) PROTECT(path, OP_WRITE);
     vnode_t *n = lookup(path);
     if (!n) {
         if (!(flags & VFS_O_CREATE)) return VFS_ENOENT;
@@ -477,6 +582,7 @@ const char *vfs_strerror(int e) {
     case VFS_EMFILE: return "Too many open files";
     case VFS_EBUSY: return "Resource busy";
     case VFS_ECORRUPT: return "Corrupt filesystem image";
+    case VFS_EPROTECTED: return "This is a protected system file";
     default: return "Unknown error";
     }
 }

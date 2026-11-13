@@ -29,6 +29,8 @@
 #define VFS_EMFILE   -9   /* too many open files       */
 #define VFS_EBUSY    -10  /* in use / cannot move into itself */
 #define VFS_ECORRUPT -11  /* bad serialised image      */
+#define VFS_EPROTECTED -12 /* a protected system file or folder: /system and its files,
+                              /home, /home/user (see "File protection" in docs/API.md) */
 
 typedef struct vfs_stat {
     uint32_t size;       /* bytes (0 for directories)            */

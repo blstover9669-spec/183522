@@ -4,8 +4,8 @@
  *   splash.c     animated boot splash (icon rises, rainbow shimmer) and the
  *                loading bar of installed-drive boots
  *   bootsetup.c  "NovaOS Drive installation" (ISO boots, after the splash)
- *   nodrive.c    "No drive found" (the drive's System/home folders or the
- *                system files in /system are gone)
+ *   nodrive.c    "No drive found" (the installed drive is not found at startup,
+ *                or stops responding while NovaOS runs)
  *   reqfail.c    "System requirement fail" (no readable COS:// drive of at
  *                least 4 MB on an installed-drive boot, or a bundled app's file
  *                in /system/apps is missing)
@@ -99,10 +99,10 @@ void startscreen_prepare(void);
 void startscreen_show(void);
 
 /* ---- nodrive.c ----------------------------------------------------------------------- */
-/* Check the drive at startup (No drive found if it is incomplete) and start watching
-   it while NovaOS runs. */
+/* Installed system: start watching the drive while NovaOS runs (No drive found when it
+   stops responding). */
 void nodrive_check_startup(void);
-/* Black screen, Nova icon, "No drive found" - forever. `why`: the missing path. */
+/* Black screen, Nova icon, "No drive found" - forever. `why` only goes to the log. */
 void nodrive_show(const char *why) NORETURN;
 /* The black screen with the Nova icon, `title` and (if not NULL) `reason` under it,
    forever - shared by "No drive found" and "System requirement fail". */
@@ -112,8 +112,9 @@ extern const font_t font_nodrive, font_nodrive_small;
 
 /* ---- reqfail.c ----------------------------------------------------------------------- */
 /* After the saved files are restored: an installed-drive boot (boot=disk) needs its
-   COS:// drive found on the IDE controllers, read without errors and at least 4 MB,
-   else "System requirement fail" - forever. ISO boots pass. */
+   drive: not found on the IDE controllers -> "No drive found"; found but not read
+   without errors, or smaller than 4 MB -> "System requirement fail" - forever. ISO
+   boots pass. */
 void reqfail_check_drive(void);
 /* After the drive check: every bundled app needs its file in /system/apps. */
 void reqfail_check_apps(void);
@@ -131,10 +132,21 @@ void sysfiles_seed_part(int part);
 /* The default home folders and files (kernel/fs/vfs.c): only_missing keeps files that
    are there already. */
 void vfs_write_default_files(bool only_missing);
+/* The manifest: the SHA-256 of every system file, kept up to date whenever NovaOS writes
+   one. sysfiles_verify (installed drive, at startup): every file must match - a damaged
+   or missing one is a kernel panic naming it (a missing /system/apps file: System
+   requirement fail). sysfiles_check_loaded: vfs_read_file of a system file (panic when it
+   does not match); sysfiles_note_write: vfs_write_file of one on the privileged path. */
+#define SYSFILES_MANIFEST "/system/manifest.sha256"
+void sysfiles_verify(void);
+void sysfiles_check_loaded(const char *path, const void *data, uint32_t len);
+void sysfiles_note_write(const char *path, const void *data, uint32_t len);
+/* File protection (kernel/fs/vfs.c): NovaOS's privileged path (nestable) - only it may
+   write the system files; vfs_is_system_file(normalized path). */
+void vfs_privileged(bool on);
+bool vfs_is_system_file(const char *norm);
 /* Bring the files that describe the running system (boot.cfg) up to date. */
 void sysfiles_refresh(void);
-/* NULL if the drive has all system files, else the first missing path. */
-const char *sysfiles_missing(void);
 /* NULL if /system/apps has the file of every bundled app (app registry), else what is
    missing ("/system/apps is missing", "0 apps found in /system/apps", the path). */
 const char *sysfiles_apps_missing(void);

@@ -19,10 +19,11 @@
  * written from the built-in copies; an installed drive keeps them with the
  * other files. The fonts loaded here replace the built-in ones for all text
  * (kernel/gfx/text.c asks font_active()); themes and wallpapers are used by
- * kernel/gui/theme.c. A file that is there but damaged is skipped (logged) and
- * the built-in copy is used; a missing file means the drive is incomplete:
- * "No drive found" (nodrive.c), checked before this runs. The screens that
- * must work without the drive (splash, No drive found, panic) use built-ins.
+ * kernel/gui/theme.c. Every file is checked against the system files' manifest
+ * when it is loaded (kernel/fs/sysfiles.c): a damaged one stops NovaOS with a
+ * kernel panic naming it. They are protected system files (kernel/fs/vfs.c):
+ * only NovaOS's privileged path writes them. The screens that must work without
+ * the drive (splash, No drive found, panic) use built-ins.
  *
  * Kept small for RAM: fonts are packed (the 8 fonts take about 110 KB on the
  * drive), wallpapers are recipes of a few hundred bytes instead of pictures.

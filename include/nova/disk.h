@@ -95,6 +95,9 @@ int  persist_boot_status(void);
 int  persist_save(void);
 /* Start a background save (written in slices from the main loop). */
 void persist_save_async(void);
+/* Installed system: does the drive still answer? DISK_OK, or the error of a read of
+   its install header (or of the last saves, when two in a row failed). */
+int  persist_probe(void);
 
 /* ---- installer back end -------------------------------------------------------------- */
 /* Minimum disk size accepted by the installer. */

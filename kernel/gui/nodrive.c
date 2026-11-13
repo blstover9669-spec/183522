@@ -1,38 +1,38 @@
 /*
  * nodrive.c - "No drive found" (NovaOS 2.5).
  *
- * The drive is the top folder that holds System, home and the rest (the root
- * of the file system). When it is gone - deleted by a virus, rm -r / ... - or
- * the system folder or one of the system files in it (kernel/fs/sysfiles.c) is
- * missing, NovaOS shows a black screen with the Nova icon in the middle and
- * "No drive found" under it (Liberation Sans, rendered at build time by
- * tools/genfont.py --nodrive into nodrive_font.c) and stays there; only
- * resetting the computer gets out of it.
+ * Shown only when the drive NovaOS was installed on is really not there:
  *
- * It is checked at startup (after the saved files of an installed drive are
- * restored, before anything else uses them) and, while NovaOS runs, every time
- * the files change (polled from a timer). On an installed drive the files are
- * saved first, like any other change: the drive stays gone after a restart.
+ *   at startup   an installed system (boot=disk) whose drive is not found on
+ *                the IDE controllers (detached, or moved to a SATA/AHCI, SCSI
+ *                or NVMe controller NovaOS has no driver for) -
+ *                reqfail_check_drive() (kernel/gui/reqfail.c) sends it here;
+ *   after start  the drive stops responding: every few seconds NovaOS reads it
+ *                (persist_probe, kernel/disk/persist.c - also counting failed
+ *                saves); after WATCH_FAILS failures in a row (errors or time-outs)
+ *                the drive is gone.
  *
- * Everything this screen needs is built into the kernel: it never reads the
- * drive it is reporting as missing. "System requirement fail" (reqfail.c) is
- * the same screen with its reason under the title (bootfail_screen).
+ * A drive that is there but can't be read at startup, or is smaller than 4 MB, is
+ * "System requirement fail" (reqfail.c). ISO starts never show it, and deleting
+ * folders doesn't either: /system, /home and /home/user are protected
+ * (kernel/fs/vfs.c), and damaged system files are a kernel panic
+ * (kernel/fs/sysfiles.c).
+ *
+ * The screen: black, the Nova icon in the middle and "No drive found" under it
+ * (Liberation Sans, rendered at build time by tools/genfont.py --nodrive into
+ * nodrive_font.c); it stays there, only resetting the computer gets out. It
+ * needs nothing from the drive: everything is built into the kernel.
+ * "System requirement fail" is the same screen with its reason under the title
+ * (bootfail_screen).
  */
 #include "wm_internal.h"
 #include "bootscreen.h"
 #include <nova/disk.h>
 
-#define WATCH_MS 250
+#define WATCH_MS    3000
+#define WATCH_FAILS 2
 
-static bool watching;          /* NovaOS is running: the startup check passed */
-static uint32_t watched_gen;
-
-/* NULL when the drive is there, else what is missing. */
-static const char *drive_missing(void) {
-    if (!vfs_is_dir("/system")) return "/system";
-    if (!vfs_is_dir("/home")) return "/home";
-    return sysfiles_missing();
-}
+static int fails;
 
 void bootfail_screen(const char *title, const char *reason) {
     __asm__ volatile("sti");
@@ -64,27 +64,27 @@ void bootfail_screen(const char *title, const char *reason) {
 }
 
 void nodrive_show(const char *why) {
-    klog("nodrive: No drive found (%s is missing)", why ? why : "the drive");
+    klog("nodrive: No drive found (%s)", why ? why : "the drive is not there");
     __asm__ volatile("sti");
-    /* an installed drive keeps what happened, like every other change to the files
-       (at startup the files are as they were saved: nothing to save) */
-    if (watching && persist_active()) persist_save();
     bootfail_screen("No drive found", NULL);
 }
 
 static void watch(void *ctx) {
     (void)ctx;
-    uint32_t g = vfs_generation();
-    if (g == watched_gen) return;
-    watched_gen = g;
-    const char *m = drive_missing();
-    if (m) nodrive_show(m);
+    int r = persist_probe();
+    if (r == DISK_OK) { fails = 0; return; }
+    fails++;
+    klog("nodrive: the drive did not answer (%s), %d of %d", disk_strerror(r), fails, WATCH_FAILS);
+    if (fails >= WATCH_FAILS) {
+        char why[96];
+        snprintf(why, sizeof why, "the drive stopped responding: %s", disk_strerror(r));
+        nodrive_show(why);
+    }
 }
 
 void nodrive_check_startup(void) {
-    const char *m = drive_missing();
-    if (m) nodrive_show(m);
-    watched_gen = vfs_generation();
-    watching = true;
+    if (!persist_active()) return;                  /* ISO start: nothing to watch */
+    fails = 0;
     timer_add(WATCH_MS, watch, NULL, true);
+    klog("nodrive: watching the drive (a read every %u s)", WATCH_MS / 1000);
 }

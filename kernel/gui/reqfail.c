@@ -9,10 +9,11 @@
  *
  *   "Requires a readable COS:// drive (at least 4 MB)"
  *       COS:// is the drive NovaOS starts from. On an installed-drive boot
- *       (boot=disk) the kernel must find that hard disk on the IDE controllers
- *       (it has no SATA/AHCI, SCSI or NVMe driver), read it at startup without
- *       errors (kernel/disk/persist.c), and the disk must have 4 MB at least.
- *       ISO boots start from the CD and pass.
+ *       (boot=disk) the drive NovaOS was installed on must be read at startup
+ *       without errors (kernel/disk/persist.c), and the disk must have 4 MB at
+ *       least. When the drive is not found at all (on the IDE controllers -
+ *       NovaOS has no SATA/AHCI, SCSI or NVMe driver) that is "No drive found"
+ *       instead (nodrive.c). ISO boots start from the CD and pass.
  *   "A required bundle app is missing"
  *       /system/apps holds one small file per bundled app (kernel/fs/sysfiles.c).
  *       The boot fails when /system/apps is missing, no app file is found in it
@@ -49,9 +50,10 @@ void reqfail_check_drive(void) {
     int st = persist_boot_status();
     const disk_info_t *d = pi.active ? disk_get(pi.disk) : NULL;
     if (st == DISK_ENODEV || !d) {
-        snprintf(detail, sizeof detail, "the installed drive was not found on the IDE controllers (%d hard disk%s)",
-                 disk_count(), disk_count() == 1 ? "" : "s");
-        reqfail_show(R_COS, detail);
+        const char *ids = sys_cmdline_get("diskid");
+        snprintf(detail, sizeof detail, "the installed drive (id %s) was not found on the IDE controllers (%d hard disk%s)",
+                 ids ? ids : "?", disk_count(), disk_count() == 1 ? "" : "s");
+        nodrive_show(detail);
     }
     if (st != DISK_OK) {
         snprintf(detail, sizeof detail, "reading disk %d (%s) failed: %s", pi.disk, d->model, disk_strerror(st));

@@ -99,11 +99,13 @@ void kmain(uint32_t magic, uint32_t mbi) {
        them /system/config/splash.cfg) replace the defaults first - its COS:// drive
        must be found, readable and at least 4 MB, else "System requirement fail";
        an ISO start writes the system files (kernel, boot files, UI files, a file
-       per bundled app) into /system. Then the drive check: without its System /
-       home folders or a system file it is "No drive found"; then every bundled
-       app (the app registry) needs its file in /system/apps, else "System
-       requirement fail". NovaOS then loads its UI (fonts, themes, wallpapers, UI
-       settings) from /system/ui.
+       per bundled app) into /system. Then every bundled app (the app registry)
+       needs its file in /system/apps, else "System
+       requirement fail"; then every system file must match its SHA-256 in the
+       manifest, else a kernel panic names the damaged file. The installed drive is
+       watched from then on ("No drive found" when it stops answering; not found at
+       startup is "No drive found" too). NovaOS then loads its UI (fonts, themes,
+       wallpapers, UI settings) from /system/ui.
        An installed drive starts without system files (the installer writes only
        the boot loader and the kernel): its first start is the installation menu
        (kernel/gui/firststart.c), which writes them - the drive checks and the
@@ -116,8 +118,9 @@ void kmain(uint32_t magic, uint32_t mbi) {
     bool first = firststart_pending();
     if (!restored && !first) sysfiles_seed();
     if (!first) {
-        nodrive_check_startup();
-        reqfail_check_apps();
+        reqfail_check_apps();                  /* a missing /system/apps file: System requirement fail */
+        if (persist_active()) sysfiles_verify();   /* a damaged system file: kernel panic */
+        nodrive_check_startup();               /* installed drive: No drive found if it stops answering */
     }
     sysfiles_refresh();
     uifiles_load();
@@ -136,8 +139,8 @@ void kmain(uint32_t magic, uint32_t mbi) {
     if (bar) splash_progress(first ? 30 : 45, NULL);
     if (first) {
         if (firststart_run()) bar = false;     /* its last screen replaced the loading bar */
-        nodrive_check_startup();
         reqfail_check_apps();
+        nodrive_check_startup();
         sysfiles_refresh();
         persist_start();
     }

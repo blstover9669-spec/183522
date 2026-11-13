@@ -96,6 +96,7 @@ static struct {
     int slot;
     int boot_status;          /* persist_boot_status()                         */
     bool first_start;         /* persist_first_start()                         */
+    int io_fails;             /* saves in a row that failed with an I/O error  */
 } P = { .disk = -1, .newest = -1 };
 
 int persist_boot_disk(void) { return P.active ? P.disk : -1; }
@@ -295,6 +296,8 @@ static int commit(int slot, uint32_t len, uint32_t crc) {
 
 static void report(int r, uint32_t len, uint32_t t0, const char *how) {
     P.last_error = r;
+    if (r == DISK_EIO || r == DISK_ETIMEOUT || r == DISK_ENODEV) P.io_fails++;
+    else if (r == DISK_OK) P.io_fails = 0;
     if (r == DISK_OK) {
         klog("persist: saved %u bytes to slot %c (save #%u, %s) in %u ms", len, 'A' + P.newest, P.seq, how,
              g_ticks - t0);
@@ -379,6 +382,21 @@ void persist_save_async(void) {
 }
 
 static void sync_hook(void) { persist_save_async(); }
+
+/* Does the drive still answer? A read of its install header; two failed saves in a row
+   (I/O errors, time-outs) count as a failure too. kernel/gui/nodrive.c asks every few
+   seconds and shows "No drive found" when it keeps failing. */
+int persist_probe(void) {
+    if (!P.active) return DISK_OK;
+    uint8_t *b = kmalloc(512);
+    if (!b) return DISK_OK;
+    int r = disk_read(P.disk, DISK_HDR_LBA, 1, b);
+    if (r == DISK_OK && (((disk_header_t *)b)->magic0 != DISK_HDR_MAGIC0 || ((disk_header_t *)b)->disk_id != P.hdr.disk_id))
+        r = DISK_ENODEV;                       /* another disk answers there now */
+    kfree(b);
+    if (r == DISK_OK && P.io_fails >= 2) r = P.last_error;
+    return r;
+}
 
 static void periodic(void *ctx) {
     (void)ctx;
