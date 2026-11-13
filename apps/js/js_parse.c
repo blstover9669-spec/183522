@@ -54,6 +54,12 @@ struct Parser {
     JSSB sb;
     int field_keys;
     int depth;
+    /* ES modules: the modules it imports, the prologue made for its imports / exports */
+    JSValue *req;
+    int nreq, reqcap;
+    Node *pro_ns, **pro_ns_tail, *pro_exp, **pro_exp_tail;
+    JSValue a_imp, a_exp, a_meta;
+    int nre;
 };
 
 /* ==== arena ================================================================================= */
@@ -624,6 +630,7 @@ static JSValue ident_name(Parser *p) {
 static Node *parse_assign(Parser *p);
 static Node *parse_expr(Parser *p);
 static Node *parse_stmt(Parser *p);
+static Node *parse_stmt_inner(Parser *p);
 static Node *parse_unary(Parser *p);
 static Node *parse_lhs(Parser *p, bool allow_call);
 static Node *parse_binding_target(Parser *p);
@@ -1064,6 +1071,7 @@ static Node *parse_primary(Parser *p) {
                 if (eat(p, '.')) {
                     if (!is_kw(p, KW_meta)) { unexpected(p); return nnew(p, N_EMPTY); }
                     next(p);
+                    if (!JS_IsUndefined(p->a_meta)) { x = nnew(p, N_IDENT); x->v = p->a_meta; return x; }
                     return nnew(p, N_IMPORT_META);
                 }
                 expect(p, '(');
@@ -1691,6 +1699,263 @@ static Node *parse_class(Parser *p, bool decl) {
     return c;
 }
 
+/* ==== ES modules ============================================================================================= */
+/* A module compiles to async function (imports, exports, meta): its prologue binds each
+   imported module's namespace (const *ns<i>* = imports(i)), registers its exports
+   (exports(name, () => local) - live bindings; exports('*', ns) for export *) and then
+   waits for meta.go, so a whole module graph is linked before any module runs. Imported
+   names become BK_IMPORT bindings (reads of *ns<i>*.name). */
+static bool module_top(Parser *p) { return p->fn && p->fn->kind == FK_MODULE && !JS_IsUndefined(p->a_exp) && p->depth == 1; }
+
+static Node *mk_ident(Parser *p, JSValue name) { Node *x = nnew(p, N_IDENT); x->v = name; return x; }
+static Node *mk_str(Parser *p, JSValue str) { Node *x = nnew(p, N_STR); x->v = str; return x; }
+static Node *mk_stmt(Parser *p, Node *e) { Node *x = nnew(p, N_EXPR); x->a = e; x->line = e->line; return x; }
+static Node *mk_call2(Parser *p, JSValue fn, Node *a, Node *b) {
+    Node *c = nnew(p, N_CALL);
+    c->a = mk_ident(p, fn);
+    a->next = b;
+    c->b = a;
+    return c;
+}
+
+static int mod_request(Parser *p, JSValue spec) {
+    for (int i = 0; i < p->nreq; i++) if (js_strict_equals(p->ctx, p->req[i], spec)) return i;
+    if (p->nreq >= p->reqcap) {
+        int nc = p->reqcap ? p->reqcap * 2 : 8;
+        JSValue *n = js_parser_alloc(p, sizeof(JSValue) * (size_t)nc);
+        if (!n) return 0;
+        if (p->nreq) memcpy(n, p->req, sizeof(JSValue) * (size_t)p->nreq);
+        p->req = n;
+        p->reqcap = nc;
+    }
+    p->req[p->nreq] = spec;
+    /* const *ns<i>* = imports(i); */
+    char nm[24];
+    snprintf(nm, sizeof nm, "*ns%d*", p->nreq);
+    Node *v = nnew(p, N_VAR);
+    v->op = VK_CONST;
+    Node *d = nnew(p, N_DECL);
+    d->a = mk_ident(p, js_atomc(p->ctx, nm));
+    Node *num = nnew(p, N_NUM);
+    num->num = p->nreq;
+    Node *c = nnew(p, N_CALL);
+    c->a = mk_ident(p, p->a_imp);
+    c->b = num;
+    d->b = c;
+    v->a = d;
+    *p->pro_ns_tail = v;
+    p->pro_ns_tail = &v->next;
+    return p->nreq++;
+}
+
+static JSValue ns_name(Parser *p, int i) {
+    char nm[24];
+    snprintf(nm, sizeof nm, "*ns%d*", i);
+    return js_atomc(p->ctx, nm);
+}
+
+/* exports(name, () => local) */
+static void export_reg(Parser *p, JSValue exported, JSValue local) {
+    Func *f = new_func(p, FK_ARROW, F_ARROW | F_STRICT);
+    f->start = f->end = p->tok.start;
+    f->line = p->tok.line;
+    Node *r = nnew(p, N_RETURN);
+    r->a = mk_ident(p, local);
+    f->body = r;
+    f->expr_body = true;
+    Node *fn = nnew(p, N_FUNC);
+    fn->fn = f;
+    Node *st = mk_stmt(p, mk_call2(p, p->a_exp, mk_str(p, exported), fn));
+    *p->pro_exp_tail = st;
+    p->pro_exp_tail = &st->next;
+}
+
+static void export_pattern(Parser *p, Node *n) {
+    if (!n) return;
+    switch (n->k) {
+    case N_IDENT: export_reg(p, n->v, n->v); break;
+    case N_ASSIGN_PAT: case N_REST: export_pattern(p, n->a); break;
+    case N_ARRAY_PAT: for (Node *e = n->a; e; e = e->next) export_pattern(p, e); break;
+    case N_OBJECT_PAT: for (Node *pr = n->a; pr; pr = pr->next) export_pattern(p, pr->b); break;
+    default: break;
+    }
+}
+
+/* a module name or export name: an identifier (keywords too) or a string */
+static JSValue module_name(Parser *p) {
+    if (is(p, TK_IDENT) || is(p, TK_STR)) { JSValue v = p->tok.v; next(p); return v; }
+    unexpected(p);
+    return JS_UNDEFINED;
+}
+
+static JSValue from_clause(Parser *p) {
+    if (!is_kw(p, KW_from)) { unexpected(p); return JS_UNDEFINED; }
+    next(p);
+    if (!is(p, TK_STR)) { unexpected(p); return JS_UNDEFINED; }
+    JSValue spec = p->tok.v;
+    next(p);
+    /* import attributes: with { type: "json" } / assert {...} (accepted, not used) */
+    if ((is_kw(p, KW_with) || (is(p, TK_IDENT) && !p->tok.nl && p->tok.v == js_atomc(p->ctx, "assert"))) && peek(p)->t == '{') {
+        next(p);
+        int depth = 0;
+        do { if (is(p, '{')) depth++; else if (is(p, '}')) depth--; next(p); } while (depth > 0 && !is(p, TK_EOF));
+    }
+    return spec;
+}
+
+/* N_IMPORT: ival = request, a = list of N_PROP (v local, v2 imported name; UNDEFINED = the namespace) */
+static void import_spec(Parser *p, Node ***tail, JSValue local, JSValue imported) {
+    Node *s = nnew(p, N_PROP);
+    s->v = local;
+    s->v2 = imported;
+    **tail = s;
+    *tail = &s->next;
+}
+
+static Node *parse_import(Parser *p) {
+    int line = p->tok.line;
+    next(p);   /* import */
+    Node *x = nnew(p, N_IMPORT);
+    x->line = line;
+    Node **tail = &x->a;
+    if (is(p, TK_STR)) {
+        JSValue spec = p->tok.v;
+        next(p);
+        x->ival = mod_request(p, spec);
+        semicolon(p);
+        return x;
+    }
+    if (is_ident_tok(p)) {
+        JSValue local = ident_name(p);
+        import_spec(p, &tail, local, p->kw[KW_default]);
+        if (!eat(p, ',')) goto from;
+    }
+    if (eat(p, '*')) {
+        if (!eat_kw(p, KW_as)) { unexpected(p); return x; }
+        import_spec(p, &tail, ident_name(p), JS_UNDEFINED);
+    } else if (eat(p, '{')) {
+        while (!is(p, '}') && !p->failed) {
+            JSValue imported = module_name(p), local = imported;
+            if (eat_kw(p, KW_as)) local = ident_name(p);
+            else if (reserved(p, &(Tok){ .t = TK_IDENT, .v = imported })) { ERR("Unexpected reserved word"); }
+            import_spec(p, &tail, local, imported);
+            if (!eat(p, ',')) break;
+        }
+        expect(p, '}');
+    } else if (!x->a) { unexpected(p); return x; }
+from:;
+    JSValue spec = from_clause(p);
+    if (JS_IsUndefined(spec)) return x;
+    x->ival = mod_request(p, spec);
+    semicolon(p);
+    return x;
+}
+
+static Node *parse_export(Parser *p) {
+    int line = p->tok.line;
+    uint32_t start = p->tok.start;
+    next(p);   /* export */
+    if (eat(p, '*')) {
+        JSValue as = JS_UNDEFINED;
+        if (eat_kw(p, KW_as)) as = module_name(p);
+        JSValue spec = from_clause(p);
+        if (JS_IsUndefined(spec)) return nnew(p, N_EMPTY);
+        int i = mod_request(p, spec);
+        if (!JS_IsUndefined(as)) export_reg(p, as, ns_name(p, i));
+        else {
+            /* exports('*', *ns<i>*) */
+            Node *st = mk_stmt(p, mk_call2(p, p->a_exp, mk_str(p, js_atomc(p->ctx, "*")), mk_ident(p, ns_name(p, i))));
+            *p->pro_exp_tail = st;
+            p->pro_exp_tail = &st->next;
+        }
+        semicolon(p);
+        return nnew(p, N_EMPTY);
+    }
+    if (eat(p, '{')) {
+        JSValue loc[256], exp[256];
+        int n = 0;
+        while (!is(p, '}') && !p->failed) {
+            JSValue l = module_name(p), e = l;
+            if (eat_kw(p, KW_as)) e = module_name(p);
+            if (n < 256) { loc[n] = l; exp[n] = e; n++; }
+            if (!eat(p, ',')) break;
+        }
+        expect(p, '}');
+        if (is_kw(p, KW_from)) {
+            /* export { a as b } from "m": hidden import bindings, exported */
+            JSValue spec = from_clause(p);
+            if (JS_IsUndefined(spec)) return nnew(p, N_EMPTY);
+            Node *x = nnew(p, N_IMPORT);
+            x->line = line;
+            x->ival = mod_request(p, spec);
+            Node **tail = &x->a;
+            for (int i = 0; i < n; i++) {
+                char nm[32];
+                snprintf(nm, sizeof nm, "*re%d*", p->nre++);
+                JSValue hid = js_atomc(p->ctx, nm);
+                import_spec(p, &tail, hid, loc[i]);
+                export_reg(p, exp[i], hid);
+            }
+            semicolon(p);
+            return x;
+        }
+        for (int i = 0; i < n; i++) export_reg(p, exp[i], loc[i]);
+        semicolon(p);
+        return nnew(p, N_EMPTY);
+    }
+    if (is_kw(p, KW_default)) {
+        next(p);
+        JSValue dflt = p->kw[KW_default];
+        bool fn = is_kw(p, KW_function), afn = false;
+        if (is_kw(p, KW_async)) { Tok *pk = peek(p); afn = tok_kw(p, pk, KW_function) && !pk->nl; }
+        if (fn || afn) {
+            /* export default function [name] (...) {...}: a hoisted declaration */
+            if (afn) next(p);
+            next(p);
+            uint32_t ff = afn ? F_ASYNC : 0;
+            if (eat(p, '*')) ff |= F_GEN;
+            JSValue name = is_ident_tok(p) ? ident_name(p) : dflt;
+            Func *f = parse_function_rest(p, FK_NORMAL, ff, name, start, line);
+            f->is_decl = true;
+            Node *x = nnew(p, N_FUNC_DECL);
+            x->fn = f;
+            x->line = line;
+            export_reg(p, dflt, name);
+            return x;
+        }
+        if (is_kw(p, KW_class)) {
+            Node *x = nnew(p, N_CLASS_DECL);
+            Tok *pk = peek(p);
+            bool named = pk->t == TK_IDENT && !tok_kw(p, pk, KW_extends);
+            x->a = parse_class(p, false);
+            x->line = line;
+            if (!named) { x->a->a = mk_ident(p, dflt); }
+            export_reg(p, dflt, x->a->a->v);
+            return x;
+        }
+        /* export default <expression>: const default = <expression> */
+        Node *v = nnew(p, N_VAR);
+        v->op = VK_CONST;
+        v->line = line;
+        Node *d = nnew(p, N_DECL);
+        d->a = mk_ident(p, dflt);
+        d->b = parse_assign(p);
+        v->a = d;
+        semicolon(p);
+        export_reg(p, dflt, dflt);
+        return v;
+    }
+    /* export var / let / const / function / class */
+    Node *st = parse_stmt_inner(p);
+    switch (st->k) {
+    case N_VAR: for (Node *d = st->a; d; d = d->next) export_pattern(p, d->a); break;
+    case N_FUNC_DECL: export_reg(p, st->fn->name, st->fn->name); break;
+    case N_CLASS_DECL: if (st->a && st->a->a) export_reg(p, st->a->a->v, st->a->a->v); break;
+    default: ERR("Unexpected token 'export'"); break;
+    }
+    return st;
+}
+
 /* ==== statements ============================================================================================= */
 static Node *parse_var(Parser *p, int kind, bool for_init) {
     Node *v = nnew(p, N_VAR);
@@ -1953,12 +2218,18 @@ static Node *parse_stmt_inner(Parser *p) {
         if (is_kw(p, KW_import)) {
             Tok *pk = peek(p);
             if (pk->t != '(' && pk->t != '.') {
-                ERR("Cannot use import statement outside a module");
+                if (module_top(p)) return parse_import(p);
+                ERR(p->fn && p->fn->kind == FK_MODULE ? "An import declaration can only be used at the top level of a module"
+                                                      : "Cannot use import statement outside a module");
                 return nnew(p, N_EMPTY);
             }
             break;
         }
-        if (is_kw(p, KW_export)) { ERR("Unexpected token 'export'"); return nnew(p, N_EMPTY); }
+        if (is_kw(p, KW_export)) {
+            if (module_top(p)) return parse_export(p);
+            ERR("Unexpected token 'export'");
+            return nnew(p, N_EMPTY);
+        }
         /* label */
         if (!reserved(p, &p->tok)) {
             Tok *pk = peek(p);
@@ -2001,8 +2272,21 @@ Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_
     p->line = line > 0 ? line : 1;
     sb_init(ctx, &p->sb);
     for (int i = 0; i < KW_COUNT; i++) p->kw[i] = js_atomc(ctx, kw_names[i]);
+    p->a_imp = p->a_exp = p->a_meta = JS_UNDEFINED;
+    p->pro_ns_tail = &p->pro_ns;
+    p->pro_exp_tail = &p->pro_exp;
     Func *f = new_func(p, (fflags & F_MODULE) ? FK_MODULE : FK_SCRIPT, F_SCRIPT | (fflags & (F_STRICT | F_EVAL | F_MODULE)));
-    if (fflags & F_MODULE) f->flags |= F_STRICT | F_ASYNC;
+    if (fflags & F_MODULE) {
+        /* async function (*imp*, *exp*, *meta*) */
+        f->flags |= F_STRICT | F_ASYNC;
+        p->a_imp = js_atomc(ctx, "*imp*");
+        p->a_exp = js_atomc(ctx, "*exp*");
+        p->a_meta = js_atomc(ctx, "*meta*");
+        f->params = mk_ident(p, p->a_imp);
+        f->params->next = mk_ident(p, p->a_exp);
+        f->params->next->next = mk_ident(p, p->a_meta);
+        f->length = 3;
+    }
     f->start = 0;
     f->end = len;
     f->line = p->line;
@@ -2019,6 +2303,21 @@ Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_
         }
         *tail = st;
         tail = &st->next;
+    }
+    if (f->kind == FK_MODULE && !p->failed) {
+        /* prologue: namespaces, exports, then wait until the graph is linked (await meta.go) */
+        Node *aw = nnew(p, N_AWAIT);
+        Node *m = nnew(p, N_MEMBER);
+        m->a = mk_ident(p, p->a_meta);
+        m->v = js_atomc(ctx, "go");
+        aw->a = m;
+        Node *go = mk_stmt(p, aw);
+        go->next = list;
+        *p->pro_exp_tail = go;
+        *p->pro_ns_tail = p->pro_exp;
+        list = p->pro_ns;
+        f->mreq = p->req;
+        f->nmreq = p->nreq;
     }
     f->body = list;
     if (p->failed) {

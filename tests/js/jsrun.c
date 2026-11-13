@@ -89,6 +89,29 @@ static JSValue fn_host_ask(JSContext *ctx, JSValue this_val, int argc, JSValue *
     return js_wait(ctx);
 }
 
+/* compileModule(source, name) -> [async function, [specifiers]] (tests/js/modules.js) */
+static JSValue fn_compile_module(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    (void)this_val; (void)magic;
+    size_t len;
+    char *src = js_to_cstring(ctx, JS_ARG(0), &len);
+    char *name = js_to_cstring(ctx, JS_ARG(1), NULL);
+    JSValue req;
+    JSValue fn = src ? js_compile_module(ctx, src, len, name ? name : "module", &req) : JS_EXCEPTION;
+    free(src);
+    free(name);
+    if (JS_IsException(fn)) return fn;
+    JSValue a = js_new_array(ctx, 0);
+    js_array_push(ctx, a, fn);
+    js_array_push(ctx, a, req);
+    return a;
+}
+
+static JSValue fn_set_import_hook(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    (void)this_val; (void)magic;
+    js_set_import_hook(ctx, JS_ARG(0));
+    return JS_UNDEFINED;
+}
+
 static int drive(JSContext *ctx, int st) {
     while (st == JS_SUSPENDED) st = js_resume(ctx);
     return st;
@@ -149,6 +172,8 @@ static JSContext *make_ctx(void) {
     js_def_func(ctx, g, "setInterval", fn_set_timeout, 2, 1);
     js_def_func(ctx, g, "clearTimeout", fn_clear_timeout, 1, 0);
     js_def_func(ctx, g, "clearInterval", fn_clear_timeout, 1, 0);
+    js_def_func(ctx, g, "compileModule", fn_compile_module, 2, 0);
+    js_def_func(ctx, g, "setImportHook", fn_set_import_hook, 1, 0);
     return ctx;
 }
 

@@ -180,6 +180,7 @@ void js_vm_mark(JSContext *ctx) {
     }
     js_gc_mark_value(ctx, ctx->resume_val);
     js_gc_mark_value(ctx, ctx->host_val);
+    js_gc_mark_value(ctx, ctx->import_hook);
 }
 
 /* ==== closures ================================================================================ */
@@ -1928,6 +1929,14 @@ static JSValue run(JSContext *ctx, int stop) {
         }
         case OP_IMPORT_CALL: {
             SAVE();
+            if (js_is_callable(ctx->import_hook)) {
+                /* the host loads it: hook(specifier, the importing script's name) -> promise */
+                JSValue args[2] = { sp[-1], b->srcname };
+                JSValue r = js_callv(ctx, ctx->import_hook, JS_UNDEFINED, 2, args);
+                CHECK(r);
+                sp[-1] = r;
+                break;
+            }
             JSValue res, rej;
             JSValue p = js_promise_new(ctx, &res, &rej);
             CHECK(p);
@@ -2303,6 +2312,19 @@ int js_resume(JSContext *ctx) {
 bool js_busy(JSContext *ctx) { return ctx->drive_pending; }
 
 JSValue js_task_value(JSContext *ctx) { return ctx->task_threw ? JS_UNDEFINED : ctx->resume_val; }
+
+JSValue js_compile_module(JSContext *ctx, const char *utf8, size_t len, const char *name, JSValue *requests) {
+    JS_GC_ENTER(ctx);
+    *requests = JS_UNDEFINED;
+    JSValue src = js_str_utf8(ctx, utf8, len);
+    JSValue nm = js_str_utf8(ctx, name ? name : "module", strlen(name ? name : "module"));
+    JSBytecode *bc = JS_IsException(src) || JS_IsException(nm) ? NULL : js_compile_ex(ctx, src, nm, 1, F_MODULE, requests);
+    JSValue fn = bc ? js_new_closure(ctx, bc, NULL, NULL) : JS_EXCEPTION;
+    JS_GC_LEAVE(ctx);
+    return fn;
+}
+
+void js_set_import_hook(JSContext *ctx, JSValue fn) { ctx->import_hook = fn; }
 
 bool js_can_wait(JSContext *ctx) { return ctx->can_wait; }
 

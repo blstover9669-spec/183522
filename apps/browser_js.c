@@ -61,6 +61,7 @@ struct jscript {
     size_t len;
     int state;
     bool failed, async, defer, parser;
+    bool module;                 /* type=module: browser_jsrt.js loads its graph */
 };
 
 typedef struct jreq {
@@ -114,7 +115,6 @@ typedef struct bjs {
     jscript_t *running;
     int ready;                   /* 0 loading, 1 interactive, 2 complete */
     uint32_t dcl_at;
-    bool prefer_nomodule;
     /* requests */
     jreq_t *reqs;
     int next_req;
@@ -2182,6 +2182,39 @@ static JSValue n_status(JSContext *ctx, JSValue this_val, int argc, JSValue *arg
 
 static void script_write(bjs_t *J, web_node_t *frag);
 
+/* N.module(source, url) -> [async function, [specifiers]] (js_compile_module) */
+static JSValue n_module(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    JTHIS;
+    size_t len;
+    char *src = js_utf8(ctx, JS_ARG(0), &len), *url = js_utf8(ctx, JS_ARG(1), NULL);
+    JSValue req = JS_UNDEFINED;
+    uint32_t t0 = sys_uptime_ms();
+    JSValue fn = src ? js_compile_module(ctx, src, len, url ? url : "module", &req) : JS_EXCEPTION;
+    uint32_t ms = sys_uptime_ms() - t0;
+    if (ms > 200) klog("browser: compiling module %s (%u KB) took %u ms", url ? url : "?", (unsigned)(len / 1024), (unsigned)ms);
+    free(src);
+    free(url);
+    if (JS_IsException(fn)) return fn;
+    JSValue a = js_new_array(ctx, 0);
+    js_array_push(ctx, a, fn);
+    js_array_push(ctx, a, req);
+    return a;
+}
+
+static JSValue n_module_done(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    JTHIS;
+    web_node_t *el = NODE(JS_ARG(0));
+    for (int i = 0; i < J->nsc; i++) {
+        jscript_t *sc = J->sc[i];
+        if (sc->module && sc->state == SC_RUNNING && NODE(js_root_get(ctx, sc->el)) == el) {
+            sc->failed = !js_truthy(JS_ARG(1));
+            script_done(J, sc);
+            break;
+        }
+    }
+    return JS_UNDEFINED;
+}
+
 static JSValue n_write(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
     JTHIS;
     if (!J->running || !J->running->parser || J->ready) {
@@ -2665,7 +2698,12 @@ static jscript_t *script_new(bjs_t *J, web_node_t *n, bool parser, int at) {
     } else {
         sc->src = inline_source(n, &sc->len);
         sc->state = SC_READY;
-        sc->defer = parser && is_module(n);
+        sc->defer = parser && is_module(n) && !web_has_attr(n, "async");
+        sc->async = !parser || (is_module(n) && web_has_attr(n, "async"));
+    }
+    if (is_module(n)) {
+        sc->module = true;
+        if (sc->url) { sc->state = SC_READY; sc->defer = parser && !web_has_attr(n, "async"); sc->async = !sc->defer; }
     }
     if (at < 0 || at > J->nsc) at = J->nsc;
     memmove(&J->sc[at + 1], &J->sc[at], sizeof(jscript_t *) * (size_t)(J->nsc - at));
@@ -2675,7 +2713,7 @@ static jscript_t *script_new(bjs_t *J, web_node_t *n, bool parser, int at) {
 }
 
 static void script_fetch(bjs_t *J, jscript_t *sc) {
-    if (sc->state != SC_WAIT || sc->failed || !sc->url) return;
+    if (sc->state != SC_WAIT || sc->failed || !sc->url || sc->module) return;
     if (!strncasecmp(sc->url, "file:", 5) || !strncasecmp(sc->url, "data:", 5)) {
         uint32_t len = 0;
         uint8_t *d = NULL;
@@ -2754,6 +2792,16 @@ static void run_script(bjs_t *J, jscript_t *sc) {
         script_done(J, sc);
         return;
     }
+    if (sc->module) {
+        /* the module graph loads and runs in browser_jsrt.js; N.moduleDone ends it */
+        JSValue args[3] = { js_root_get(J->ctx, sc->el), sc->url ? js_new_string(J->ctx, sc->url) : JS_NULL,
+                            sc->src ? js_new_string_len(J->ctx, sc->src, sc->len) : JS_NULL };
+        sc->state = SC_RUNNING;
+        free(sc->src);
+        sc->src = NULL;
+        q_call(J, js_get(J->ctx, J->rt, "runModule"), JS_UNDEFINED, 3, args, false);
+        return;
+    }
     jtask_t *k = task_new(J, JT_SCRIPT);
     if (!k) { script_done(J, sc); return; }
     k->sc = sc;
@@ -2825,16 +2873,25 @@ static bool page_has_scripts(web_doc_t *d) {
     return false;
 }
 
+static void import_map(bjs_t *J, web_node_t *n) {
+    size_t len;
+    char *text = inline_source(n, &len);
+    if (!text) return;
+    JSValue arg = js_new_string_len(J->ctx, text, len);
+    free(text);
+    JSValue r = js_call(J->ctx, js_get(J->ctx, J->rt, "importMap"), JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(r)) js_report_exception(J->ctx);
+}
+
 static void gather_scripts(bjs_t *J) {
     web_doc_t *d = J->doc;
-    bool nomodule = false;
-    for (web_node_t *n = d->root; n; n = walk_next(n, d->root))
-        if (n->type == WN_ELEM && n->tag == T_SCRIPT && web_has_attr(n, "nomodule")) nomodule = true;
-    J->prefer_nomodule = nomodule;
     for (web_node_t *n = d->root; n; n = walk_next(n, d->root)) {
-        if (n->type != WN_ELEM || n->tag != T_SCRIPT || (n->jsf & WNJ_STARTED) || !js_type(n)) continue;
-        /* (no ES modules: a page that has fallbacks for that gets them) */
-        if (nomodule && is_module(n)) { n->jsf |= WNJ_STARTED; continue; }
+        if (n->type != WN_ELEM || n->tag != T_SCRIPT || (n->jsf & WNJ_STARTED)) continue;
+        const char *ty = web_attr(n, "type");
+        if (ty && !strcasecmp(ty, "importmap")) { n->jsf |= WNJ_STARTED; import_map(J, n); continue; }
+        if (!js_type(n)) continue;
+        /* (ES modules run: the fallbacks for browsers without them do not) */
+        if (web_has_attr(n, "nomodule")) { n->jsf |= WNJ_STARTED; continue; }
         jscript_t *sc = script_new(J, n, true, -1);
         if (sc) script_fetch(J, sc);
     }
@@ -2997,7 +3054,7 @@ static void def_natives(bjs_t *J, JSValue N) {
         { "observe", n_observe, 1, 0 }, { "version", n_version, 0, 0 }, { "random", n_random, 1, 0 },
         { "clip", n_clip, 0, 0 }, { "status", n_status, 1, 0 }, { "write", n_write, 1, 0 },
         { "storage", n_storage, 2, 0 }, { "store", n_store, 4, 0 }, { "fetch", n_fetch, 6, 0 }, { "abort", n_abort, 1, 0 },
-        { "dialog", n_dialog, 3, 0 },
+        { "dialog", n_dialog, 3, 0 }, { "module", n_module, 2, 0 }, { "moduleDone", n_module_done, 2, 0 },
     };
     for (int i = 0; i < (int)ARRAY_SIZE(tab); i++) js_def_func(c, N, tab[i].name, tab[i].fn, tab[i].len, tab[i].magic);
 }
@@ -3054,6 +3111,7 @@ void bjs_page(tab_t *t, int charset) {
     }
     J->rt = rt;
     js_pin(J->ctx, rt);
+    js_set_import_hook(J->ctx, js_get(J->ctx, rt, "dynamicImport"));
     J->focus_root = js_root_add(J->ctx, JS_NULL);
     d->scripting = true;
     t->pg.want_boxes = true;

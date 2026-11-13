@@ -1190,7 +1190,7 @@ def(labelP, {
 const scriptP = I('Script').prototype;
 urlAttr(scriptP, ['src']);
 strAttr(scriptP, ['type', 'charset', 'crossOrigin', 'integrity', 'referrerPolicy', 'event', 'htmlFor', 'fetchPriority']);
-boolAttr(scriptP, ['defer']);
+boolAttr(scriptP, ['defer', 'noModule']);
 def(scriptP, {
     get async() { return this.hasAttribute('async') || N.ctl(this, 22); },
     set async(v) { if (v) this.setAttribute('async', ''); else this.removeAttribute('async'); N.ctl(this, 23, !!v); },
@@ -2465,6 +2465,101 @@ function key(type, k, repeat, mods, code, rawmods) {
     return false;
 }
 
+/* ---- ES modules: <script type=module>, import maps, import() ------------------------------------
+   NovaJS compiles a module to async function (imports, exports, meta) (see js_compile_module):
+   here the graph is fetched and compiled, linked (every module registers its exports, then
+   waits), and run dependencies first. */
+const modRecs = new Map();
+const importMap = { imports: {}, scopes: {} };
+function addImportMap(text) {
+    let m;
+    try { m = JSON.parse(text); } catch (e) { report(e); return; }
+    const fix = (o) => { const r = {}; for (const k of Object.keys(o || {})) { try { r[k] = new URL(String(o[k]), document.baseURI).href; } catch (e) { /* ignore */ } } return r; };
+    Object.assign(importMap.imports, fix(m.imports));
+    for (const s of Object.keys(m.scopes || {})) importMap.scopes[new URL(s, document.baseURI).href] = fix(m.scopes[s]);
+}
+function resolveModule(spec, base) {
+    spec = String(spec);
+    const look = (map) => {
+        if (!map) return null;
+        if (Object.prototype.hasOwnProperty.call(map, spec)) return map[spec];
+        let best = null;
+        for (const k of Object.keys(map)) if (k.endsWith('/') && spec.startsWith(k) && (!best || k.length > best.length)) best = k;
+        return best ? map[best] + spec.slice(best.length) : null;
+    };
+    let r = null;
+    for (const sc of Object.keys(importMap.scopes).sort((a, b) => b.length - a.length)) if (base.startsWith(sc) && (r = look(importMap.scopes[sc]))) break;
+    if (!r) r = look(importMap.imports);
+    if (r) return r;
+    if (/^(\/|\.\/|\.\.\/)/.test(spec)) return new URL(spec, base).href;
+    try { return new URL(spec).href; } catch (e) { /* bare */ }
+    throw new TypeError('Failed to resolve module specifier "' + spec + '". Relative references must start with either "/", "./", or "../".');
+}
+function modRec(key, url, src) {
+    let rec = modRecs.get(key);
+    if (rec) return rec;
+    rec = { url, ns: Object.create(null), deps: [], state: 'new' };
+    Object.defineProperty(rec.ns, Symbol.toStringTag, { value: 'Module' });
+    modRecs.set(key, rec);
+    rec.fetched = (async () => {
+        let text = src;
+        if (text === undefined || text === null) {
+            const r = await fetch(url);
+            if (!r.ok) throw new TypeError('Failed to fetch module ' + url + ' (HTTP ' + r.status + ')');
+            text = await r.text();
+        }
+        const c = N.module(text, url);
+        rec.fn = c[0];
+        rec.deps = Array.from(c[1], (s) => { const u = resolveModule(s, url); return modRec(u, u); });
+    })();
+    rec.fetched.catch(() => {});
+    return rec;
+}
+async function modGraph(rec) {
+    const seen = new Set();
+    const visit = async (r) => { if (seen.has(r)) return; seen.add(r); await r.fetched; await Promise.all(r.deps.map(visit)); };
+    await visit(rec);
+}
+function modLink(rec) {
+    if (rec.state !== 'new') return;
+    rec.state = 'linking';
+    rec.deps.forEach(modLink);
+    let go;
+    const p = new Promise((r) => { go = r; });
+    rec.go = go;
+    const ns = rec.ns;
+    const exp = (name, g) => {
+        if (name === '*') {
+            for (const k of Object.keys(g)) if (k !== 'default' && !Object.prototype.hasOwnProperty.call(ns, k)) Object.defineProperty(ns, k, { get: () => g[k], enumerable: true });
+            return;
+        }
+        if (!Object.prototype.hasOwnProperty.call(ns, name)) Object.defineProperty(ns, name, { get: g, enumerable: true });
+    };
+    const meta = { url: rec.url, go: p, resolve: (s) => resolveModule(s, rec.url) };
+    rec.done = rec.fn.call(undefined, (i) => rec.deps[i].ns, exp, meta);
+    rec.done.catch(() => {});
+    rec.state = 'linked';
+}
+function modRun(rec) {
+    if (rec.ev) return rec.ev;
+    rec.state = 'evaluating';
+    rec.ev = (async () => {
+        for (const d of rec.deps) if (d.state !== 'evaluating') await modRun(d);
+        rec.go();
+        await rec.done;
+        rec.state = 'evaluated';
+    })();
+    return rec.ev;
+}
+async function importModule(key, url, src) {
+    const rec = modRec(key, url, src);
+    await modGraph(rec);
+    modLink(rec);
+    await modRun(rec);
+    return rec.ns;
+}
+let inlineModules = 0;
+
 /* ---- the hooks the browser calls ------------------------------------------------------------ */
 const keyCodes = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
     ArrowDown: 40, Home: 36, End: 35, PageUp: 33, PageDown: 34, ' ': 32, Shift: 16, Control: 17, Alt: 18, Insert: 45,
@@ -2528,6 +2623,19 @@ const hooks = {
     report,
     /* a javascript: URL */
     jsurl(code) { try { (0, eval)(code); } catch (e) { report(e); } },
+    /* <script type=module>: src (url) or inline (source); N.moduleDone(el, ok) at the end */
+    runModule(el, url, src) {
+        const key = url || document.URL + '#module' + (++inlineModules);
+        importModule(key, url || document.baseURI, url ? undefined : src)
+            .then(() => N.moduleDone(el, true), (e) => { report(e); N.moduleDone(el, false); });
+    },
+    importMap: addImportMap,
+    dynamicImport(spec, from) {
+        let base = String(from || '').replace(/ \((inline|inserted) script\)$/, '');
+        try { new URL(base); } catch (e) { base = document.baseURI; }
+        if (!/^(https?|file|data|blob):/.test(base)) base = document.baseURI;
+        try { const u = resolveModule(spec, base); return importModule(u, u); } catch (e) { return Promise.reject(e); }
+    },
 };
 return hooks;
 })

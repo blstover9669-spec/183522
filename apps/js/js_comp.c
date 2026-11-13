@@ -149,6 +149,10 @@ static Binding *lookup(Comp *c, Scope *s, JSValue name) {
             x->fn->uses_args = true;
         }
         if (b) {
+            if (b->kind == BK_IMPORT) {
+                if (b->ns && !b->ns->global && b->ns->fn != cur) capture(c, cur, b->ns);
+                return b;
+            }
             if (!b->global && b->fn != cur) capture(c, cur, b);
             return b;
         }
@@ -216,6 +220,22 @@ static void declare_lex(Comp *c, Scope *s, Node *list, bool block) {
             declare(c, s, n->fn->name, BK_FUNC, n->line);
             n->d = s->fdecls;
             s->fdecls = n;
+        } else if (n->k == N_IMPORT) {
+            /* imported names: reads of the namespace *ns<i>* (declared by the module's prologue) */
+            char nm[24];
+            snprintf(nm, sizeof nm, "*ns%d*", n->ival);
+            Binding *ns = scope_find(s, js_atomc(c->ctx, nm));
+            for (Node *sp = n->a; sp; sp = sp->next) {
+                if (scope_find(s, sp->v)) {
+                    char id[80];
+                    js_str_to_ascii(c->ctx, sp->v, id, sizeof id);
+                    cerr(c, n->line, "Identifier '%s' has already been declared", id);
+                    continue;
+                }
+                Binding *b = new_binding(c, s, sp->v, BK_IMPORT, -1);
+                b->ns = ns;
+                b->imported = sp->v2;
+            }
         }
     }
 }
@@ -416,7 +436,7 @@ static void res_func(Comp *c, Func *f, Scope *outer) {
         f->self = new_binding(c, ns, f->name, BK_SELF, -1);
         base = ns;
     }
-    Scope *S = new_scope(c, base, f, (f->kind == FK_SCRIPT || f->kind == FK_MODULE) ? SK_SCRIPT : SK_FUNC);
+    Scope *S = new_scope(c, base, f, f->kind == FK_SCRIPT ? SK_SCRIPT : SK_FUNC);   /* (a module's names are its own) */
     f->scope = S;
     int pos = 0;
     for (Node *p = f->params; p; p = p->next) {
@@ -667,6 +687,12 @@ static int vref_of(FS *fs, Binding *b) {
 }
 
 static void gen_load(FS *fs, Binding *b, JSValue name, bool typeof_mode) {
+    if (b && b->kind == BK_IMPORT) {
+        if (!b->ns) { emit(fs, OP_PUSH_UNDEF); return; }
+        gen_load(fs, b->ns, b->ns->name, false);
+        if (!JS_IsUndefined(b->imported)) emit32(fs, OP_GET_FIELD, add_const(fs, b->imported));
+        return;
+    }
     if (!b || b->global) {
         if (!b && name == fs->c->a_undefined) { emit(fs, OP_PUSH_UNDEF); return; }
         emit32(fs, typeof_mode ? OP_GET_GLOBAL_TYPEOF : OP_GET_GLOBAL, add_const(fs, name));
@@ -685,6 +711,11 @@ static void gen_load_raw(FS *fs, Binding *b) {
 }
 
 static void gen_store(FS *fs, Binding *b, JSValue name, int mode) {
+    if (b && b->kind == BK_IMPORT) {
+        emit32(fs, OP_THROW_CONST, add_const(fs, name));
+        if (mode == ST_PUT) emit(fs, OP_POP);
+        return;
+    }
     if (!b || b->global) {
         if (b && b->global && mode == ST_INIT && lexical_kind(b->kind)) { emit32(fs, OP_INIT_GLOBAL_LEX, add_const(fs, name)); return; }
         if (b && b->global && b->kind == BK_CONST && mode != ST_INIT) { emit32(fs, OP_THROW_CONST, add_const(fs, name)); if (mode == ST_PUT) emit(fs, OP_POP); return; }
@@ -728,7 +759,7 @@ static void gen_func_closure(FS *fs, Func *f);
 static void gen_scope_entry(FS *fs, Scope *s) {
     if (!s) return;
     for (Binding *b = s->b; b; b = b->next) {
-        if (b->global || b->fn != fs->f) continue;
+        if (b->global || b->fn != fs->f || b->kind == BK_IMPORT) continue;
         if (b->kind == BK_PRIVATE || b->kind == BK_HIDDEN) {
             if (b->captured) emit16(fs, OP_NEW_BOX_UNDEF, (uint32_t)b->slot);
             continue;
@@ -737,15 +768,20 @@ static void gen_scope_entry(FS *fs, Scope *s) {
         else if (b->tdz) { emit(fs, OP_PUSH_UNINIT); emit16(fs, OP_PUT_LOC, (uint32_t)b->slot); }
     }
     /* function declarations (in source order: the list is reversed) */
-    Node *fd[256];
     int n = 0;
-    for (Node *x = s->fdecls; x && n < 256; x = x->d) fd[n++] = x;
+    for (Node *x = s->fdecls; x; x = x->d) n++;
+    if (!n) return;
+    Node **fd = malloc(sizeof(Node *) * (size_t)n);
+    if (!fd) { cerr(fs->c, 0, "out of memory"); return; }
+    n = 0;
+    for (Node *x = s->fdecls; x; x = x->d) fd[n++] = x;
     for (int i = n - 1; i >= 0; i--) {
         Node *x = fd[i];
         gen_func_closure(fs, x->fn);
         Binding *b = scope_find(s, x->fn->name);
         gen_store(fs, b, x->fn->name, ST_INIT);
     }
+    free(fd);
 }
 
 /* ---- control stack ------------------------------------------------------------------------------- */
@@ -1838,7 +1874,7 @@ static void gen_stmt(FS *fs, Node *n) {
     if (fs->c->failed || !n) return;
     if (n->line) fs->cur_line = n->line;
     switch (n->k) {
-    case N_EMPTY: case N_DEBUGGER: break;
+    case N_EMPTY: case N_DEBUGGER: case N_IMPORT: break;
     case N_EXPR:
         if (fs->completion >= 0) { gen_expr(fs, n->a); emit16(fs, OP_PUT_LOC, (uint32_t)fs->completion); }
         else gen_expr_discard(fs, n->a);
@@ -2187,12 +2223,21 @@ static void comp_init(Comp *c, JSContext *ctx) {
 }
 
 JSBytecode *js_compile(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags) {
+    return js_compile_ex(ctx, src, name, line, fflags, NULL);
+}
+
+/* requests: a module's imported specifiers (a new array) */
+JSBytecode *js_compile_ex(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags, JSValue *requests) {
     JSString *s = js_flat(ctx, src);
     if (!s) return NULL;
     ctx->no_gc++;
     Parser *p = NULL;
     Func *f = js_parse_program(ctx, &p, s->s, s->len, line, fflags);
     JSBytecode *b = NULL;
+    if (f && requests) {
+        *requests = js_array_from_list(ctx, f->mreq, (uint32_t)f->nmreq);
+        if (JS_IsException(*requests)) f = NULL;
+    }
     if (f) {
         Comp c;
         comp_init(&c, ctx);

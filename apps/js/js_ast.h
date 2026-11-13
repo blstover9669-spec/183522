@@ -91,6 +91,8 @@ struct Func {
     Func *fields;          /* class constructor: instance field initialiser */
     int rest_slot;
     JSBytecode *bc;        /* after compilation */
+    JSValue *mreq;         /* FK_MODULE: the module specifiers it imports (parser arena) */
+    int nmreq;
 };
 
 /* binding kinds */
@@ -104,6 +106,8 @@ struct Binding {
     Func *fn;
     Scope *scope;
     Binding *next;
+    Binding *ns;                   /* BK_IMPORT: the namespace (*ns<i>*) it reads        */
+    JSValue imported;              /* BK_IMPORT: the name read (UNDEFINED: the namespace) */
 };
 
 enum { SK_FUNC = 0, SK_BLOCK, SK_CATCH, SK_CLASS, SK_SCRIPT, SK_WITH };

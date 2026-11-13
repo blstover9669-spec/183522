@@ -305,6 +305,7 @@ struct JSContext {
     bool drive_pending, no_suspend, task_threw, gen_raw, gen_done, gen_awaiting;
     bool can_wait;                /* the running native was called straight from bytecode */
     bool no_suspend_saved;        /* js_call / js_construct from the host */
+    JSValue import_hook;          /* import(): the host's loader (js_set_import_hook) */
     bool host_wait;               /* a native (alert ...) is waiting for the host: js_resume_with */
     bool host_push;               /* push host_val when the task resumes */
     JSValue host_val;
@@ -519,6 +520,7 @@ void      js_async_gen_step_done(JSContext *ctx, JSObject *go, JSValue r, bool t
 /* ==== compiler (js_parse.c / js_comp.c) ==================================================================== */
 /* compile source (UTF-16) to a script function; NULL + SyntaxError on failure */
 JSBytecode *js_compile(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags);
+JSBytecode *js_compile_ex(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags, JSValue *requests);
 /* new Function(params, body) */
 JSBytecode *js_compile_function(JSContext *ctx, JSValue params, JSValue body, uint32_t kind);
 void      js_bytecode_free(JSContext *ctx, JSBytecode *b);
