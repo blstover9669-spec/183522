@@ -159,6 +159,7 @@ void browser_tab_changed(tab_t *t) {
 }
 
 void browser_page_changed(tab_t *t) {
+    t->paint_gen++;
     if (browser_is_current(t)) page_dirty(t->b);
 }
 

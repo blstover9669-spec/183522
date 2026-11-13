@@ -115,6 +115,8 @@ typedef struct tab {
     int nhl, hlcap, hl_cur;
     int zoom;
     struct bjs *js;          /* the page's scripts (browser_js.c), NULL = none */
+    uint32_t paint_gen;      /* bumps when what the page shows changed (browser_page_changed):
+                                apps that show the page through the pipeline repaint on it */
     int press_ctl;           /* control the mouse button went down on      */
 } tab_t;
 
