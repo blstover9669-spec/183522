@@ -32,7 +32,7 @@ enum {
     P_ALIGN_SELF, P_JUSTIFY_SELF, P_JUSTIFY_ITEMS, P_ALIGN_CONTENT, P_ASPECT_RATIO,
     P_GRID_COLS, P_GRID_ROWS, P_GRID_AREAS, P_GRID_AUTO_COLS, P_GRID_AUTO_ROWS, P_GRID_AUTO_FLOW,
     P_GRID_COL_START, P_GRID_COL_END, P_GRID_ROW_START, P_GRID_ROW_END, P_GRID_AREA_NAME,
-    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT, P_BOX_SHADOW, P_OUTLINE,
+    P_ISOLATION, P_MASK_IMAGE, P_FILL, P_CONTENT, P_BOX_SHADOW, P_OUTLINE, P_POINTER_EVENTS,
     P_LONGHAND_COUNT,
     /* shorthands (only used while parsing / for var()) */
     P_MARGIN, P_PADDING, P_BORDER, P_BORDER_TOP, P_BORDER_RIGHT, P_BORDER_BOTTOM, P_BORDER_LEFT,
@@ -64,7 +64,7 @@ static const struct { const char *name; int id; } prop_names[] = {
     {"box-sizing", P_BOX_SIZING}, {"overflow", P_OVERFLOW}, {"text-indent", P_TEXT_INDENT},
     {"border-collapse", P_BORDER_COLLAPSE}, {"border-spacing", P_BORDER_SPACING},
     {"flex-direction", P_FLEX_DIRECTION}, {"flex-wrap", P_FLEX_WRAP}, {"clip", P_CLIP},
-    {"opacity", P_OPACITY}, {"clear", P_CLEAR},
+    {"opacity", P_OPACITY}, {"clear", P_CLEAR}, {"pointer-events", P_POINTER_EVENTS},
     {"flex-grow", P_FLEX_GROW}, {"flex-shrink", P_FLEX_SHRINK}, {"flex-basis", P_FLEX_BASIS}, {"order", P_ORDER},
     {"justify-content", P_JUSTIFY_CONTENT}, {"align-items", P_ALIGN_ITEMS}, {"column-gap", P_COLUMN_GAP},
     {"flex", P_FLEX}, {"gap", P_GAP}, {"grid-column-gap", P_COLUMN_GAP}, {"grid-gap", P_GAP},
@@ -844,6 +844,11 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
         out_add(o, prop, &v, imp);
         return;
     }
+    case P_POINTER_EVENTS:
+        if (n == 4 && !strncasecmp(s, "none", 4)) { v.t = CV_NUM; v.f = 1; }
+        else if (!parse_component(s, n, &v) || (v.t != CV_INHERIT && v.t != CV_INITIAL)) { v.t = CV_NUM; v.f = 0; }
+        out_add(o, prop, &v, imp);
+        return;
     case P_ISOLATION:
         if (n == 7 && !strncasecmp(s, "isolate", 7)) { v.t = CV_NUM; v.f = 1; }
         else if (n == 4 && !strncasecmp(s, "auto", 4)) { v.t = CV_NUM; v.f = 0; }
@@ -1159,7 +1164,8 @@ static void parse_decl(dout_t *o, int prop, const char *s, size_t n, bool imp) {
 /* ---- selectors -------------------------------------------------------------------------- */
 enum { PS_FIRST = 1, PS_LAST = 2, PS_ONLY = 4, PS_LINK = 8, PS_ROOT = 16, PS_EMPTY = 32,
        PS_CHECKED = 64, PS_DISABLED = 128, PS_ENABLED = 256, PS_NEVER = 512, PS_NTH = 1024,
-       PS_NTH_LAST = 2048, PS_ALLIS = 4096 /* every entry of `iss` must match (several :is()) */ };
+       PS_NTH_LAST = 2048, PS_ALLIS = 4096 /* every entry of `iss` must match (several :is()) */,
+       PS_SCOPE = 8192, PS_FOCUS = 16384 };
 
 typedef struct attrsel { const char *name, *val; uint8_t op; uint8_t icase; } attrsel_t;
 enum { AO_EXISTS = 0, AO_EQ, AO_WORD, AO_DASH, AO_PREFIX, AO_SUFFIX, AO_SUB };
@@ -1501,6 +1507,8 @@ static bool parse_compound(web_sheet_t *sh, const char **pp, const char *end, co
             else if (!strcmp(nm, "disabled")) c->pseudo |= PS_DISABLED;
             else if (!strcmp(nm, "enabled")) c->pseudo |= PS_ENABLED;
             else if (!strcmp(nm, "first-of-type")) c->pseudo |= PS_NEVER;
+            else if (!strcmp(nm, "scope")) c->pseudo |= PS_SCOPE;
+            else if (!strcmp(nm, "focus")) c->pseudo |= PS_FOCUS;
             else {
                 c->pseudo |= PS_NEVER;      /* :hover, :focus, :visited, :active ... */
                 static const char *const known[] = {
@@ -2110,6 +2118,9 @@ static bool nth_ok(int a, int b, int idx) {
 
 static bool match_from(const compound_t *parts, int k, const web_node_t *n);
 
+const web_node_t *web_sel_focus;
+static const web_node_t *sel_scope;    /* :scope of a script's selector (NULL: the root) */
+
 static bool compound_match(const compound_t *c, const web_node_t *n) {
     if (n->type != WN_ELEM) return false;
     if (!c->any) {
@@ -2132,6 +2143,8 @@ static bool compound_match(const compound_t *c, const web_node_t *n) {
         if ((ps & PS_ENABLED) && web_attr(n, "disabled")) return false;
         if ((ps & PS_NTH) && !nth_ok(c->nth_a, c->nth_b, n->index)) return false;
         if ((ps & PS_NTH_LAST) && !nth_ok(c->nth_a, c->nth_b, child_count_from_end(n))) return false;
+        if ((ps & PS_SCOPE) && !(sel_scope ? n == sel_scope : n->tag == T_HTML)) return false;
+        if ((ps & PS_FOCUS) && n != web_sel_focus) return false;
     }
     for (int i = 0; i < c->nnot; i++) if (match_from(c->nots[i].parts, c->nots[i].nparts - 1, n)) return false;
     if (c->nis) {
@@ -2165,6 +2178,79 @@ static bool match_from(const compound_t *parts, int k, const web_node_t *n) {
             if (match_from(parts, k - 1, p)) return true;
         return false;
     }
+}
+
+/* ---- selectors for scripts --------------------------------------------------------------------- */
+struct web_sel {
+    web_sheet_t *sh;          /* (its arena holds the parsed selectors) */
+    subsel_t *v;
+    int n;
+};
+
+web_sel_t *web_sel_parse(const char *text) {
+    web_sel_t *sel = calloc(1, sizeof *sel);
+    if (!sel) return NULL;
+    sel->sh = calloc(1, sizeof *sel->sh);
+    if (!sel->sh) { free(sel); return NULL; }
+    const char *p = text, *end = text + strlen(text);
+    int cap = 0;
+    bool ok = true;
+    while (ok) {
+        /* one complex selector: up to a comma outside (), [] and quotes */
+        const char *s = p;
+        int depth = 0;
+        char q = 0;
+        for (; p < end; p++) {
+            char ch = *p;
+            if (q) { if (ch == '\\' && p + 1 < end) p++; else if (ch == q) q = 0; continue; }
+            if (ch == '"' || ch == '\'') q = ch;
+            else if (ch == '\\' && p + 1 < end) p++;
+            else if (ch == '(' || ch == '[') depth++;
+            else if ((ch == ')' || ch == ']') && depth) depth--;
+            else if (ch == ',' && !depth) break;
+        }
+        const char *a = s, *b = p;
+        while (a < b && web_isspace((unsigned char)*a)) a++;
+        while (b > a && web_isspace((unsigned char)b[-1])) b--;
+        compound_t *parts;
+        int np;
+        uint32_t spec;
+        if (b <= a || q || !parse_selector(sel->sh, a, b, &parts, &np, &spec)) { ok = false; break; }
+        if (sel->n >= cap) {
+            int nc = cap ? cap * 2 : 4;
+            subsel_t *nv = realloc(sel->v, sizeof *nv * (size_t)nc);
+            if (!nv) { ok = false; break; }
+            sel->v = nv;
+            cap = nc;
+        }
+        sel->v[sel->n].parts = parts;
+        sel->v[sel->n].nparts = np;
+        sel->n++;
+        if (p >= end) break;
+        p++;
+    }
+    if (!ok || !sel->n) { web_sel_free(sel); return NULL; }
+    return sel;
+}
+
+bool web_sel_match(const web_sel_t *sel, const web_node_t *n, const web_node_t *scope) {
+    if (!sel || !n || n->type != WN_ELEM || n->pseudo) return false;
+    sel_scope = scope;
+    bool m = false;
+    for (int i = 0; i < sel->n && !m; i++) {
+        const subsel_t *x = &sel->v[i];
+        if (x->parts[x->nparts - 1].pe) continue;          /* ::before / ::after are not elements */
+        m = match_from(x->parts, x->nparts - 1, n);
+    }
+    sel_scope = NULL;
+    return m;
+}
+
+void web_sel_free(web_sel_t *sel) {
+    if (!sel) return;
+    web_css_free(sel->sh);
+    free(sel->v);
+    free(sel);
 }
 
 /* ---- the default stylesheet ------------------------------------------------------------------- */
@@ -2238,6 +2324,7 @@ typedef struct cctx {
     mdecl_t *m;
     int nm, mcap;
     mdecl_t *mp[2];           /* declarations for ::before / ::after */
+    web_sheet_t *inl_sheet;   /* parsing style="" (its arena is the styles' arena) */
     int nmp[2], mpcap[2];
     int root_fs;
     uint32_t body_link;       /* <body link=...> */
@@ -2530,7 +2617,7 @@ static void resolve_vars(cctx_t *cx, web_style_t *st, const web_style_t *ps) {
         if (!v->value || (!strcasestr(v->value, "var(") && !strcasestr(v->value, "env("))) continue;
         char buf[1024];
         if (subst_vars(st, v->value, buf, sizeof buf, 0) && !strcasestr(buf, "var(")) {
-            char *r = wa_strndup(&cx->doc->ar, buf, strlen(buf));
+            char *r = wa_strndup(&cx->doc->sar, buf, strlen(buf));
             if (r) v->value = r;
         } else {
             v->value = "initial";      /* a cycle or a missing reference: guaranteed-invalid */
@@ -2745,7 +2832,7 @@ static int parse_tracks(cctx_t *cx, const web_style_t *st, const web_style_t *ps
 }
 
 static web_grid_t *grid_mut(cctx_t *cx, web_style_t *st) {
-    web_grid_t *g = wa_alloc(&cx->doc->ar, sizeof *g);
+    web_grid_t *g = wa_alloc(&cx->doc->sar, sizeof *g);
     if (!g) return NULL;
     if (st->grid) *g = *st->grid;
     else {
@@ -2797,13 +2884,13 @@ static void apply_grid(cctx_t *cx, web_style_t *st, const web_style_t *ps, int p
         g->areas = NULL;
         g->area_rows = g->area_cols = 0;
         if (none) return;
-        const char **names = wa_alloc(&cx->doc->ar, sizeof(char *) * (size_t)(nr * nc));
+        const char **names = wa_alloc(&cx->doc->sar, sizeof(char *) * (size_t)(nr * nc));
         if (!names) return;
         for (int r = 0; r < nr; r++) {
             const char *cs[MAXCOMP]; size_t cl[MAXCOMP];
             int c = split_components(rows[r], rl[r], cs, cl, false);
             for (int k = 0; k < c && k < nc; k++)
-                names[r * nc + k] = cs[k][0] == '.' ? NULL : wa_strndup(&cx->doc->ar, cs[k], cl[k]);
+                names[r * nc + k] = cs[k][0] == '.' ? NULL : wa_strndup(&cx->doc->sar, cs[k], cl[k]);
         }
         g->areas = names;
         g->area_rows = (int16_t)nr;
@@ -2834,7 +2921,7 @@ static void apply_grid(cctx_t *cx, web_style_t *st, const web_style_t *ps, int p
     if (prop == P_GRID_AUTO_ROWS) { g->auto_row = k ? tr[0] : (web_track_t){ GT_AUTO, GT_AUTO, 0, 0 }; return; }
     web_track_t *copy = NULL;
     if (k) {
-        copy = wa_alloc(&cx->doc->ar, sizeof(web_track_t) * (size_t)k);
+        copy = wa_alloc(&cx->doc->sar, sizeof(web_track_t) * (size_t)k);
         if (!copy) return;
         memcpy(copy, tr, sizeof(web_track_t) * (size_t)k);
     }
@@ -2916,7 +3003,7 @@ static const char *content_value(cctx_t *cx, const web_node_t *n, const char *s,
         if (p < e && *p == '(') { int d = 1; p++; while (p < e && d) { if (*p == '(') d++; else if (*p == ')') d--; p++; } }
     }
     out[o] = 0;
-    return wa_strndup(&cx->doc->ar, out, o);
+    return wa_strndup(&cx->doc->sar, out, o);
 }
 
 /* box-shadow: up to three outer shadows (inset ones are not drawn) */
@@ -3008,7 +3095,7 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
     if ((pass == 0) != font_pass) return;
     if (v->t == CV_RAW) { apply_raw(cx, n, st, ps, d, pass); return; }
     if (p == P_CUSTOM) {
-        web_var_t *nv = wa_alloc(&cx->doc->ar, sizeof *nv);
+        web_var_t *nv = wa_alloc(&cx->doc->sar, sizeof *nv);
         if (!nv) return;
         nv->name = d->name;
         nv->value = d->v.raw;
@@ -3352,6 +3439,11 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         if (v->t == CV_NUM) st->isolate = v->f > 0;
         else if (initial) st->isolate = 0;
         break;
+    case P_POINTER_EVENTS:
+        if (v->t == CV_NUM) st->no_pointer = v->f > 0;
+        else if (inherit) st->no_pointer = ps->no_pointer;
+        else if (initial) st->no_pointer = 0;
+        break;
     case P_OUTLINE:
         if (v->t == CV_NUM) st->no_outline = v->f > 0;
         else if (initial) st->no_outline = 0;
@@ -3370,7 +3462,7 @@ static void apply_decl(cctx_t *cx, web_node_t *n, web_style_t *st, const web_sty
         st->fill_own = 1;
         break;
     case P_GRID_AREA_NAME:
-        st->garea = v->t == CV_STR && v->raw ? wa_strndup(&cx->doc->ar, v->raw, (size_t)v->f) : NULL;
+        st->garea = v->t == CV_STR && v->raw ? wa_strndup(&cx->doc->sar, v->raw, (size_t)v->f) : NULL;
         break;
     case P_BOX_SHADOW:
         if (initial) st->nshadow = 0;
@@ -3606,21 +3698,20 @@ static void presentational(cctx_t *cx, web_node_t *n, web_style_t *st, const web
 }
 
 /* ---- per-element style ------------------------------------------------------------------------------ */
-/* The declarations of an element's style="" attribute, parsed once into the
-   document's arena: they (and the custom properties children inherit from
-   them) must live as long as the document. */
+/* The declarations of an element's style="" attribute, parsed into the styles'
+   arena at every styling (scripts change them): they (and the custom properties
+   children inherit from them) live until the next styling. */
 static int inline_decls(cctx_t *cx, web_node_t *n, const char *style, decl_t **decls) {
-    if (n->ninl < 0) {
-        web_sheet_t tmp;
-        memset(&tmp, 0, sizeof tmp);
-        tmp.ar = cx->doc->ar;             /* allocate in the document's arena */
-        decl_t *d = NULL;
-        char *text = wa_strndup(&tmp.ar, style, strlen(style));
-        int nd = text ? parse_decl_block(&tmp, text, text + strlen(text), &d) : 0;
-        cx->doc->ar = tmp.ar;
-        n->inl = d;
-        n->ninl = (int16_t)(nd > 32000 ? 32000 : nd);
-    }
+    web_sheet_t *tmp = cx->inl_sheet;
+    if (!tmp) tmp = cx->inl_sheet = calloc(1, sizeof *tmp);
+    if (!tmp) return 0;
+    tmp->ar = cx->doc->sar;               /* allocate in the styles' arena */
+    decl_t *d = NULL;
+    char *text = wa_strndup(&tmp->ar, style, strlen(style));
+    int nd = text ? parse_decl_block(tmp, text, text + strlen(text), &d) : 0;
+    cx->doc->sar = tmp->ar;
+    n->inl = d;
+    n->ninl = (int16_t)(nd > 32000 ? 32000 : nd);
     *decls = n->inl;
     return n->ninl;
 }
@@ -3641,6 +3732,7 @@ static void style_init(web_style_t *st, const web_style_t *ps, const web_node_t 
     st->list_inside = ps->list_inside;
     st->transform = ps->transform;
     st->visibility_hidden = ps->visibility_hidden == 1 ? 1 : 0;
+    st->no_pointer = ps->no_pointer;
     st->deco = ps->deco;
     st->deco_color = ps->deco_color;
     st->indent = ps->indent;
@@ -3700,7 +3792,7 @@ static void style_pseudo(cctx_t *cx, web_node_t *n, int k) {
     const web_style_t *ps = n->st;
     if (!ps || ps->display == D_NONE || !cx->nmp[k] || n->tag == T_INPUT || n->tag == T_IMG ||
         n->tag == T_TEXTAREA || n->tag == T_SELECT || n->tag == T_BR || n->tag == T_HR) return;
-    web_style_t *st = wa_alloc(&cx->doc->ar, sizeof *st);
+    web_style_t *st = wa_alloc(&cx->doc->sar, sizeof *st);
     if (!st) return;
     style_init(st, ps, NULL);
     if (cx->nmp[k] > 1) qsort(cx->mp[k], cx->nmp[k], sizeof(mdecl_t), mcmp);
@@ -3710,7 +3802,7 @@ static void style_pseudo(cctx_t *cx, web_node_t *n, int k) {
     }
     style_finish(st, NULL);
     if (!st->content || st->display == D_NONE) return;
-    web_node_t *pn = wa_alloc(&cx->doc->ar, sizeof *pn);
+    web_node_t *pn = wa_alloc(&cx->doc->sar, sizeof *pn);
     if (!pn) return;
     pn->type = WN_ELEM;
     pn->name = k ? "::after" : "::before";
@@ -3722,7 +3814,7 @@ static void style_pseudo(cctx_t *cx, web_node_t *n, int k) {
     pn->parent = n;
     pn->st = st;
     if (*st->content) {
-        web_node_t *t = wa_alloc(&cx->doc->ar, sizeof *t);
+        web_node_t *t = wa_alloc(&cx->doc->sar, sizeof *t);
         if (t) {
             t->type = WN_TEXT;
             t->text = (char *)st->content;
@@ -3748,7 +3840,7 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     /* generated content of an earlier styling goes (it is made again below) */
     while (n->first && n->first->pseudo) { n->first = n->first->next; if (n->first) n->first->prev = NULL; else n->last = NULL; }
     while (n->last && n->last->pseudo) { n->last = n->last->prev; if (n->last) n->last->next = NULL; else n->first = NULL; }
-    web_style_t *st = wa_alloc(&cx->doc->ar, sizeof *st);
+    web_style_t *st = wa_alloc(&cx->doc->sar, sizeof *st);
     if (!st) { n->st = NULL; return; }
     style_init(st, ps, n);
 
@@ -3790,17 +3882,33 @@ static void style_element(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
         if (pass == 0) resolve_vars(cx, st, ps);
     }
     style_finish(st, n);
+    if (n->tag == T_NOSCRIPT && cx->doc->scripting) st->display = D_NONE;
     n->st = st;
     style_pseudo(cx, n, 0);
     style_pseudo(cx, n, 1);
+}
+
+/* Inside an element that is not shown: no styles (an earlier styling's are freed), no
+   generated content. Iterative (scripts can make very deep trees). */
+static void unstyle(web_node_t *top) {
+    web_node_t *n = top->first;
+    while (n && n != top) {
+        if (n->type == WN_ELEM && !n->pseudo) {
+            n->st = NULL;
+            while (n->first && n->first->pseudo) { n->first = n->first->next; if (n->first) n->first->prev = NULL; else n->last = NULL; }
+            while (n->last && n->last->pseudo) { n->last = n->last->prev; if (n->last) n->last->next = NULL; else n->first = NULL; }
+            if (n->first) { n = n->first; continue; }
+        }
+        while (n != top && !n->next) n = n->parent;
+        if (n != top) n = n->next;
+    }
 }
 
 static void style_rec(cctx_t *cx, web_node_t *n, const web_style_t *ps) {
     for (web_node_t *c = n->first; c; c = c->next) {
         if (c->type != WN_ELEM || c->pseudo) continue;   /* (generated boxes are styled already) */
         style_element(cx, c, ps);
-        if (!c->st) continue;
-        if (c->st->display == D_NONE) continue;   /* nothing inside is shown */
+        if (!c->st || c->st->display == D_NONE) { unstyle(c); continue; }   /* nothing inside is shown */
         style_rec(cx, c, c->st);
     }
 }
@@ -3828,9 +3936,14 @@ void web_style_doc(web_doc_t *d, const web_cascade_t *c) {
     root.display = D_BLOCK;
     root.spacing = 0;
     root.width.u = U_AUTO; root.height.u = U_AUTO; root.maxw.u = U_NONE;
+    /* the styles of the last styling stay readable until every element has new ones */
+    web_arena_t old = d->sar;
+    memset(&d->sar, 0, sizeof d->sar);
     style_rec(&cx, d->root, &root);
+    wa_free(&old);
     for (int i = 0; i < 64; i++) free(cx.media_ok[i]);
     free(cx.m);
     free(cx.mp[0]);
     free(cx.mp[1]);
+    free(cx.inl_sheet);
 }

@@ -243,6 +243,153 @@ void web_page_collect(web_page_t *pg) {
     collect_rec(pg, pg->doc->root, 0);
 }
 
+static void free_ctrl(web_ctrl_t *c) {
+    free(c->name);
+    free(c->value);
+    free(c->init_value);
+    for (int k = 0; k < c->nopts; k++) { free(c->opt_text[k]); free(c->opt_val[k]); }
+    free(c->opt_text);
+    free(c->opt_val);
+}
+
+/* a control that stays: what scripts may have changed around it */
+static void refresh_ctrl(web_page_t *pg, web_ctrl_t *c, web_node_t *n, char *buf) {
+    c->form = n->form;
+    free(c->name);
+    c->name = dupstr(web_attr(n, "name"));
+    c->disabled = web_has_attr(n, "disabled") || c->type == C_FILE;
+    c->readonly = web_has_attr(n, "readonly");
+    if (n->tag == T_BUTTON) {
+        web_text_content(n, buf, 8192);
+        if (!buf[0]) { const char *t = web_attr(n, "title"); if (!t) t = web_attr(n, "aria-label"); strlcpy(buf, t ? t : "", 8192); }
+        strlcpy(c->label, buf, sizeof c->label);
+    } else if (n->tag == T_INPUT && (c->type == C_SUBMIT || c->type == C_RESET || c->type == C_BUTTON)) {
+        const char *v = web_attr(n, "value");
+        if (v) strlcpy(c->label, v, sizeof c->label);
+    } else if (n->tag == T_SELECT) {
+        /* the options again; the choice stays on the same value when it still exists */
+        const char *was = c->sel >= 0 && c->sel < c->nopts ? c->opt_val[c->sel] : NULL;
+        char keep[512];
+        strlcpy(keep, was ? was : "", sizeof keep);
+        bool had = was != NULL;
+        for (int k = 0; k < c->nopts; k++) { free(c->opt_text[k]); free(c->opt_val[k]); }
+        free(c->opt_text);
+        free(c->opt_val);
+        c->opt_text = c->opt_val = NULL;
+        c->nopts = 0;
+        int sel = c->sel;
+        c->sel = 0;
+        collect_options(c, n, buf, 0);
+        bool explicit_sel = false;
+        for (web_node_t *o = n->first; o; o = o->next) if (o->type == WN_ELEM && web_has_attr(o, "selected")) explicit_sel = true;
+        if (!explicit_sel && had) {
+            c->sel = sel < c->nopts ? sel : 0;
+            for (int k = 0; k < c->nopts; k++) if (!strcmp(c->opt_val[k], keep)) { c->sel = k; break; }
+        }
+    }
+    if (c->type == C_IMAGE) {
+        const char *src = web_attr(n, "src");
+        c->img = src && *src ? add_image(pg, src) : -1;
+    }
+}
+
+typedef struct recol { web_ctrl_t *old; int nold; char *buf; } recol_t;
+
+static void recollect_rec(web_page_t *pg, recol_t *r, web_node_t *n, int depth) {
+    if (depth > 200) return;
+    for (web_node_t *c = n->first; c; c = c->next) {
+        if (c->type != WN_ELEM) continue;
+        c->link = c->img = -1;
+        switch (c->tag) {
+        case T_A: case T_AREA: {
+            const char *h = web_attr(c, "href");
+            if (h) c->link = add_link(pg, c, h);
+            break;
+        }
+        case T_IMG: {
+            const char *src = img_src(c);
+            if (src) c->img = add_image(pg, src);
+            break;
+        }
+        case T_INPUT: case T_BUTTON: case T_SELECT: case T_TEXTAREA: {
+            int k = c->ctl;
+            if (k >= 0 && k < r->nold && r->old[k].node == c) {
+                web_ctrl_t keep = r->old[k];
+                r->old[k].node = NULL;             /* moved */
+                c->ctl = -1;
+                web_ctrl_t *nc = new_ctrl(pg, c);
+                if (nc) {
+                    free(nc->name);
+                    *nc = keep;
+                    refresh_ctrl(pg, nc, c, r->buf);
+                } else {
+                    free_ctrl(&keep);
+                }
+            } else {
+                c->ctl = -1;
+                collect_ctrl(pg, c);
+            }
+            if (c->tag == T_SELECT || c->tag == T_TEXTAREA) continue;
+            break;
+        }
+        default:
+            break;
+        }
+        recollect_rec(pg, r, c, depth + 1);
+    }
+}
+
+/* depth, sibling index, the form of each control (iterative: scripts make deep trees) */
+static void fixup(web_doc_t *d) {
+    web_node_t *top = d->root, *n = top->first;
+    int nelems = 0;
+    while (n) {
+        web_node_t *p = n->parent;
+        n->depth = p->depth < 255 ? (uint8_t)(p->depth + 1) : 255;
+        if (n->type == WN_ELEM && !n->pseudo) {
+            nelems++;
+            int idx = 1;
+            for (web_node_t *q = n->prev; q; q = q->prev) if (q->type == WN_ELEM && !q->pseudo) { idx = q->index + 1; break; }
+            n->index = idx;
+            if (n->tag == T_INPUT || n->tag == T_BUTTON || n->tag == T_SELECT || n->tag == T_TEXTAREA) {
+                web_node_t *f = NULL;
+                for (web_node_t *a = p; a && a != top; a = a->parent) if (a->tag == T_FORM) { f = a; break; }
+                if (f) n->form = f;
+                else if (n->form && (n->form->jsf & WNJ_DEAD)) n->form = NULL;
+            }
+        }
+        if (n->first && n->type == WN_ELEM) { n = n->first; continue; }
+        while (n && n != top && !n->next) n = n->parent;
+        if (!n || n == top) break;
+        n = n->next;
+    }
+    d->nelems = nelems;
+}
+
+void web_page_recollect(web_page_t *pg) {
+    if (!pg->doc || !pg->doc->root) return;
+    fixup(pg->doc);
+    recol_t r;
+    r.old = pg->ctrls;
+    r.nold = pg->nctrls;
+    r.buf = malloc(8192);
+    if (!r.buf) return;
+    pg->ctrls = NULL;
+    pg->nctrls = pg->ccap = 0;
+    free(pg->links);
+    pg->links = NULL;
+    pg->nlinks = pg->lcap = 0;
+    recollect_rec(pg, &r, pg->doc->root, 0);
+    /* controls that went away */
+    for (int i = 0; i < r.nold; i++) {
+        if (!r.old[i].node) continue;
+        if (r.old[i].node->ctl == i) r.old[i].node->ctl = -1;
+        free_ctrl(&r.old[i]);
+    }
+    free(r.old);
+    free(r.buf);
+}
+
 void web_page_free_resources(web_page_t *pg) {
     for (int i = 0; i < pg->nimgs; i++) {
         web_image_t *im = &pg->imgs[i];
@@ -254,15 +401,7 @@ void web_page_free_resources(web_page_t *pg) {
     free(pg->imgs);
     pg->imgs = NULL;
     pg->nimgs = pg->icap = 0;
-    for (int i = 0; i < pg->nctrls; i++) {
-        web_ctrl_t *c = &pg->ctrls[i];
-        free(c->name);
-        free(c->value);
-        free(c->init_value);
-        for (int k = 0; k < c->nopts; k++) { free(c->opt_text[k]); free(c->opt_val[k]); }
-        free(c->opt_text);
-        free(c->opt_val);
-    }
+    for (int i = 0; i < pg->nctrls; i++) free_ctrl(&pg->ctrls[i]);
     free(pg->ctrls);
     pg->ctrls = NULL;
     pg->nctrls = pg->ccap = 0;

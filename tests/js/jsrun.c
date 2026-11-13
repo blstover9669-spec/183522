@@ -81,6 +81,14 @@ static JSValue fn_clear_timeout(JSContext *ctx, JSValue this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+/* hostAsk(x): waits for the host like alert / confirm (js_wait); the host answers x * 2 */
+static JSValue fn_host_ask(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    (void)this_val; (void)magic;
+    if (!js_can_wait(ctx)) return js_mknum(-1);
+    js_set(ctx, js_global(ctx), "__asked", JS_ARG(0));
+    return js_wait(ctx);
+}
+
 static int drive(JSContext *ctx, int st) {
     while (st == JS_SUSPENDED) st = js_resume(ctx);
     return st;
@@ -221,6 +229,33 @@ int main(int argc, char **argv) {
         printf("after nested kill: %s\n", st4 == JS_DONE ? "ok" : "FAIL");
         js_free_context(ctx);
         return ok1 && ok2 && st3 == JS_KILLED && st4 == JS_DONE ? 0 : 1;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "-wait")) {
+        /* natives that wait for the host (alert / confirm) suspend the task, not the loop */
+        JSContext *ctx = make_ctx();
+        js_def_func(ctx, js_global(ctx), "hostAsk", fn_host_ask, 1, 0);
+        const char *src = "var log = [];\n"
+                          "function f(a) { var r = hostAsk(a); log.push(r); return r + 1; }\n"
+                          "log.push(f(10));\n"
+                          "Promise.resolve().then(function () { log.push('job'); });\n"
+                          "log.push([5].map(function (x) { return hostAsk(x); })[0]);\n"
+                          "try { (function () { throw new Error('e'); })(); } catch (e) { log.push(hostAsk(1)); }\n";
+        int st = js_eval_task(ctx, src, strlen(src), "wait.js", 1);
+        int waits = 0;
+        while (st == JS_SUSPENDED && waits < 10) {
+            if (!js_waiting(ctx)) { st = js_resume(ctx); continue; }
+            if (js_resume(ctx) != JS_SUSPENDED) break;              /* still waiting: nothing runs */
+            JSValue a = js_get(ctx, js_global(ctx), "__asked");
+            waits++;
+            st = js_resume_with(ctx, js_mknum(js_num(a) * 2));
+        }
+        JSValue d = js_eval(ctx, "log.join(',')", 13, "check");
+        char *ds = js_to_cstring(ctx, d, NULL);
+        bool ok = st == JS_DONE && waits == 2 && ds && !strcmp(ds, "20,21,-1,2,job");
+        printf("host waits: %d, log %s: %s\n", waits, ds ? ds : "?", ok ? "ok" : "FAIL");
+        free(ds);
+        js_free_context(ctx);
+        return ok ? 0 : 1;
     }
     const char *harness = NULL;
     int fails = 0, n = 0;

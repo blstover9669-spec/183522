@@ -1162,6 +1162,7 @@ typedef struct litem {
     int h, ml, mt;           /* LI_SIMPLE: box size, left / top margin + border */
     int fs;
     const web_style_t *bst;  /* LI_SIMPLE: style whose borders are drawn round the box */
+    const web_node_t *node;  /* the element it belongs to (pages with scripts)     */
 } litem_t;
 
 typedef struct ifc {
@@ -1178,6 +1179,7 @@ typedef struct ifc {
     int lines;
     web_node_t *defer[8];
     int ndefer;
+    const web_node_t *cur_node;   /* the element of the text being added */
 } ifc_t;
 
 static void place_float(lctx_t *lc, web_node_t *c, int cx, int cw, int y);
@@ -1235,6 +1237,7 @@ static void emit_text_run(lctx_t *lc, litem_t *a, int cnt, int x0, int base) {
     it->text = buf;
     it->len = o;
     it->ref = font_ascent(f);
+    it->node = a[0].node;
 }
 
 /* Lay out items [0, upto) as one line; items after upto move to the next line. */
@@ -1283,7 +1286,8 @@ static void ifc_flush(ifc_t *f, int upto) {
             while (j < n && f->it[j].kind == LI_TEXT && f->it[j].font == it->font && f->it[j].color == it->color &&
                    f->it[j].deco == it->deco && f->it[j].link == it->link && f->it[j].bg == it->bg &&
                    f->it[j].hidden == it->hidden && f->it[j].valign == it->valign &&
-                   f->it[j].x == f->it[j - 1].x + f->it[j - 1].w + f->it[j].spw)
+                   f->it[j].x == f->it[j - 1].x + f->it[j - 1].w + f->it[j].spw &&
+                   f->it[j].node == it->node)
                 j++;
             if (!it->hidden) {
                 int b = base;
@@ -1328,6 +1332,7 @@ static void ifc_flush(ifc_t *f, int upto) {
                 wi->text = it->text;
                 wi->font = it->font;
                 wi->color = it->color;
+                wi->node = it->node;
             }
         }
         i++;
@@ -1461,7 +1466,7 @@ static void add_word(ifc_t *f, const char *s, int len, const web_style_t *st, co
         if (k >= len) break;
         litem_t *it = ifc_push(f);
         if (!it) return;
-        it->kind = LI_TEXT; it->font = font; it->text = s; it->len = k; it->x = 0; it->w = acc;
+        it->kind = LI_TEXT; it->font = font; it->text = s; it->len = k; it->x = 0; it->w = acc; it->node = f->cur_node;
         it->asc = asc; it->desc = desc; it->color = st->color; it->deco = st->deco; it->link = lc->link;
         it->bg = lc->ibg; it->hidden = st->visibility_hidden; it->valign = st->valign; it->fs = st->fsize;
         ifc_flush(f, f->n);
@@ -1474,6 +1479,7 @@ static void add_word(ifc_t *f, const char *s, int len, const web_style_t *st, co
     if (!it) return;
     it->kind = LI_TEXT;
     it->glued = glued;
+    it->node = f->cur_node;
     it->font = font;
     it->text = s;
     it->len = len;
@@ -1495,6 +1501,8 @@ static void add_word(ifc_t *f, const char *s, int len, const web_style_t *st, co
 
 static void add_text(ifc_t *f, const web_node_t *t, const web_style_t *st) {
     lctx_t *lc = f->lc;
+    /* (runs of different elements stay apart on pages with scripts: they find them) */
+    if (lc->pg->want_boxes) f->cur_node = t->parent && t->parent->type == WN_ELEM ? t->parent : NULL;
     const font_t *font = sfont(lc, st);
     int asc, desc;
     text_metrics(st, font, &asc, &desc);
@@ -1538,7 +1546,7 @@ static void add_text(ifc_t *f, const web_node_t *t, const web_style_t *st) {
                 if (f->n == 0) ifc_make_room(f, sw, &(int){0}, &(uint16_t){0}, false, true);
                 litem_t *it = ifc_push(f);
                 if (!it) return;
-                it->kind = LI_TEXT; it->glued = glued_prev; it->font = font; it->text = w; it->len = wl;
+                it->kind = LI_TEXT; it->glued = glued_prev; it->font = font; it->text = w; it->len = wl; it->node = f->cur_node;
                 it->x = f->used; it->w = sw; it->asc = asc; it->desc = desc; it->color = st->color;
                 it->deco = st->deco; it->link = lc->link; it->bg = lc->ibg; it->hidden = st->visibility_hidden;
                 it->fs = st->fsize;
@@ -1625,6 +1633,7 @@ static void add_image(ifc_t *f, web_node_t *c) {
             tmp.type = WN_TEXT;
             tmp.text = (char *)alt;
             tmp.len = (int)strlen(alt);
+            tmp.parent = c;
             add_text(f, &tmp, st);
         }
         return;
@@ -1632,8 +1641,10 @@ static void add_image(ifc_t *f, web_node_t *c) {
     bm_t b;
     box_metrics(st, f->cw, &b);
     int kind = (failed && alt && *alt) ? WI_IMGALT : WI_IMAGE;
+    int before = f->n;
     push_simple(f, kind, c->img, w, h, b.ml + b.bl, b.mr + b.br, b.mt + b.bt, b.mb + b.bb, -1, st,
                 kind == WI_IMGALT ? alt : NULL, sfont(lc, st));
+    if (f->n > before && lc->pg->want_boxes) f->it[f->n - 1].node = c;
     if (f->n && (b.bl || b.br || b.bt || b.bb)) f->it[f->n - 1].bst = st;
 }
 
@@ -1648,7 +1659,9 @@ static void add_ctrl(ifc_t *f, web_node_t *c) {
     if (ct->type == C_CHECKBOX || ct->type == C_RADIO) asc = h - 2;
     else asc = (h - font_height(ct->font)) / 2 + font_ascent(ct->font);
     int m = 2;
+    int before = f->n;
     push_simple(f, WI_CTRL, c->ctl, w, h, ct->type == C_CHECKBOX || ct->type == C_RADIO ? 3 : 0, m, 1, 1, asc, st, NULL, ct->font);
+    if (f->n > before && lc->pg->want_boxes) f->it[f->n - 1].node = c;
 }
 
 static void add_box(ifc_t *f, web_node_t *c, bool flex_item) {
@@ -3298,6 +3311,7 @@ static int layout_replaced(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int
             it->text = kind == WI_IMGALT ? alt : NULL;
             it->font = kind == WI_CTRL ? ct->font : sfont(lc, st);
             it->color = st->color;
+            if (lc->pg->want_boxes) it->node = n;
         }
     }
     r->h = bh;
@@ -3368,7 +3382,7 @@ static int layout_box(lctx_t *lc, web_node_t *n, int x, int y, int cbw, int fw, 
     int cx = bx + b.bl + b.pl, cy = y + b.bt + b.pt;
     int first_item = lc->L->nitems;
     int dbgi = -1;
-    if (web_layout_debug_boxes && item_add(lc, WI_BOX)) dbgi = lc->L->nitems - 1;
+    if ((web_layout_debug_boxes || lc->pg->want_boxes) && item_add(lc, WI_BOX)) dbgi = lc->L->nitems - 1;
     /* box shadows go under the background */
     int shi = -1;
     if (st->nshadow && !st->visibility_hidden) {

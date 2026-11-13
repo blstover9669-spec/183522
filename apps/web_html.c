@@ -207,35 +207,50 @@ int web_detect_charset(const char *src, size_t len, const char *content_type) {
     return valid_utf8(src, len) ? WEB_CS_UTF8 : WEB_CS_1252;
 }
 
-char *web_to_1252(const char *src, size_t len, int cs, size_t *outlen) {
-    if (cs == WEB_CS_AUTO) cs = web_detect_charset(src, len, NULL);
+/* One character of the source at i: the 1252 byte it becomes (-1 = none); returns the next i. */
+static size_t conv_step(const unsigned char *s, size_t len, size_t i, int cs, int *out) {
+    unsigned c = s[i];
+    if (c < 0x80) { *out = c ? (int)c : ' '; return i + 1; }
+    uint32_t cp;
+    if (cs == WEB_CS_UTF8) {
+        i += (size_t)utf8_dec(s + i, len - i, &cp);
+    } else {
+        cp = (c >= 0x80 && c < 0xA0) ? w1252[c - 0x80] : c;
+        if (!cp) cp = '?';
+        i++;
+    }
+    *out = web_cp_to_1252(cp);
+    return i;
+}
+
+#define CONV_STEP 64     /* map: the source offset of every 64th byte made */
+
+/* map (optional): malloc'd source offsets of output bytes 0, 64, 128 ... */
+static char *conv_1252(const char *src, size_t len, int cs, size_t *outlen, uint32_t **map) {
     char *out = malloc(len + 1);
     if (!out) return NULL;
+    uint32_t *m = map ? malloc(sizeof(uint32_t) * (len / CONV_STEP + 2)) : NULL;
+    if (map) *map = m;
     const unsigned char *s = (const unsigned char *)src;
     size_t o = 0, i = 0;
     if (cs == WEB_CS_UTF8 && len >= 3 && s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) i = 3;
     while (i < len) {
-        unsigned c = s[i];
-        if (c < 0x80) {
-            if (c == 0) c = ' ';
-            out[o++] = (char)c;
-            i++;
-            continue;
-        }
-        uint32_t cp;
-        if (cs == WEB_CS_UTF8) {
-            i += utf8_dec(s + i, len - i, &cp);
-        } else {
-            cp = (c >= 0x80 && c < 0xA0) ? w1252[c - 0x80] : c;
-            if (!cp) cp = '?';
-            i++;
-        }
-        int b = web_cp_to_1252(cp);
-        if (b >= 0) out[o++] = (char)b;
+        int b;
+        size_t at = i;
+        i = conv_step(s, len, i, cs, &b);
+        if (b < 0) continue;
+        if (m && o % CONV_STEP == 0) m[o / CONV_STEP] = (uint32_t)at;
+        out[o++] = (char)b;
     }
+    if (m && o % CONV_STEP == 0) m[o / CONV_STEP] = (uint32_t)len;
     out[o] = 0;
     if (outlen) *outlen = o;
     return out;
+}
+
+char *web_to_1252(const char *src, size_t len, int cs, size_t *outlen) {
+    if (cs == WEB_CS_AUTO) cs = web_detect_charset(src, len, NULL);
+    return conv_1252(src, len, cs, outlen, NULL);
 }
 
 void web_1252_to_ui(const char *in, char *out, size_t size) {
@@ -390,7 +405,24 @@ typedef struct parser {
     web_node_t *form;           /* the open <form> (form element pointer) */
     bool in_body;
     bool after_head;
+    int flags;                  /* WEB_PARSE_*                            */
+    /* WEB_PARSE_SCRIPTS of a UTF-8 page: the source, for scripts' own bytes */
+    const unsigned char *src;
+    size_t srclen;
+    uint32_t *map;              /* conv_1252's offsets                    */
 } parser_t;
+
+/* source offset of byte o of the 1252 text */
+static size_t src_offset(parser_t *p, size_t o) {
+    size_t k = o / CONV_STEP, out = k * CONV_STEP, i = p->map[k];
+    while (out < o && i < p->srclen) {
+        int b;
+        i = conv_step(p->src, p->srclen, i, WEB_CS_UTF8, &b);
+        if (b >= 0) out++;
+    }
+    /* (characters that make no byte belong to what follows them) */
+    return i;
+}
 
 static web_node_t *new_node(parser_t *p, int type) {
     web_node_t *n = wa_alloc(&p->d->ar, sizeof *n);
@@ -903,6 +935,23 @@ static void start_tag(parser_t *p, tag_tok_t *t) {
         const char *ts;
         size_t tl;
         raw_text(p, t->name, &ts, &tl);
+        if (tag == T_SCRIPT && (p->flags & WEB_PARSE_SCRIPTS) && tl) {
+            /* the script's source: its own bytes on a UTF-8 page (string literals) */
+            web_node_t *tn = new_node(p, WN_TEXT);
+            if (!tn) return;
+            if (p->map) {
+                size_t a = src_offset(p, (size_t)(ts - p->s)), b = src_offset(p, (size_t)(ts - p->s) + tl);
+                tn->text = wa_strndup(&d->ar, (const char *)p->src + a, b - a);
+                tn->len = (int)(b - a);
+                tn->jsf = WNJ_UTF8;
+            } else {
+                tn->text = wa_strndup(&d->ar, ts, tl);
+                tn->len = (int)tl;
+            }
+            if (!tn->text) return;
+            append(e, tn);
+            return;
+        }
         if (tag == T_SCRIPT || tag == T_IFRAME || tag == T_NOEMBED || tag == T_NOFRAMES) return;
         if (tag == T_TEXTAREA && tl && ts[0] == '\n') { ts++; tl--; }
         if (tl) {
@@ -916,7 +965,23 @@ static void start_tag(parser_t *p, tag_tok_t *t) {
         return;
     }
     if (tag == T_MATH || tag == T_TEMPLATE) {
-        if (!t->selfclose) skip_subtree(p, t->name);
+        if (t->selfclose) return;
+        size_t from = p->i;
+        skip_subtree(p, t->name);
+        if (tag == T_TEMPLATE && (p->flags & WEB_PARSE_SCRIPTS)) {
+            /* the template's HTML, for scripts (template.content) */
+            size_t to = p->i;
+            while (to > from && p->s[to - 1] != '<') to--;
+            if (to > from) to--;
+            if (to > from) {
+                web_node_t *tn = new_node(p, WN_TEXT);
+                if (!tn) return;
+                tn->text = wa_strndup(&d->ar, p->s + from, to - from);
+                tn->len = tn->text ? (int)(to - from) : 0;
+                tn->jsf = WNJ_TPL;
+                append(e, tn);
+            }
+        }
         return;
     }
     if (tag == T_SVG && t->selfclose) return;      /* (an <svg> keeps its shapes: they are drawn) */
@@ -1009,23 +1074,33 @@ static bool quirks_mode(const char *s, size_t n) {
 }
 
 web_doc_t *web_parse_html(const char *src, size_t len, int charset) {
+    return web_parse_html_ex(src, len, charset, 0);
+}
+
+web_doc_t *web_parse_html_ex(const char *src, size_t len, int charset, int flags) {
     web_doc_t *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     size_t tl;
-    char *text = web_to_1252(src, len, charset, &tl);
-    if (!text) { free(d); return NULL; }
+    if (charset == WEB_CS_AUTO) charset = web_detect_charset(src, len, NULL);
+    uint32_t *map = NULL;
+    bool keep_utf8 = (flags & WEB_PARSE_SCRIPTS) && charset == WEB_CS_UTF8;
+    char *text = conv_1252(src, len, charset, &tl, keep_utf8 ? &map : NULL);
+    if (!text || (keep_utf8 && !map)) { free(text); free(map); free(d); return NULL; }
     parser_t *p = calloc(1, sizeof *p);
     tag_tok_t *t = malloc(sizeof *t);
-    if (!p || !t) { free(p); free(t); free(text); free(d); return NULL; }
+    if (!p || !t) { free(p); free(t); free(text); free(map); free(d); return NULL; }
     p->d = d;
     p->s = text;
     p->n = tl;
+    p->flags = flags;
+    if (map) { p->src = (const unsigned char *)src; p->srclen = len; p->map = map; }
     d->root = new_node(p, WN_DOC);
-    if (!d->root) { free(p); free(t); free(text); free(d); return NULL; }
+    if (!d->root) { free(p); free(t); free(text); free(map); free(d); return NULL; }
     p->stack[0] = d->root;
     p->sp = 1;
     d->quirks = quirks_mode(text, tl);
-    ensure_head(p);
+    if (flags & WEB_PARSE_BODY) ensure_body(p);
+    else ensure_head(p);
 
     size_t text_start = 0;
     while (p->i < p->n) {
@@ -1069,12 +1144,14 @@ web_doc_t *web_parse_html(const char *src, size_t len, int charset) {
     free(p);
     free(t);
     free(text);
+    free(map);
     return d;
 }
 
 void web_doc_free(web_doc_t *d) {
     if (!d) return;
     wa_free(&d->ar);
+    wa_free(&d->sar);
     free(d);
 }
 
@@ -1089,7 +1166,7 @@ static void text_rec(const web_node_t *n, char *out, size_t size, size_t *o, boo
                 *sp = false;
                 out[(*o)++] = (char)ch;
             }
-        } else if (c->type == WN_ELEM && c->tag != T_SCRIPT && c->tag != T_STYLE) {
+        } else if (c->type == WN_ELEM && c->tag != T_SCRIPT && c->tag != T_STYLE && c->tag != T_TEMPLATE) {
             if (c->tag == T_BR) *sp = true;
             text_rec(c, out, size, o, sp);
         }

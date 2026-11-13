@@ -179,6 +179,7 @@ void js_vm_mark(JSContext *ctx) {
         if (f->gen) js_gc_mark_cell(ctx, f->gen);
     }
     js_gc_mark_value(ctx, ctx->resume_val);
+    js_gc_mark_value(ctx, ctx->host_val);
 }
 
 /* ==== closures ================================================================================ */
@@ -713,6 +714,7 @@ static JSValue run(JSContext *ctx, int stop) {
     JSBytecode *b;
     ctx->run_depth++;
     LOAD();
+    if (ctx->host_push) { ctx->host_push = false; *sp++ = ctx->host_val; ctx->host_val = JS_UNDEFINED; }
     if (ctx->resume_mode == GR_THROW) { ctx->resume_mode = 0; goto exception; }
     if (ctx->resume_mode == GR_RETURN) { ctx->resume_mode = 0; goto do_return; }
     for (;;) {
@@ -1206,7 +1208,16 @@ static JSValue run(JSContext *ctx, int stop) {
                 }
                 if (fo->h.cls == CL_NATIVE) {
                     SAVE();
+                    ctx->can_wait = ctx->run_depth == 1 && ctx->native_depth == 0 && !ctx->no_suspend;
                     JSValue r = call_native(ctx, fo, base[1], (int)argc, base + 2, JS_UNDEFINED);
+                    ctx->can_wait = false;
+                    if (JS_UNLIKELY(r == JS_SUSPEND)) {
+                        /* the native waits for the host (js_wait): resume after the call */
+                        sp = base;
+                        SAVE();
+                        ctx->run_depth--;
+                        return JS_SUSPEND;
+                    }
                     CHECK(r);
                     sp = base;
                     *sp++ = r;
@@ -2118,6 +2129,8 @@ static void reset_vm(JSContext *ctx) {
     ctx->uncatchable = false;
     ctx->resume_mode = 0;
     ctx->drive_pending = false;
+    ctx->host_wait = ctx->host_push = ctx->can_wait = false;
+    ctx->host_val = JS_UNDEFINED;
 }
 
 int js_drive(JSContext *ctx) {
@@ -2218,11 +2231,35 @@ int js_call_task(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const J
 }
 
 int js_resume(JSContext *ctx) {
-    if (!ctx->drive_pending) return JS_DONE;
+    if (ctx->host_wait) return JS_SUSPENDED;
+    if (!ctx->drive_pending) {
+        if (!ctx->jobs) return JS_DONE;
+        ctx->task_threw = false;      /* jobs queued by the host (promise callbacks) */
+        ctx->task_t0 = mono(ctx);
+    }
     return task_result(ctx, js_drive(ctx));
 }
 
 bool js_busy(JSContext *ctx) { return ctx->drive_pending; }
+
+bool js_can_wait(JSContext *ctx) { return ctx->can_wait; }
+
+JSValue js_wait(JSContext *ctx) {
+    if (!ctx->can_wait) return JS_UNDEFINED;
+    ctx->can_wait = false;
+    ctx->host_wait = true;
+    return JS_SUSPEND;
+}
+
+bool js_waiting(JSContext *ctx) { return ctx->host_wait; }
+
+int js_resume_with(JSContext *ctx, JSValue result) {
+    if (!ctx->host_wait) return js_resume(ctx);
+    ctx->host_wait = false;
+    ctx->host_push = true;
+    ctx->host_val = result;
+    return task_result(ctx, js_drive(ctx));
+}
 
 void js_kill(JSContext *ctx) {
     reset_vm(ctx);

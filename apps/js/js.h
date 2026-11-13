@@ -94,6 +94,15 @@ int  js_resume(JSContext *ctx);
 bool js_busy(JSContext *ctx);              /* a task is suspended (call js_resume)      */
 void js_kill(JSContext *ctx);              /* stop the suspended task (runaway script)  */
 uint32_t js_task_ms(JSContext *ctx);       /* how long the current task has been running */
+/* Natives that wait for the user (alert / confirm / prompt) without blocking the event
+   loop: when js_can_wait(ctx) is true, a native may return js_wait(ctx); the task then
+   suspends (js_busy and js_waiting are true, js_resume does nothing) until the host
+   calls js_resume_with(ctx, result) - the native's return value. When js_can_wait is
+   false (the native was called from other native code) it must return at once. */
+bool    js_can_wait(JSContext *ctx);
+JSValue js_wait(JSContext *ctx);
+bool    js_waiting(JSContext *ctx);
+int     js_resume_with(JSContext *ctx, JSValue result);
 /* Synchronous evaluation (tests / small snippets). Returns the completion value or
    JS_EXCEPTION. Code that runs out of budget here is stopped. */
 JSValue js_eval(JSContext *ctx, const char *utf8, size_t len, const char *name);

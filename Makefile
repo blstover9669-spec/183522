@@ -187,3 +187,4 @@ jstest:
 	@$(JSTEST_DIR)/jsrun -h tests/js/harness.js $(JSTEST_FILES)
 	@$(JSTEST_DIR)/jsrun32 -h tests/js/harness.js $(JSTEST_FILES) | tail -1
 	@JS_NESTED_MS=500 $(JSTEST_DIR)/jsrun -runaway
+	@$(JSTEST_DIR)/jsrun -wait

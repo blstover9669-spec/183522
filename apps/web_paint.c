@@ -435,3 +435,60 @@ int web_hit_ctrl(web_page_t *pg, int x, int y) {
     }
     return -1;
 }
+
+/* the element an item belongs to (generated ::before / ::after content: its element) */
+static web_node_t *item_elem(const web_page_t *pg, const web_item_t *it) {
+    const web_node_t *n = it->node;
+    if (!n && it->kind == WI_CTRL && it->ref >= 0 && it->ref < pg->nctrls) n = pg->ctrls[it->ref].node;
+    while (n && n->pseudo) n = n->parent;
+    return (web_node_t *)n;
+}
+
+web_node_t *web_hit_node(web_page_t *pg, int x, int y) {
+    web_layout_t *L = &pg->lay;
+    for (int i = L->nitems - 1; i >= 0; i--) {
+        const web_item_t *it = &L->items[i];
+        if (it->kind != WI_BOX && it->kind != WI_TEXT && it->kind != WI_IMAGE && it->kind != WI_IMGALT &&
+            it->kind != WI_CTRL && it->kind != WI_SVG) continue;
+        web_node_t *n = item_elem(pg, it);
+        if (!n || (n->st && (n->st->no_pointer || n->st->visibility_hidden == 1))) continue;
+        int iy = it->fixed ? it->y + L->paint_sy : it->y;
+        if (it->clip > 0 && it->clip <= L->nclips) {
+            const web_clip_t *c = &L->clips[it->clip - 1];
+            int cy = it->fixed ? c->ry + L->paint_sy : c->ry;
+            if (x < c->rx || x >= c->rx + c->rw || y < cy || y >= cy + c->rh) continue;
+        }
+        if (x >= it->x && x < it->x + it->w && y >= iy && y < iy + it->h) return n;
+    }
+    return NULL;
+}
+
+/* An element's border box: its WI_BOX; an inline element (no box of its own): what its
+   text, pictures and controls cover. */
+bool web_node_rect(web_page_t *pg, const web_node_t *n, int *x, int *y, int *w, int *h) {
+    web_layout_t *L = &pg->lay;
+    if (!n) return false;
+    for (int i = 0; i < L->nitems; i++) {
+        const web_item_t *it = &L->items[i];
+        if (it->kind == WI_BOX && it->node == n) {
+            *x = it->x; *y = it->fixed ? it->y + L->paint_sy : it->y; *w = it->w; *h = it->h;
+            return true;
+        }
+    }
+    int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
+    for (int i = 0; i < L->nitems; i++) {
+        const web_item_t *it = &L->items[i];
+        if (it->kind != WI_TEXT && it->kind != WI_IMAGE && it->kind != WI_IMGALT && it->kind != WI_CTRL &&
+            it->kind != WI_SVG && it->kind != WI_BOX) continue;
+        const web_node_t *e = item_elem(pg, it);
+        int d = 0;
+        while (e && e != n && d++ < 256) e = e->parent;
+        if (e != n) continue;
+        int iy = it->fixed ? it->y + L->paint_sy : it->y;
+        x0 = MIN(x0, it->x); y0 = MIN(y0, iy);
+        x1 = MAX(x1, it->x + it->w); y1 = MAX(y1, iy + it->h);
+    }
+    if (x0 == INT_MAX) return false;
+    *x = x0; *y = y0; *w = x1 - x0; *h = y1 - y0;
+    return true;
+}
