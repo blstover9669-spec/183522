@@ -500,6 +500,7 @@ static int subs_free_slot(tab_t *t) {
 
 static void page_clear(tab_t *t) {
     subs_cancel(t);
+    bjs_free(t);
     web_page_free_resources(&t->pg);
     for (int i = 0; i < t->ncss; i++) {
         free(t->css[i].url);
@@ -521,6 +522,7 @@ static void page_clear(tab_t *t) {
     t->hl_cur = -1;
     t->focus_ctrl = -1;
     t->hover_link = -1;
+    t->press_ctl = -1;
     t->refresh[0] = 0;
     t->frag[0] = 0;
     t->gen++;
@@ -545,10 +547,18 @@ static int css_add(tab_t *t, const char *url, const char *text, int depth, const
     return t->ncss++;
 }
 
+static void css_imports(tab_t *t, int i, const char *base);
+
 static void css_parsed(tab_t *t, int i, const char *text, size_t len, const char *base) {
     web_sheet_t *sh = web_css_parse(text, len, 1);
     t->css[i].sheet = sh;
     t->css[i].state = 2;
+    css_imports(t, i, base);
+}
+
+/* the @imports of sheet i join the list (right before it in the cascade) */
+static void css_imports(tab_t *t, int i, const char *base) {
+    web_sheet_t *sh = t->css[i].sheet;
     if (!sh || t->css[i].depth >= 3) return;
     int n = web_css_import_count(sh);
     for (int k = 0; k < n && k < 16; k++) {
@@ -731,6 +741,7 @@ static int key_cmp_idx(const void *a, const void *b) {
 
 void tab_restyle(tab_t *t) {
     if (!t->pg.doc) return;
+    bjs_sync(t);
     int order[96], n = 0;
     rect_t vv = browser_view(t->b);
     for (int i = 0; i < t->ncss && n < 96; i++)
@@ -763,6 +774,7 @@ void tab_relayout(tab_t *t) {
     if (!t->styled || !t->pg.doc) return;
     rect_t v = browser_view(t->b);
     web_layout(&t->pg, v.w, v.h);
+    bjs_styled(t);
     if (t->frag[0]) {
         int y = web_anchor_y(&t->pg, t->frag);
         if (y >= 0) t->sy = y;
@@ -853,7 +865,9 @@ void tab_tick(tab_t *t) {
         strlcpy(url, t->refresh, sizeof url);
         t->refresh[0] = 0;
         tab_go(t, url, NAV_REPLACE);
+        return;
     }
+    bjs_tick(t);          /* (last: a script may replace the page) */
 }
 
 /* ---- committing a page --------------------------------------------------------------------- */
@@ -909,7 +923,9 @@ static void show_html(tab_t *t, const char *url, char *body, uint32_t len, const
     t->srclen = len;
     int cs = internal ? WEB_CS_1252 : web_detect_charset(body, len, ctype);
     /* a gigantic document would take far too long to lay out: show its start */
-    t->pg.doc = web_parse_html(body, len > (8u << 20) ? (8u << 20) : len, cs);
+    t->pg.doc = web_parse_html_ex(body, len > (8u << 20) ? (8u << 20) : len, cs,
+                                  bdata_js_on && !internal ? WEB_PARSE_SCRIPTS : 0);
+    if (t->hpos >= 0 && t->hpos < t->nhist) t->hist[t->hpos].doc_gen = t->gen;
     t->pg.zoom = t->zoom;
     if (!t->pg.doc) {
         t->title[0] = 0;
@@ -938,6 +954,7 @@ static void show_html(tab_t *t, const char *url, char *body, uint32_t len, const
             t->refresh_at = sys_uptime_ms() + 1500;
         }
     }
+    bjs_page(t, cs);      /* the page's scripts (if it has any and they are on) */
     css_gather(t, t->pg.doc->root, 0);
     pump(t);
     if (!css_pending(t)) tab_restyle(t);
@@ -1392,7 +1409,18 @@ static bool same_doc(const char *a, const char *b) {
     return la == lb && !strncmp(a, b, la);
 }
 
+static void tab_follow(tab_t *t, int link, bool new_tab);
+
 void tab_follow_link(tab_t *t, int link, bool new_tab) {
+    if (link < 0 || link >= t->pg.nlinks) return;
+    /* the page's click handlers first: they may do something else (and stop the link) */
+    if (!new_tab && t->js && bjs_link(t, link)) return;
+    tab_follow(t, link, new_tab);
+}
+
+void tab_follow_link_now(tab_t *t, int link) { tab_follow(t, link, false); }
+
+static void tab_follow(tab_t *t, int link, bool new_tab) {
     if (link < 0 || link >= t->pg.nlinks) return;
     const char *href = t->pg.links[link].href;
     while (*href == ' ' || *href == '\t' || *href == '\n') href++;
@@ -1423,19 +1451,12 @@ void tab_follow_link(tab_t *t, int link, bool new_tab) {
         /* a new history entry without reloading */
         char keep[B_URL_MAX];
         strlcpy(keep, abs, sizeof keep);
-        hist_free_from(t, t->hpos + 1);
-        hent_t *nh = realloc(t->hist, sizeof *nh * (size_t)(t->nhist + 1));
-        if (nh) {
-            t->hist = nh;
-            memset(&t->hist[t->nhist], 0, sizeof *nh);
-            t->hist[t->nhist].url = dupstr(keep);
-            t->hpos = t->nhist++;
-        }
-        strlcpy(t->url, keep, sizeof t->url);
+        char old[B_URL_MAX];
+        strlcpy(old, t->url, sizeof old);
+        tab_push_url(t, keep, false);
         tab_scroll_to(t, 0, y >= 0 ? y : 0);
-        browser_set_address(t->b, NULL);
         browser_page_changed(t);
-        browser_tab_changed(t);
+        if (t->js && strcmp(old, keep)) bjs_popstate(t, old);
         return;
     }
     tab_go(t, abs, NAV_NEW);
@@ -1461,15 +1482,20 @@ static void add_pair(char **buf, size_t *len, size_t *cap, const char *name, con
 void tab_submit(tab_t *t, int ctl) {
     if (ctl < 0 || ctl >= t->pg.nctrls) return;
     web_ctrl_t *from = &t->pg.ctrls[ctl];
-    web_node_t *form = from->form;
+    if (!from->form) return;
+    if (from->type == C_SUBMIT || from->type == C_IMAGE) { tab_submit_form(t, from->form, ctl); return; }
+    /* implicit submission (Enter in a text field): the form's first submit button */
+    int sub = -1;
+    for (int i = 0; i < t->pg.nctrls && sub < 0; i++)
+        if (t->pg.ctrls[i].form == from->form && (t->pg.ctrls[i].type == C_SUBMIT || t->pg.ctrls[i].type == C_IMAGE)) sub = i;
+    tab_submit_form(t, from->form, sub);
+}
+
+/* submit a form; submitter = the control index of the button that did (or -1) */
+void tab_submit_form(tab_t *t, web_node_t *form, int sub) {
     if (!form) return;
-    web_ctrl_t *submitter = (from->type == C_SUBMIT || from->type == C_IMAGE) ? from : NULL;
-    if (!submitter)   /* implicit submission (Enter in a text field): the form's first submit button */
-        for (int i = 0; i < t->pg.nctrls; i++)
-            if (t->pg.ctrls[i].form == form && (t->pg.ctrls[i].type == C_SUBMIT || t->pg.ctrls[i].type == C_IMAGE)) {
-                submitter = &t->pg.ctrls[i];
-                break;
-            }
+    web_ctrl_t *submitter = sub >= 0 && sub < t->pg.nctrls ? &t->pg.ctrls[sub] : NULL;
+    if (submitter && submitter->type != C_SUBMIT && submitter->type != C_IMAGE) submitter = NULL;
     char *data = calloc(1, 1024);
     size_t len = 0, cap = 1024;
     if (!data) return;
@@ -1525,3 +1551,99 @@ void tab_submit(tab_t *t, int ctl) {
     }
     free(data);
 }
+
+/* ---- for the page's scripts (browser_js.c) ------------------------------------------------- */
+/* a history entry of the page shown (pushState / replaceState / a #fragment): no loading */
+void tab_push_url(tab_t *t, const char *url_in, bool replace) {
+    char url[B_URL_MAX];
+    strlcpy(url, url_in, sizeof url);
+    if (replace && t->nhist && t->hpos < t->nhist) {
+        free(t->hist[t->hpos].url);
+        t->hist[t->hpos].url = dupstr(url);
+        t->hist[t->hpos].doc_gen = t->gen;
+    } else {
+        if (t->nhist && t->hpos < t->nhist) { t->hist[t->hpos].sx = t->sx; t->hist[t->hpos].sy = t->sy; }
+        hist_free_from(t, t->hpos + 1);
+        if (t->nhist >= 100) {
+            free(t->hist[0].url); free(t->hist[0].post);
+            memmove(t->hist, t->hist + 1, sizeof *t->hist * (size_t)(t->nhist - 1));
+            t->nhist--;
+            if (t->hpos > 0) t->hpos--;
+        }
+        hent_t *nh = realloc(t->hist, sizeof *nh * (size_t)(t->nhist + 1));
+        if (nh) {
+            t->hist = nh;
+            memset(&t->hist[t->nhist], 0, sizeof *nh);
+            t->hist[t->nhist].url = dupstr(url);
+            t->hist[t->nhist].doc_gen = t->gen;
+            t->hpos = t->nhist++;
+        }
+    }
+    strlcpy(t->url, url, sizeof t->url);
+    browser_set_address(t->b, NULL);
+    browser_tab_changed(t);
+    if (bdata_history_on && strncmp(url, "about:", 6) && strncasecmp(url, "file:", 5) && !replace) {
+        char t1252[160];
+        strlcpy(t1252, t->pg.doc && t->pg.doc->title[0] ? t->pg.doc->title : t->title, sizeof t1252);
+        bdata_history_add(url, t1252);
+    }
+}
+
+/* back / forward: an entry of the page shown is a popstate for its scripts, others load */
+void tab_history_go(tab_t *t, int delta) {
+    int to = t->hpos + delta;
+    if (delta == 0 || to < 0 || to >= t->nhist) return;
+    t->hist[t->hpos].sx = t->sx;
+    t->hist[t->hpos].sy = t->sy;
+    if (t->js && t->hist[to].doc_gen == t->gen && t->hist[t->hpos].doc_gen == t->gen && !t->req) {
+        char old[B_URL_MAX];
+        strlcpy(old, t->url, sizeof old);
+        t->hpos = to;
+        strlcpy(t->url, t->hist[to].url, sizeof t->url);
+        browser_set_address(t->b, NULL);
+        browser_tab_changed(t);
+        bjs_popstate(t, old);
+        return;
+    }
+    t->hpos = to;
+    tab_go(t, t->hist[to].url, NAV_HIST);
+    browser_set_address(t->b, t->hist[to].url);
+}
+
+/* scripts added, removed or changed <style> / <link> elements: the sheets again (ones
+   already loaded are kept) */
+void tab_css_reload(tab_t *t) {
+    if (!t->pg.doc) return;
+    css_ent_t *old = t->css;
+    int nold = t->ncss;
+    t->css = NULL;
+    t->ncss = t->csscap = 0;
+    css_gather(t, t->pg.doc->root, 0);
+    for (int i = 0; i < t->ncss; i++) {          /* (imports of reused sheets join the list) */
+        if (!t->css[i].url || t->css[i].state != 0) continue;
+        for (int k = 0; k < nold; k++)
+            if (old[k].url && old[k].state == 2 && old[k].sheet && !strcmp(old[k].url, t->css[i].url)) {
+                t->css[i].sheet = old[k].sheet;
+                t->css[i].state = 2;
+                old[k].sheet = NULL;
+                char base[B_URL_MAX];
+                strlcpy(base, t->css[i].url, sizeof base);
+                css_imports(t, i, base);      /* (may move t->css) */
+                break;
+            }
+    }
+    for (int k = 0; k < nold; k++) {
+        free(old[k].url);
+        free(old[k].text);
+        free(old[k].media);
+        web_css_free(old[k].sheet);
+    }
+    free(old);
+    /* requests for sheets of the old list belong to the old indexes: start again */
+    for (int i = 0; i < B_MAX_SUBS; i++)
+        if (t->subs[i] && t->subs[i]->kind == SUB_CSS) { http_free(t->subs[i]->req); free(t->subs[i]); t->subs[i] = NULL; }
+    for (int i = 0; i < t->ncss; i++) if (t->css[i].state == 1) t->css[i].state = 0;
+    pump(t);
+}
+
+void tab_load_resources(tab_t *t) { pump(t); }

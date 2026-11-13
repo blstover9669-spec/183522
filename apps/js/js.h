@@ -92,6 +92,7 @@ int  js_eval_task(JSContext *ctx, const char *utf8, size_t len, const char *name
 int  js_call_task(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const JSValue *argv);
 int  js_resume(JSContext *ctx);
 bool js_busy(JSContext *ctx);              /* a task is suspended (call js_resume)      */
+JSValue js_task_value(JSContext *ctx);     /* what the last finished task returned      */
 void js_kill(JSContext *ctx);              /* stop the suspended task (runaway script)  */
 uint32_t js_task_ms(JSContext *ctx);       /* how long the current task has been running */
 /* Natives that wait for the user (alert / confirm / prompt) without blocking the event

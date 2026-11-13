@@ -303,6 +303,7 @@ struct JSContext {
     JSJob *jobs, *jobs_tail, *cur_job;
     bool drive_pending, no_suspend, task_threw, gen_raw, gen_done, gen_awaiting;
     bool can_wait;                /* the running native was called straight from bytecode */
+    bool no_suspend_saved;        /* js_call / js_construct from the host */
     bool host_wait;               /* a native (alert ...) is waiting for the host: js_resume_with */
     bool host_push;               /* push host_val when the task resumes */
     JSValue host_val;

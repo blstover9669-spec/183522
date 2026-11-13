@@ -322,16 +322,45 @@ JSValue js_construct_internal(JSContext *ctx, JSValue fn, int argc, JSValue *arg
     return js_call_internal(ctx, fn, JS_UNDEFINED, argc, argv, nt, FR_CONSTRUCT);
 }
 
+static void reset_vm(JSContext *ctx);
+
+/* A call from the host (not from a running script) cannot suspend: it runs to the end
+   or is stopped after nested_limit_ms like code inside a native call. */
+static bool host_call_enter(JSContext *ctx) {
+    if (ctx->run_depth) return false;
+    ctx->no_suspend_saved = ctx->no_suspend;
+    ctx->no_suspend = true;
+    ctx->slice_start_d = mono(ctx);
+    ctx->budget = BUDGET;
+    return true;
+}
+
+static JSValue host_call_leave(JSContext *ctx, bool top, JSValue r) {
+    if (!top) return r;
+    ctx->no_suspend = ctx->no_suspend_saved;
+    if (ctx->killed) {
+        if (ctx->host.log) ctx->host.log(ctx->host.ud, JS_LOG_ERROR, "Script stopped: it ran too long (page not responding)");
+        reset_vm(ctx);
+        ctx->killed = false;
+        return JS_EXCEPTION;
+    }
+    return r;
+}
+
 JSValue js_call(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const JSValue *argv) {
     JS_GC_ENTER(ctx);
+    bool top = host_call_enter(ctx);
     JSValue r = js_call_internal(ctx, fn, this_val, argc, (JSValue *)argv, JS_UNDEFINED, 0);
+    r = host_call_leave(ctx, top, r);
     JS_GC_LEAVE(ctx);
     return r;
 }
 
 JSValue js_construct(JSContext *ctx, JSValue fn, int argc, const JSValue *argv) {
     JS_GC_ENTER(ctx);
+    bool top = host_call_enter(ctx);
     JSValue r = js_construct_internal(ctx, fn, argc, (JSValue *)argv, fn);
+    r = host_call_leave(ctx, top, r);
     JS_GC_LEAVE(ctx);
     return r;
 }
@@ -2105,7 +2134,7 @@ static void complete_job(JSContext *ctx, JSJob *j, JSValue r, bool threw) {
     switch (j->kind) {
     case JOB_TASK: case JOB_SCRIPT:
         if (threw) { ctx->task_threw = true; if (!ctx->killed) report(ctx, r, "Uncaught "); }
-        else if (j->kind == JOB_SCRIPT) ctx->resume_val = r;
+        else ctx->resume_val = r;
         break;
     case JOB_REACTION:
         if (j->fn == ctx->async_ok || j->fn == ctx->async_fail) break;
@@ -2187,6 +2216,7 @@ int js_eval_task(JSContext *ctx, const char *utf8, size_t len, const char *name,
     if (ctx->drive_pending || ctx->cur_job) return JS_SUSPENDED;
     JS_GC_ENTER(ctx);
     ctx->task_threw = false;
+    ctx->resume_val = JS_UNDEFINED;
     ctx->task_t0 = mono(ctx);
     JSValue src = js_str_utf8(ctx, utf8, len);
     JSValue nm = js_str_utf8(ctx, name ? name : "script", strlen(name ? name : "script"));
@@ -2213,6 +2243,7 @@ int js_call_task(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const J
     if (ctx->drive_pending || ctx->cur_job) return JS_SUSPENDED;
     JS_GC_ENTER(ctx);
     ctx->task_threw = false;
+    ctx->resume_val = JS_UNDEFINED;
     ctx->task_t0 = mono(ctx);
     JSJob *j = job_new(ctx, JOB_TASK, fn);
     if (!j) { JS_GC_LEAVE(ctx); return JS_THROWN; }
@@ -2241,6 +2272,8 @@ int js_resume(JSContext *ctx) {
 }
 
 bool js_busy(JSContext *ctx) { return ctx->drive_pending; }
+
+JSValue js_task_value(JSContext *ctx) { return ctx->task_threw ? JS_UNDEFINED : ctx->resume_val; }
 
 bool js_can_wait(JSContext *ctx) { return ctx->can_wait; }
 

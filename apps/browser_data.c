@@ -2,7 +2,7 @@
  * browser_data.c - the Web Browser's settings, history and bookmarks, and
  * the pages it makes itself (home page, history, error pages, page source).
  *
- *   /system/config/browser.cfg      history=1|0
+ *   /system/config/browser.cfg      history=1|0, javascript=1|0
  *   /home/user/.browser/history     time<TAB>url<TAB>title per line, oldest first
  *   /home/user/.browser/bookmarks   url<TAB>title per line
  *   /home/user/.browser/downloads   id state time got total name path url reason (tabs)
@@ -26,6 +26,7 @@ int  safetyshield_file_risk(const char *path) __attribute__((weak));
 #define DL_MAX    100
 
 bool        bdata_history_on = true;
+bool        bdata_js_on = true;
 bookmark_t *bdata_bm;
 int         bdata_nbm;
 hitem_t    *bdata_hist;
@@ -217,8 +218,9 @@ bool bdata_is_dl_page(const char *url) {
 
 void bdata_save_settings(void) {
     if (!vfs_is_dir("/system/config")) vfs_mkdirs("/system/config");
-    const char *s = bdata_history_on ? "history=1\n" : "history=0\n";
-    vfs_write_file(CFG_PATH, s, strlen(s));
+    char cfg[64];
+    snprintf(cfg, sizeof cfg, "history=%d\njavascript=%d\n", bdata_history_on ? 1 : 0, bdata_js_on ? 1 : 0);
+    vfs_write_file(CFG_PATH, cfg, strlen(cfg));
 }
 
 /* split "a\tb\tc" lines; calls fn with up to 3 fields */
@@ -259,6 +261,7 @@ void bdata_load(void) {
     char *cfg = vfs_read_file(CFG_PATH, &sz);
     if (cfg) {
         if (strstr(cfg, "history=0")) bdata_history_on = false;
+        if (strstr(cfg, "javascript=0")) bdata_js_on = false;
         free(cfg);
     }
     if (bdata_hist) {

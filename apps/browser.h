@@ -8,6 +8,10 @@
  *                   forms, downloads, error and certificate warning pages
  *   browser_data.c  browser settings, history, bookmarks and the built-in
  *                   pages (home, history)
+ *   browser_js.c    JavaScript on pages (NovaJS, apps/js): the DOM, events,
+ *                   timers, fetch, storage; page input (also for other apps
+ *                   that show pages through this pipeline)
+ *   browser_jsrt.js the JavaScript half of it (built into the kernel)
  */
 #ifndef BROWSER_H
 #define BROWSER_H
@@ -35,6 +39,7 @@ typedef struct hent {
     char *post;              /* form data of a POST (re-sent on reload)  */
     uint32_t postlen;
     int sx, sy;              /* scroll position when we left it          */
+    uint32_t doc_gen;        /* the page (tab gen) it belongs to: scripts' history entries */
 } hent_t;
 
 typedef struct css_ent {
@@ -109,6 +114,8 @@ typedef struct tab {
     int *hl_item, *hl_off, *hl_len;
     int nhl, hlcap, hl_cur;
     int zoom;
+    struct bjs *js;          /* the page's scripts (browser_js.c), NULL = none */
+    int press_ctl;           /* control the mouse button went down on      */
 } tab_t;
 
 typedef struct browser {
@@ -126,6 +133,9 @@ typedef struct browser {
     char status[300];
     window_t *settings;
     widget_t *set_hist, *set_cookies_lbl, *set_search_lbl;
+    /* another app hosting the page pipeline (HTML Viewer): the page area it shows
+       pages in (client coordinates, without scrollbars); NULL = the browser's own */
+    rect_t (*host_view)(struct browser *b);
 } browser_t;
 
 /* ---- shared state (browser_data.c) ---- */
@@ -133,6 +143,7 @@ typedef struct bookmark { char url[B_URL_MAX]; char title[96]; } bookmark_t;
 typedef struct hitem { char url[B_URL_MAX]; char title[96]; uint32_t time; } hitem_t;
 
 extern bool        bdata_history_on;
+extern bool        bdata_js_on;      /* run JavaScript on pages */
 extern bookmark_t *bdata_bm;
 extern int         bdata_nbm;
 extern hitem_t    *bdata_hist;
@@ -199,6 +210,30 @@ void browser_dl_retry(int id);
 void browser_dl_start(tab_t *t, const char *url, const char *name);
 /* "about:..." pages and their actions */
 void tab_show_internal(tab_t *t, const char *url, char *html);
+/* for browser_js.c: a same-document history entry (pushState, #fragment), going back /
+   forward (same-document entries: popstate, no reload), stylesheets again after
+   scripts changed <style> / <link>, loading new pictures, submitting a form */
+void tab_push_url(tab_t *t, const char *url, bool replace);
+void tab_history_go(tab_t *t, int delta);
+void tab_css_reload(tab_t *t);
+void tab_load_resources(tab_t *t);
+void tab_submit_form(tab_t *t, web_node_t *form, int submitter);
+void tab_follow_link_now(tab_t *t, int link);
+
+/* ---- browser_js.c ---- */
+/* Page input for the app showing the page: x, y = the pointer in document coordinates
+   (mouse events), ev->x / ev->y are not used. Runs the page's scripts' handlers and what
+   form controls do (focus, typing, check boxes, lists, buttons); links stay with the
+   app (tab_follow_link). true = the page used the event (no scrolling for keys). */
+bool tab_page_input(tab_t *t, const event_t *ev, int x, int y);
+/* the page's scripts (browser_net.c calls these) */
+void bjs_page(tab_t *t, int charset);       /* a new HTML page was parsed: start its scripts */
+void bjs_free(tab_t *t);                    /* the page goes away                          */
+void bjs_tick(tab_t *t);                    /* timers, loading, events (from tab_tick)     */
+bool bjs_link(tab_t *t, int link);          /* a link the user clicked: true = scripts have it */
+void bjs_styled(tab_t *t);                  /* the page was styled and laid out again      */
+void bjs_sync(tab_t *t);                    /* before styling: the page follows the document */
+void bjs_popstate(tab_t *t, const char *old_url);   /* back / forward inside the page        */
 
 /* ---- browser.c ---- */
 tab_t *browser_new_tab(browser_t *b, const char *url, bool focus);

@@ -38,11 +38,10 @@ LDFLAGS := -m32 -nostdlib -static -no-pie -Wl,--build-id=none -Wl,-T,linker.ld -
 KERNEL_C   := $(shell find kernel -name '*.c' | sort)
 KERNEL_ASM := $(shell find boot kernel -name '*.asm' | sort)
 APP_C      := $(sort $(wildcard apps/*.c) $(wildcard apps/*/*.c))
-# NovaJS (apps/js) is built and tested on the host (make jstest) until the browser uses it
-APP_C      := $(filter-out apps/js/%,$(APP_C))
 
 OBJS := $(patsubst %.asm,$(BUILD)/obj/%.asm.o,$(KERNEL_ASM)) \
-        $(patsubst %.c,$(BUILD)/obj/%.o,$(KERNEL_C) $(APP_C))
+        $(patsubst %.c,$(BUILD)/obj/%.o,$(KERNEL_C) $(APP_C)) \
+        $(BUILD)/obj/gen/browser_jsrt.o
 
 KERNEL := $(BUILD)/kernel.elf
 ISO    := $(BUILD)/$(ISO_NAME)
@@ -58,6 +57,17 @@ kernel: $(KERNEL)
 iso: $(ISO)
 
 $(BUILD)/obj/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC    $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+# The JavaScript half of the browser's script support (apps/browser_jsrt.js) as a C string
+$(BUILD)/gen/browser_jsrt.c: apps/browser_jsrt.js
+	@mkdir -p $(dir $@)
+	@echo "  GEN   $@"
+	@python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('const char browser_jsrt[] = {' + ','.join(str(b) for b in d) + ',0};'); print('const unsigned browser_jsrt_len = %d;' % len(d))" $< > $@
+
+$(BUILD)/obj/gen/browser_jsrt.o: $(BUILD)/gen/browser_jsrt.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
 	@$(CC) $(CFLAGS) -c $< -o $@

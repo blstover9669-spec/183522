@@ -69,6 +69,8 @@ static int tag_lookup(const char *s) {
     return T_UNKNOWN;
 }
 
+int web_tag_lookup(const char *name) { return name ? tag_lookup(name) : T_UNKNOWN; }
+
 /* ---- charsets ----------------------------------------------------------------- */
 static const uint16_t cp80[32] = {
     0x20AC, 0x2192, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,

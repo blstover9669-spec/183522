@@ -43,6 +43,7 @@ static rect_t content_rect(browser_t *b) {
 }
 
 rect_t browser_view(browser_t *b) {
+    if (b->host_view) return b->host_view(b);
     rect_t r = content_rect(b);
     r.w -= B_SB;
     tab_t *t = cur(b);
@@ -619,178 +620,8 @@ static void scroll_into_view(browser_t *b, int y, int h) {
     else if (y + h > t->sy + v.h - 20) scroll_to(b, t->sx, y - v.h / 3);
 }
 
-/* ---- form controls ------------------------------------------------------------------------ */
-static void select_pick(int item, void *ctx) {
-    browser_t *b = ctx;
-    tab_t *t = cur(b);
-    if (!t || t->focus_ctrl < 0 || t->focus_ctrl >= t->pg.nctrls) return;
-    web_ctrl_t *c = &t->pg.ctrls[t->focus_ctrl];
-    if (c->type == C_SELECT && item >= 0 && item < c->nopts) { c->sel = item; page_dirty(b); }
-}
-
-static void ctrl_reset(tab_t *t, web_node_t *form) {
-    for (int i = 0; i < t->pg.nctrls; i++) {
-        web_ctrl_t *c = &t->pg.ctrls[i];
-        if (c->form != form) continue;
-        if (c->type == C_CHECKBOX || c->type == C_RADIO) c->checked = c->init_checked;
-        else if (c->type == C_SELECT) c->sel = c->init_sel;
-        else if (c->type == C_TEXT || c->type == C_PASSWORD || c->type == C_TEXTAREA) {
-            web_ctrl_set_value(c, c->init_value ? c->init_value : "", -1);
-            c->caret = c->vlen;
-        }
-    }
-}
-
+/* ---- form controls: the page pipeline does them (tab_page_input, browser_js.c) ------------- */
 static bool is_text(const web_ctrl_t *c) { return c->type == C_TEXT || c->type == C_PASSWORD || c->type == C_TEXTAREA; }
-
-static void ctrl_click(browser_t *b, tab_t *t, int idx, int dx, int dy) {
-    web_ctrl_t *c = &t->pg.ctrls[idx];
-    if (c->disabled) return;
-    t->focus_ctrl = idx;
-    b->caret_on = true;
-    b->caret_t = sys_uptime_ms();
-    switch (c->type) {
-    case C_TEXT: case C_PASSWORD: {
-        const font_t *f = c->font ? c->font : FONT_UI;
-        if (c->type == C_PASSWORD) {
-            int cw = font_char_width(f, 0x95);
-            c->caret = cw ? (dx - c->x - 5 + c->scroll + cw / 2) / cw : c->vlen;
-        } else c->caret = font_hit_test(f, c->value, dx - c->x - 5 + c->scroll);
-        c->caret = CLAMP(c->caret, 0, c->vlen);
-        break;
-    }
-    case C_TEXTAREA: {
-        const font_t *f = c->font ? c->font : FONT_MONO;
-        int line = (dy - c->y - 4) / MAX(1, font_height(f));
-        const char *p = c->value;
-        for (int l = 0; l < line && strchr(p, '\n'); l++) p = strchr(p, '\n') + 1;
-        int len = (int)strcspn(p, "\n");
-        char tmp[1024];
-        int k = MIN(len, (int)sizeof tmp - 1);
-        memcpy(tmp, p, (size_t)k);
-        tmp[k] = 0;
-        c->caret = (int)(p - c->value) + font_hit_test(f, tmp, dx - c->x - 5);
-        break;
-    }
-    case C_CHECKBOX:
-        c->checked = !c->checked;
-        break;
-    case C_RADIO:
-        for (int i = 0; i < t->pg.nctrls; i++) {
-            web_ctrl_t *o = &t->pg.ctrls[i];
-            if (o != c && o->type == C_RADIO && o->form == c->form && o->name && c->name && !strcmp(o->name, c->name)) o->checked = false;
-        }
-        c->checked = true;
-        break;
-    case C_SELECT: {
-        if (!c->nopts) break;
-        size_t cap = 64;
-        for (int i = 0; i < c->nopts; i++) cap += strlen(c->opt_text[i]) + 4;
-        char *items = malloc(cap);
-        if (!items) break;
-        items[0] = 0;
-        char ui[200];
-        for (int i = 0; i < c->nopts; i++) {
-            web_1252_to_ui(c->opt_text[i], ui, sizeof ui);
-            for (char *p = ui; *p; p++) if (*p == '|') *p = '/';
-            if (i) strcat(items, "|");
-            if (!ui[0] || ui[0] == '-' || ui[0] == '!') strcat(items, " ");
-            strcat(items, ui);
-        }
-        rect_t v = browser_view(b);
-        ui_popup_menu(b->win, v.x + c->x - t->sx, v.y + c->y - t->sy + c->h, items, select_pick, b);
-        free(items);
-        break;
-    }
-    case C_SUBMIT: case C_IMAGE:
-        tab_submit(t, idx);
-        return;
-    case C_RESET:
-        ctrl_reset(t, c->form);
-        break;
-    default:
-        break;
-    }
-    page_dirty(b);
-}
-
-static void ctrl_insert(web_ctrl_t *c, const char *s, int n) {
-    if (c->readonly) return;
-    if (c->maxlen > 0 && c->vlen + n > c->maxlen) n = c->maxlen - c->vlen;
-    if (n <= 0) return;
-    char *nv = malloc((size_t)c->vlen + (size_t)n + 1);
-    if (!nv) return;
-    memcpy(nv, c->value, (size_t)c->caret);
-    memcpy(nv + c->caret, s, (size_t)n);
-    memcpy(nv + c->caret + n, c->value + c->caret, (size_t)(c->vlen - c->caret) + 1);
-    int caret = c->caret + n;
-    web_ctrl_set_value(c, nv, c->vlen + n);
-    c->caret = caret;
-    free(nv);
-}
-
-static bool ctrl_key(browser_t *b, tab_t *t, const event_t *ev) {
-    web_ctrl_t *c = &t->pg.ctrls[t->focus_ctrl];
-    b->caret_on = true;
-    b->caret_t = sys_uptime_ms();
-    if (ev->type == EV_CHAR) {
-        if (!is_text(c)) return false;
-        char ch = (char)ev->ch;
-        ctrl_insert(c, &ch, 1);
-        page_dirty(b);
-        return true;
-    }
-    bool ctrl = ev->mods & MOD_CTRL;
-    switch (ev->key) {
-    case KEY_ESCAPE: t->focus_ctrl = -1; page_dirty(b); return true;
-    case KEY_SPACE:
-        if (c->type == C_CHECKBOX || c->type == C_RADIO || c->type == C_SUBMIT || c->type == C_RESET || c->type == C_SELECT) {
-            ctrl_click(b, t, t->focus_ctrl, c->x + 2, c->y + 2);
-            return true;
-        }
-        return false;
-    case KEY_ENTER:
-        if (c->type == C_TEXTAREA) { ctrl_insert(c, "\n", 1); page_dirty(b); return true; }
-        if (c->type == C_TEXT || c->type == C_PASSWORD || c->type == C_SUBMIT || c->type == C_IMAGE ||
-            c->type == C_CHECKBOX || c->type == C_RADIO) { tab_submit(t, t->focus_ctrl); return true; }
-        return false;
-    default: break;
-    }
-    if (!is_text(c)) return false;
-    switch (ev->key) {
-    case KEY_LEFT: if (c->caret > 0) c->caret--; break;
-    case KEY_RIGHT: if (c->caret < c->vlen) c->caret++; break;
-    case KEY_HOME: c->caret = 0; break;
-    case KEY_END: c->caret = c->vlen; break;
-    case KEY_BACKSPACE:
-        if (c->caret > 0 && !c->readonly) {
-            memmove(c->value + c->caret - 1, c->value + c->caret, (size_t)(c->vlen - c->caret) + 1);
-            c->vlen--;
-            c->caret--;
-        }
-        break;
-    case KEY_DELETE:
-        if (c->caret < c->vlen && !c->readonly) {
-            memmove(c->value + c->caret, c->value + c->caret + 1, (size_t)(c->vlen - c->caret));
-            c->vlen--;
-        }
-        break;
-    default:
-        if (ctrl && ev->key == 'v') {
-            const char *clip = clipboard_get();
-            char buf[1024];
-            size_t k = 0;
-            for (; *clip && k < sizeof buf - 1; clip++)
-                if (*clip != '\r' && (*clip != '\n' || c->type == C_TEXTAREA)) buf[k++] = *clip;
-            ctrl_insert(c, buf, (int)k);
-            break;
-        }
-        if (ctrl && ev->key == 'a') { c->caret = c->vlen; break; }
-        return false;
-    }
-    page_dirty(b);
-    return true;
-}
 
 /* ---- find in page ------------------------------------------------------------------------ */
 static int lowc(int c) {
@@ -961,11 +792,17 @@ static void clear_search_cb(widget_t *w, void *ctx) {
     search_label(ctx);
 }
 
+static void set_js_cb(widget_t *w, void *ctx) {
+    (void)ctx;
+    bdata_js_on = ui_get_value(w) != 0;
+    bdata_save_settings();
+}
+
 static void settings_close_cb(widget_t *w, void *ctx) { (void)ctx; win_close(ui_window(w)); }
 
 static void open_settings(browser_t *b) {
     if (b->settings && win_is_valid(b->settings)) { win_focus(b->settings); return; }
-    window_t *w = win_create_dialog(b->win, "Browser settings", 400, 356, 0);
+    window_t *w = win_create_dialog(b->win, "Browser settings", 400, 424, 0);
     if (!w) return;
     b->settings = w;
     widget_t *l = ui_label(w, 18, 14, 360, 22, "History");
@@ -982,7 +819,10 @@ static void open_settings(browser_t *b) {
     b->set_search_lbl = ui_label(w, 18, 240, 360, 20, "");
     search_label(b);
     ui_button(w, 18, 266, 160, 30, "Clear search index", clear_search_cb, b);
-    widget_t *c = ui_button(w, 300, 314, 84, 30, "Close", settings_close_cb, NULL);
+    l = ui_label(w, 18, 314, 360, 22, "JavaScript");
+    ui_set_font(l, FONT_UI_BOLD);
+    ui_checkbox(w, 18, 338, 360, 22, "Run JavaScript on web pages", bdata_js_on, set_js_cb, b);
+    widget_t *c = ui_button(w, 300, 382, 84, 30, "Close", settings_close_cb, NULL);
     ui_button_set_default(c, true);
 }
 
@@ -1072,22 +912,14 @@ static void lock_info(browser_t *b) {
 static void go_back(browser_t *b) {
     tab_t *t = cur(b);
     if (!t || t->hpos <= 0) return;
-    t->hist[t->hpos].sx = t->sx;
-    t->hist[t->hpos].sy = t->sy;
-    t->hpos--;
-    tab_go(t, t->hist[t->hpos].url, NAV_HIST);
-    browser_set_address(b, t->hist[t->hpos].url);
+    tab_history_go(t, -1);
     win_invalidate(b->win);
 }
 
 static void go_forward(browser_t *b) {
     tab_t *t = cur(b);
     if (!t || t->hpos + 1 >= t->nhist) return;
-    t->hist[t->hpos].sx = t->sx;
-    t->hist[t->hpos].sy = t->sy;
-    t->hpos++;
-    tab_go(t, t->hist[t->hpos].url, NAV_HIST);
-    browser_set_address(b, t->hist[t->hpos].url);
+    tab_history_go(t, 1);
     win_invalidate(b->win);
 }
 
@@ -1136,12 +968,7 @@ static void activate(browser_t *b, int hs, int button) {
 
 /* ---- page view input ---------------------------------------------------------------------- */
 static bool content_key(browser_t *b, tab_t *t, const event_t *ev) {
-    if (t->focus_ctrl >= 0 && t->focus_ctrl < t->pg.nctrls && !(ev->mods & MOD_ALT)) {
-        if (ctrl_key(b, t, ev)) return true;
-        if (ev->type == EV_CHAR) return false;
-        if (is_text(&t->pg.ctrls[t->focus_ctrl]) && !(ev->mods & MOD_CTRL) &&
-            (ev->key == KEY_UP || ev->key == KEY_DOWN || ev->key == KEY_SPACE)) return true;
-    }
+    if (tab_page_input(t, ev, 0, 0)) { page_dirty(b); return true; }
     if (ev->type != EV_KEY_DOWN || (ev->mods & (MOD_CTRL | MOD_ALT))) return false;
     rect_t v = browser_view(b);
     switch (ev->key) {
@@ -1168,6 +995,7 @@ static bool content_event(widget_t *w, const event_t *ev) {
     switch (ev->type) {
     case EV_MOUSE_WHEEL:
         if (ev->mods & MOD_CTRL) { zoom_step(b, ev->wheel < 0 ? 1 : -1); return true; }
+        if (rect_contains(v, ev->x, ev->y) && t->styled && tab_page_input(t, ev, ev->x - v.x + t->sx, ev->y - v.y + t->sy)) return true;
         if (ev->mods & MOD_SHIFT) scroll_to(b, t->sx + ev->wheel * 60, t->sy);
         else scroll_to(b, t->sx, t->sy + ev->wheel * 60);
         return true;
@@ -1196,9 +1024,7 @@ static bool content_event(widget_t *w, const event_t *ev) {
         int dx = ev->x - v.x + t->sx, dy = ev->y - v.y + t->sy;
         bv->press_link = -1;
         if (ev->button == MOUSE_LEFT) {
-            int c = web_hit_ctrl(&t->pg, dx, dy);
-            if (c >= 0) { ctrl_click(b, t, c, dx, dy); return true; }
-            if (t->focus_ctrl >= 0) { t->focus_ctrl = -1; page_dirty(b); }
+            if (tab_page_input(t, ev, dx, dy)) { page_dirty(b); return true; }   /* a form control */
             bv->press_link = web_hit_link(&t->pg, dx, dy);
         } else if (ev->button == MOUSE_MIDDLE) {
             int l = web_hit_link(&t->pg, dx, dy);
@@ -1208,6 +1034,8 @@ static bool content_event(widget_t *w, const event_t *ev) {
     }
     case EV_MOUSE_UP:
         if (b->drag) { b->drag = 0; page_dirty(b); return true; }
+        if (ev->button == MOUSE_LEFT && t->styled && rect_contains(v, ev->x, ev->y) &&
+            tab_page_input(t, ev, ev->x - v.x + t->sx, ev->y - v.y + t->sy)) { bv->press_link = -1; page_dirty(b); return true; }
         if (ev->button == MOUSE_LEFT && bv->press_link >= 0 && t->styled) {
             int dx = ev->x - v.x + t->sx, dy = ev->y - v.y + t->sy;
             int l = web_hit_link(&t->pg, dx, dy);
@@ -1246,6 +1074,7 @@ static bool content_event(widget_t *w, const event_t *ev) {
         int l = -1, cursor = CURSOR_ARROW;
         if (rect_contains(v, ev->x, ev->y) && t->styled) {
             int dx = ev->x - v.x + t->sx, dy = ev->y - v.y + t->sy;
+            tab_page_input(t, ev, dx, dy);                  /* (the page's scripts: mouse moves) */
             int c = web_hit_ctrl(&t->pg, dx, dy);
             if (c >= 0) cursor = is_text(&t->pg.ctrls[c]) ? CURSOR_IBEAM : CURSOR_ARROW;
             else {
@@ -1262,6 +1091,7 @@ static bool content_event(widget_t *w, const event_t *ev) {
         return true;
     }
     case EV_MOUSE_LEAVE:
+        tab_page_input(t, ev, 0, 0);
         if (t->hover_link >= 0) {
             t->hover_link = -1;
             page_dirty(b);
@@ -1270,6 +1100,12 @@ static bool content_event(widget_t *w, const event_t *ev) {
         return false;
     case EV_KEY_DOWN: case EV_CHAR:
         return content_key(b, t, ev);
+    case EV_KEY_UP:
+        tab_page_input(t, ev, 0, 0);
+        return false;
+    case EV_DOUBLE_CLICK:
+        if (rect_contains(v, ev->x, ev->y) && t->styled) tab_page_input(t, ev, ev->x - v.x + t->sx, ev->y - v.y + t->sy);
+        return true;
     default:
         return false;
     }
