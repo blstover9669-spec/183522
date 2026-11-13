@@ -47,6 +47,16 @@ As before, everything was tested in QEMU only, not yet on real VirtualBox.
   **Browser://Downloads** lists them (progress, Cancel, Retry, Show in
   folder) and works offline.
 
+## HTML, CSS, JS, C and C++
+* **HTML Viewer:** a new built-in app opens .html / .htm files saved on this
+  computer (their default app; the Web Browser stays in Open With): the page
+  with its stylesheets and pictures, links between local pages, Reload, Zoom,
+  Open in Web Browser and File > Open. Web links open in the Web Browser.
+* **File types:** CSS stylesheets, JavaScript files, C and C++ source files
+  open in Notepad; HTML, CSS, JS, C and C++ files have their own icons.
+* **Notepad code colours:** keywords, strings, comments, numbers and tags of
+  HTML, CSS, JavaScript, C and C++ files, in light and dark mode.
+
 ## Safety and saving
 * **SafetyShield:** scans every file every minute and every download right
   away, with seven risk levels (Safe to Severe), a list of scanned files and

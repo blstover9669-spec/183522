@@ -7,7 +7,7 @@ graphical desktop, written from scratch in C and assembly.
 
 NovaOS is a small 32-bit x86 operating system. Nothing in it comes from Linux,
 BSD or any other OS: the kernel, drivers, window manager, widget toolkit,
-font renderer, icons and all 33 apps are freestanding C and NASM written for
+font renderer, icons and all 34 apps are freestanding C and NASM written for
 this project. It boots from a CD image (via GRUB) straight into a desktop with
 windows, a Start menu, rounded "islands" along the bottom edge (Start button,
 running apps, an app rectangle, clock), background services and apps, and runs in
@@ -89,6 +89,8 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release bui
   context menus, message / input / file dialogs, notifications
 * File associations with user-changeable defaults, Open With and Properties
   dialogs
+* Supports HTML (the built-in **HTML Viewer**), CSS, JavaScript, C and C++
+  files: their own file icons and type names, and code colours in Notepad
 
 **System**
 
@@ -124,7 +126,7 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release bui
 
 ## The apps
 
-33 apps. The ten games are only inside **Games**; every other app is in the
+34 apps. The ten games are only inside **Games**; every other app is in the
 Start menu and on the desktop:
 
 | Category | App | What it does |
@@ -142,10 +144,11 @@ Start menu and on the desktop:
 | Accessories | **Calculator** | Standard and scientific calculator with memory |
 | Accessories | **Calendar** | Month calendar with notes for each day |
 | Accessories | **Clock** | Analog clock, stopwatch and countdown timer |
-| Accessories | **Notepad** | Plain text editor with find / replace, undo, zoom |
+| Accessories | **Notepad** | Text editor with find / replace, undo, zoom; code colours (keywords, strings, comments, numbers, tags) for HTML, CSS, JavaScript, C and C++ files |
 | Accessories | **Sticky Notes** | Coloured notes that stay on your desktop |
 | Accessories | **Typing Tutor** | Touch-typing practice with live WPM and accuracy |
 | Internet | **Web Browser** | Tabs, address bar (a web address, or a search with NovaOS Search - the browser's own search engine with its own crawler, index and ranking, Browser://Search), back / forward / reload / home, padlock and certificate warnings, bookmarks bar, history, downloads into Downloads (listed on Browser://Downloads, Ctrl+J), find in page, zoom, page source; HTML and CSS pages (flexbox, grid, positioning), PNG / JPEG / GIF / SVG pictures and forms (no JavaScript) |
+| Internet | **HTML Viewer** | Opens HTML files saved on this computer (.html, .htm - their default app): the page with its stylesheets and pictures, scrolling, links between local pages, Reload, Zoom in / out, Open in Web Browser, File > Open...; web links open in the Web Browser |
 | Graphics | **Paint** | Draw and edit pictures (BMP) |
 | Graphics | **Image Viewer** | View BMP (and PPM) pictures: zoom, fit, pan, folder browsing, slideshow |
 | Graphics | **Fractal Explorer** | Explore the Mandelbrot and Julia sets |
@@ -469,7 +472,7 @@ kernel/      arch (GDT/IDT/PIC/PIT/FPU), core (boot info, heap, log, panic, powe
              services (service manager, syslog, command registry, built-in
              daemons), shell (file associations, Open With / Properties / Run
              dialogs, pins, recent items)
-apps/        the 33 applications (each file registers itself with REGISTER_APP)
+apps/        the 34 applications (each file registers itself with REGISTER_APP)
 include/     public API (nova.h and nova/*.h) and the libc headers
 tools/       shot.py (headless QEMU test driver), wavcheck.py (notes in a WAV
              recording), collage.py (all-apps picture), genfont.py, gensyms.py
