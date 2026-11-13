@@ -607,6 +607,7 @@ static uint32_t add_const(FS *fs, JSValue v) {
     fs->cp[fs->ncp++] = v;
     if (fs->ncp * 2 > fs->cphsize) {
         uint32_t hs = fs->cphsize ? fs->cphsize * 2 : 64;
+        while (hs < fs->ncp * 2) hs *= 2;     /* (unique constants count too: they are rehashed) */
         uint32_t *h = calloc(hs, sizeof(uint32_t));
         if (h) {
             free(fs->cph);

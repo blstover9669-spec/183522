@@ -66,3 +66,12 @@ eq((0.000123).toExponential(1), '1.2e-4', 'toExponential');
 eq(Math.max(1, 5, 3), 5, 'max');
 eq([1, [2, [3, [4]]]].flat(Infinity).join(), '1,2,3,4', 'flat');
 print('basic done');
+/* a function with many nested functions (unique constants) and then many shared ones:
+   the compiler's constant table once hung on this (chatgpt.com) */
+(function () {
+  var src = 'var fs = [];';
+  for (var i = 0; i < 300; i++) src += 'fs.push(function () { return ' + i + '; });';
+  for (var j = 0; j < 300; j++) src += 'fs.push("s' + j + '");';
+  src += 'return fs.length + fs[299]() + fs[300].length;';
+  eq(new Function(src)(), 600 + 299 + 2, 'many nested functions and constants');
+})();
