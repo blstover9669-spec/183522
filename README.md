@@ -79,7 +79,9 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release bui
   with autocomplete
 * Desktop icons for apps and files, desktop context menus (Open / Open With
   / Rename / Delete / Properties, New Folder / New Text File, wallpaper, dark
-  mode), boot splash, first-run Welcome tour
+  mode), boot splash, a start screen at every start (the time and date slide
+  in, the account name and picture, a password if one is set), a Welcome tour
+  once the desktop has opened
 * Light and dark themes, accent colours, procedural wallpapers
 * Hand-drawn icon library (apps, folders, file types, devices, status icons)
   tuned for 16, 32 and 48 px - every icon is drawn by NovaOS code, no image
@@ -103,7 +105,14 @@ Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release bui
 * Heap allocator, in-memory hierarchical file system, libc / libm subset,
   kernel panic screen with symbolised stack traces
 * Installer wizard and automatic saving of all files to the installed disk
-  (two save slots, so a power cut never damages the last good save)
+  (two save slots, so a power cut never damages the last good save); a new
+  drive starts with no system files and its first start is an installation
+  menu (what NovaOS supports, your account, then it writes the system files)
+* One account per drive (name, profile picture, optional password stored as a
+  salted SHA-256 hash), changeable in Settings > Account; the ISO uses Guest
+* File protection: apps can't change anything in `/system`, and `/system`,
+  `/home` and `/home/user` can't be deleted; a SHA-256 manifest of the system
+  files is checked at every start - a damaged system file is a kernel panic
 * ACPI power off, ACPI power button (VirtualBox *ACPI Shutdown* shuts NovaOS
   down cleanly), reboot
 
@@ -133,11 +142,11 @@ Start menu and on the desktop:
 |---|---|---|
 | System | **Files** | Browse and manage files and folders: copy / cut / paste, rename, Open With, Properties |
 | System | **Terminal** | NOVA CMD shell: over 70 commands, pipes, redirection, history, Tab completion, `color check` |
-| System | **Settings** | Appearance (light / dark, accent, wallpaper), mouse, date and time, sound, system information |
+| System | **Settings** | Appearance (light / dark, accent, wallpaper), mouse, date and time, sound, account (name, picture, password), system information |
 | System | **Services** | Start, stop and configure background services, read their logs |
 | System | **Task Manager** | Open windows, installed apps, memory and CPU graphs |
-| System | **Installer** | Install NovaOS on a hard disk |
-| System | **OSaver** | Save your data (settings, app data, files, wallpaper) as a number code and load it back - on ISO boots *Do you have a save file?* asks for one |
+| System | **Installer** | Install NovaOS on a hard disk (ISO only - hidden on an installed drive) |
+| System | **OSaver** | Save your data (settings, app data, files, wallpaper) as a number code and load it back - on ISO boots *Do you have a save file?* asks for one (ISO only - hidden on an installed drive) |
 | System | **Hex Viewer** | Inspect the raw bytes of any file |
 | System | **About** | About NovaOS and this computer |
 | System | **Welcome** | A seven-page tour of NovaOS (opens at first start) |
@@ -223,14 +232,17 @@ Select the VM and click **Settings**:
    greyed out), **Install** and **Continue ISO**.
    * **Continue ISO** runs NovaOS from the CD: everything works, but files
      stay in memory only and are gone after a restart. The save file screen
-     (*Do you have a save file?*) comes first - see OSaver.
+     (*Do you have a save file?* - see OSaver) comes first, then the start
+     screen with the **Guest** account: click **Start** (or press Enter) to
+     open the desktop.
    * **Install** - go on with step 4.
 
 ### 4. Install NovaOS on the hard disk
 
 1. On the NovaOS Drive installation screen pick a storage size and click
    **Install**. All data on the disk is erased; only the chosen size of it is
-   used. (Files live in memory while NovaOS runs, so the space you can really
+   used. The drive gets only what it needs to boot (the boot loader and the
+   kernel) - no system files and nothing from the ISO session. (Files live in memory while NovaOS runs, so the space you can really
    fill is limited by the VM's memory whatever size you pick.)
 2. A progress bar shows the installation. **Cancel** under it stops the
    installation safely: the disk's boot record and drive signature are
@@ -242,11 +254,21 @@ Select the VM and click **Settings**:
    **straight into the installed NovaOS** - the CD's boot menu finds the
    installed drive and boots it by itself after 2 seconds, so you can leave
    the ISO attached.
+4. The drive's **first start is an installation**: after the splash a menu
+   shows *This system now supports* (HTML with its new built-in app HTML
+   Viewer, CSS, JS, C, C++) - **Next** - then *Your account*: the **Account
+   name**, the **Profile picture** (the person icon, a built-in picture or a
+   picture from Pictures) and an optional **Password** with **Confirm
+   password** - **Install**. A progress bar writes the system files, the
+   default folders and files and your account and saves them to the drive;
+   then the start screen follows. (If the computer is switched off before
+   that, the next start shows the menu again.)
 
 You can also install from a running system: **Installer** on the desktop (or
 Start menu -> System -> Installer) - choose the hard disk, the drive size and
 click **Install**; *Copy my current files to the new system* takes the files
-you have already made along.
+you have already made along (without the system files - that drive's first
+start is the installation menu too).
 
 ### 5. Boot from the disk
 
@@ -257,24 +279,35 @@ you have already made along.
    the optical drive with NovaOS.iso, choose *Remove Disk from Virtual Drive*
    and start the VM - the BIOS then boots the hard disk directly. Keep the
    hard disk on the IDE controller. You briefly see `NovaOS loader / Loading
-   NovaOS .... ok`, then the splash screen with a loading bar and the desktop.
+   NovaOS .... ok`, then the splash screen with a loading bar and the **start
+   screen**: your account name and picture, with the time sliding in at the top
+   left. Click **Start** (or press Enter) - with a password, type it in the box
+   first (a wrong one is refused with the alert sound). Settings > Account
+   changes the name, the picture and the password. OSaver and Installer are not
+   shown on an installed drive.
 2. Your files are now saved to the disk automatically: a few seconds after a
    change, at least every 60 seconds while there are unsaved changes, and
    before every restart or shut down. Shut down from the Start menu, or with
    VirtualBox's *Machine -> ACPI Shutdown*.
 3. The drive also holds NovaOS itself: `/system/boot` (kernel, boot loader,
-   boot settings) and `/system/ui` (fonts, themes, wallpapers, UI settings,
-   loaded at every start). If the drive's folders or these files are deleted
-   (for example `rm -r /` in the Terminal) NovaOS shows **No drive found** and
-   stays there - also after a restart. Reinstall from the ISO (pick the NovaOS
+   boot settings), `/system/ui` (fonts, themes, wallpapers, UI settings,
+   loaded at every start) and `/system/apps`. They are **protected**: apps
+   (Terminal, Files, Notepad ...) can't change anything in `/system` ("This is
+   a protected system file"), and `/system`, `/home` and `/home/user` can't be
+   deleted. A SHA-256 manifest of the system files is checked at every start:
+   if a system file is damaged (e.g. a broken disk sector) NovaOS stops with a
+   **kernel panic** naming the file. Reinstall from the ISO (pick the NovaOS
    2.5 entry in the GRUB menu, then Install).
+   NovaOS shows **No drive found** (black screen, Nova icon) when the installed
+   drive is not there at startup, or stops responding while NovaOS runs.
 4. NovaOS checks two more requirements at every start of the drive and shows
    **System requirement fail** (black screen, Nova icon, the reason under it)
    until you reset the VM:
    * *Requires a readable COS:// drive (at least 4 MB)* - COS:// is the drive
-     NovaOS starts from. The installed hard disk was not found (it is on a
-     SATA/AHCI, SCSI or NVMe controller: move it back to the IDE controller),
-     reading it failed, or it is smaller than 4 MB.
+     NovaOS starts from. Reading it failed, or it is smaller than 4 MB. (When
+     the installed hard disk is not found at all - for example it is on a
+     SATA/AHCI, SCSI or NVMe controller: move it back to the IDE controller -
+     the screen says **No drive found**.)
    * *A required bundle app is missing* - `/system/apps` holds one small file
      per app that comes with NovaOS; it or one of its files was deleted.
      Reinstall from the ISO.
@@ -286,9 +319,11 @@ you have already made along.
   this entry makes the installed system use 800x600 too.
 * **The pointer does not move:** the pointing device must be *PS/2 Mouse*,
   and you have to click into the VM window first.
-* **No hard disk found / the Installer finds no disk / System requirement
-  fail - Requires a readable COS:// drive:** the disk is on a SATA, NVMe or
-  SCSI controller - move it to the IDE controller (see step 2.3).
+* **No hard disk found / the Installer finds no disk / No drive found:** the
+  disk is on a SATA, NVMe or SCSI controller - move it to the IDE controller
+  (see step 2.3).
+* **Forgot the password of the start screen:** NovaOS has no recovery - the
+  drive has to be reinstalled from the ISO.
 * **USB stick or a real PC:** the installed drive can't run from a USB stick
   (NovaOS only reads IDE hard disks). Writing NovaOS.iso to a stick with
   balenaEtcher or Rufus (DD mode) and booting a PC with legacy BIOS/CSM from it
@@ -373,7 +408,8 @@ mouse.
   `sound test` plays an arpeggio and a chord, `sound volume 0..100` sets the
   volume. Piano plays chords and has an instrument choice on a sound card.
 * **Settings -> About** and the **About** app show the version, memory and
-  display mode.
+  display mode; **Settings -> Account** changes your account name, profile
+  picture and password (on the ISO the account is Guest and can't change).
 
 ## Keyboard shortcuts
 
@@ -454,7 +490,9 @@ NovaOS 2.5 is a **Developer Preview**. Things that are not there (yet):
   the plug loses the last few seconds of changes. No
   access to other file systems (FAT, NTFS, ext) or CDs from inside NovaOS.
 * **Pictures:** BMP only (Image Viewer also opens PPM); no PNG or JPEG.
-* **Keyboard:** US layout only. No multi-user accounts or permissions.
+* **Keyboard:** US layout only. One account per drive (no multi-user accounts);
+  the start screen's password and the file protection guard against mistakes,
+  not against someone with the disk image.
 
 ## Repository layout
 

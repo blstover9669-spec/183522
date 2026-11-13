@@ -98,19 +98,24 @@ tools/shot.py --kernel build/kernel.elf --cmdline "selftest=1 nosplash" \
 clicking (the largest drive size that fits, or the whole disk when it is
 smaller than 100 MB) and logs `INSTALL: done in N ms` (or `INSTALL: failed:
 reason`).
+The Installer copies the current files without the system files, so the
+drive's first boot is its first start: automated (the command line carries
+`testmouse=1`), it writes the system files and the account "User" by itself
+(`firststart: done ...`, `persist: saved ... sync`) and goes on to the desktop.
 The installed system logs `persist: restored N bytes from slot A|B` at boot
 and `persist: saved N bytes to slot ... (save #N, background|sync)` on every
 save (background = a few seconds after a change or the 60 s timer, sync =
-before reboot / shut down).
+before reboot / shut down). On the drive OSaver and Installer are hidden
+(desktop, Start menu, search: `apps: OSaver hidden (an ISO app, ...)`).
 
 ```sh
 truncate -s 128M disk.img
 # install (or drive the wizard with clicks: Next/Install are at about (753, 569))
 tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \
     --out shots-inst ready "serial:INSTALL: done"
-# boot the disk alone, write a file, wait for the automatic save
+# boot the disk alone (its first start), write a file, wait for the automatic save
 tools/shot.py --disk disk.img --out shots-disk ready key:meta_l wait:0.5 type:terminal key:ret \
-    wait:1.5 "type:echo hi > Desktop/proof.txt\n" "serial:persist: saved" shot:saved
+    wait:1.5 "type:echo hi > Desktop/proof.txt\n" "serial:background)" shot:saved
 # next boot: the file is still there
 tools/shot.py --disk disk.img --out shots-disk2 ready key:meta_l wait:0.5 type:terminal key:ret \
     wait:1.5 "type:cat Desktop/proof.txt\n" wait:0.5 shot:persisted
@@ -122,45 +127,102 @@ and prefer the keyboard (`key:meta_l` opens the Start menu): the pointer
 starts again at the top-left corner but shot.py still remembers the old
 position.
 
-### NovaOS Drive installation (ISO boots) and No drive found
+### NovaOS Drive installation (ISO boots), first start, start screen
 
-ISO boots show the NovaOS Drive installation screen after the splash, but
-automated starts (`autorun=`, `testmouse=` - so every `--kernel` run) skip
-it; `setup=1` brings it back. Test it through the real GRUB path, with an ISO
-whose command line has `testmouse=1 setup=1` (accurate clicks) and a disk:
-`bootsetup: ready` means it waits for input. At 1024x768 the size rows are at
-x = 300, y = 424 + 28 * i (100 MB ... 10 GB), Install at (660, 494), Continue
-ISO at (660, 554). While it installs (about 2 s in QEMU) Cancel is at (512,
-148). The finished screen (`bootsetup: finished screen`) has How to start your
-drive at (419, 466) and Restart at (648, 466); with the guide open the tabs VM
-/ USB are at (451, 342) / (571, 342) and Restart at (512, 593). Restart
-restarts the VM; the ISO's GRUB menu then boots the disk by itself (`boot:
-loader "NovaOS disk loader"` in the log). Add `res=800x600` to the ISO's
-command line to check the 800x600 layout.
+ISO boots show the NovaOS Drive installation screen after the splash; an
+installed drive's first start shows its installation menu; every start shows the
+start screen before the desktop. Automated starts (`autorun=`, `testmouse=` - so
+every `--kernel` run) skip all three (a drive's first start then installs with
+the defaults: account "User", no password - `firststart: done ... (automated
+start ...)`). `setup=1` brings them all back (`setup=0` skips the first two),
+`startscreen=1` / `startscreen=0` only the start screen. Both are **carried into
+a drive installed from that start**, like `testmouse=` and `res=`. Test the real
+path through GRUB with an ISO whose command line has `testmouse=1 setup=1`
+(accurate clicks) and a disk; `bootsetup: ready`, `firststart: ready` and
+`startscreen: ready` mean the screen waits for input.
+
+* **NovaOS Drive installation** (1024x768): the size rows at x = 300, y = 424 +
+  28 * i (100 MB ... 10 GB), Install at (660, 494), Continue ISO at (660, 554);
+  while it installs (about 2 s in QEMU) Cancel is at (512, 148). The finished
+  screen (`bootsetup: finished screen`) has How to start your drive at (419, 466)
+  and Restart at (648, 466); with the guide open the tabs VM / USB are at (451,
+  342) / (571, 342) and Restart at (512, 593). The drive gets only the boot
+  loader and the kernel (`install: ... files 0 bytes`). Restart restarts the VM
+  and the ISO's GRUB menu boots the disk by itself.
+* **The drive's first start** (installation menu, 1024x768): page 1 "This system
+  now supports" - Next at (797, 558). Page 2 "Your account" - Account name at
+  (622, 243), the pictures at (418 + 54 * i, 324) (person, star, mountains,
+  flower, planet, cat), Pictures at (780, 324) and then its pictures at (418 + 54
+  * i, 378), Password at (622, 459), Confirm password at (622, 536), Back at
+  (648, 651), Install at (797, 651). Page 3 "Installing NovaOS" runs by itself
+  (`firststart: done in N ms`, `persist: saved ... sync`). Keys work too: Enter
+  = Next, typing goes into the focused field, Enter moves to the next field and
+  installs from the last, Tab / Shift+Tab, Esc = Back.
+* **The start screen** (`startscreen: ready (Start button|password box)`): the
+  Start button (or the password box) at (512, 321), the arrow in the password
+  box at (655, 321); Enter starts. A wrong password logs `startscreen: wrong
+  password`; `startscreen: opening the desktop` - then `autorun=` apps and the
+  Welcome tour start.
+* Add `res=800x600` to the ISO's command line for the 800x600 layouts (all of
+  these work with the keyboard alone).
+
+After a restart inside one shot.py run the pointer is back at (0, 0) while
+shot.py remembers the old position: put `move:0,0` before the next click.
 
 ```sh
 make BUILD=build-setup CMDLINE="testmouse=1 setup=1" GRUB_TIMEOUT=1
 truncate -s 512M disk.img
+# install, Restart, the first start's menu (name, picture, password), the start screen
 tools/shot.py --iso build-setup/NovaOS.iso --hda disk.img --out shots-setup \
     "serial:bootsetup: ready" shot:setup click:300,508 click:660,494 wait:0.3 shot:progress \
-    "serial:bootsetup: finished screen" shot:done click:419,466 wait:0.5 shot:vm click:571,342 \
-    wait:0.5 shot:usb click:512,593 "serial:NovaOS disk loader" ready shot:installed
+    "serial:bootsetup: finished screen" shot:done click:648,466 "serial:firststart: ready" move:0,0 \
+    shot:supports click:797,558 "serial:firststart: page 2" type:Alice click:526,324 click:622,459 \
+    type:nova click:622,536 type:nova shot:account click:797,651 "serial:startscreen: ready" \
+    shot:start "type:wrong\n" wait:0.3 shot:wrong "type:nova\n" "serial:startscreen: opening" ready
+# the next start of the drive: no menu, the start screen asks for the password
+tools/shot.py --disk disk.img --out shots-again "serial:startscreen: ready" shot:start "type:nova\n" ready
 # Cancel while the bar runs: back on the setup screen, sectors 0, 1 and 2047 of the
 # disk are zero and the next boot of the ISO shows the setup screen again
 tools/shot.py --iso build-setup/NovaOS.iso --hda disk.img --out shots-cancel \
     "serial:bootsetup: ready" click:300,508 click:660,494 wait:0.6 click:512,148 \
     "serial:install: cancelled" wait:0.5 shot:back
-# Continue ISO: the save file screen (OSaver) comes next
+# Continue ISO: the save file screen (OSaver), then the start screen (Guest)
 tools/shot.py --iso build-setup/NovaOS.iso --out shots-iso "serial:bootsetup: ready" \
-    click:660,554 ready wait:1 shot:save-file-screen
+    click:660,554 "serial:osaver: Do you have a save file?" wait:1 shot:save-file-screen \
+    key:right key:ret "serial:startscreen: ready" shot:start key:ret ready
+# quick drive tests with --kernel: the menu and the start screen carried into the drive
+tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto startscreen=1" \
+    "serial:startscreen: ready" key:ret "serial:INSTALL: done"
 ```
 
+A plain release build (`make BUILD=dir WERROR=1`, no `testmouse`) shows the real
+order: keys work everywhere (Tab Tab Enter = Continue ISO, Right Enter = No on
+the save file screen, Enter = Start); the Welcome tour opens only after the start
+screen (`welcome: NovaOS has opened - the tour follows`).
+
 The system files are logged at startup (`sysfiles: wrote the system files ...`
-on ISO boots, `ui: loaded 8 fonts, 2 themes, 6 wallpapers ...`). Deleting the
-drive or a system file shows "No drive found" and logs `nodrive: No drive
-found (PATH is missing)`, e.g. `"type:rm -r /system\n" "serial:nodrive:"`
-in a Terminal (on an installed drive it stays like that after a restart, so
-use a scratch disk; wait for `persist: saved` before a `monitor:system_reset`).
+on ISO boots, `ui: loaded 8 fonts, 2 themes, 6 wallpapers ...`).
+
+### No drive found
+
+Only when the installed drive is really missing: not found at startup, or not
+answering while NovaOS runs (`nodrive: the drive did not answer (...), N of 2`,
+a read every 3 s). Deleting folders never shows it any more (they are protected)
+and ISO boots never do.
+
+```sh
+# an installed system whose drive is detached: boot=disk with no disk attached
+tools/shot.py --kernel build/kernel.elf --cmdline "boot=disk diskid=1234abcd" --out shots-nd \
+    "serial:nodrive: No drive found" wait:1 shot:nodrive
+# the disk goes away while NovaOS runs (QEMU's drive_del): No drive found about 6 s later
+tools/shot.py --disk disk.img --out shots-nd2 ready "monitor:drive_del ide0-hd0" \
+    "serial:nodrive: No drive found" wait:1 shot:gone
+# the installed disk on an AHCI (SATA) controller: GRUB still boots it through the
+# BIOS, the kernel finds no IDE hard disk - No drive found
+tools/shot.py --iso build/NovaOS.iso --out shots-cos "serial:nodrive: No drive found" wait:1 shot:cos \
+    --extra -device ahci,id=ahci -drive id=d0,if=none,file=disk.img,format=raw \
+    -device ide-hd,drive=d0,bus=ahci.0
+```
 
 ### System requirement fail
 
@@ -168,27 +230,51 @@ Every start logs the two checks: `reqfail: COS:// drive ok (disk 0, ...)` (or
 `COS:// is the CD (ISO boot)`) and `reqfail: N bundle apps found in
 /system/apps`; a failure logs `reqfail: System requirement fail - REASON
 (DETAIL)` and shows the screen. Make an installed disk with the build under
-test and use a copy of it per case:
+test and use a copy of it per case (the system files are protected, so
+`tools/sysdamage.py` edits the drive's saved files in the disk image):
 
 ```sh
 truncate -s 128M disk.img
 tools/shot.py --kernel build/kernel.elf --hda disk.img --cmdline "autorun=Installer:auto" \
     ready "serial:INSTALL: done"
-# COS:// not found: the disk on an AHCI (SATA) controller - the ISO's GRUB still boots
-# it through the BIOS, the kernel finds no IDE hard disk
-tools/shot.py --iso build/NovaOS.iso --out shots-cos "serial:reqfail: System" wait:1 shot:cos \
-    --extra -device ahci,id=ahci -drive id=d0,if=none,file=disk.img,format=raw \
-    -device ide-hd,drive=d0,bus=ahci.0
+tools/shot.py --disk disk.img ready "serial:firststart: done"   # the drive's first start
 # COS:// not readable: QEMU's blkdebug fails reads of slot A's header (its lba is in
 # "persist: using disk 0 (...) at lba N" of a normal boot)
-printf '[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "10240"\n' > blk.cfg
+printf '[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "12288"\n' > blk.cfg
 tools/shot.py --iso build/NovaOS.iso --out shots-eio "serial:reqfail: System" wait:1 shot:eio \
     --extra -drive file=blkdebug:blk.cfg:disk.img,format=raw,if=ide,index=0
-# bundle app: delete one app file (or "rm -r /system/apps"), let it save, reset
-tools/shot.py --disk disk.img --out shots-app ready key:meta_l wait:0.5 type:terminal key:ret \
-    wait:1.5 "type:rm /system/apps/Paint.app\n" "serial:persist: saved" monitor:system_reset \
-    "serial:reqfail: System" wait:1 shot:app
+# bundle app: an app file missing from the drive
+cp disk.img d1.img && tools/sysdamage.py d1.img /system/apps/Paint.app --remove
+tools/shot.py --disk d1.img --out shots-app "serial:reqfail: System" wait:1 shot:app
 ```
+
+### File protection and damaged system files
+
+Apps can't change anything in `/system` and nobody can delete `/system`,
+`/home` or `/home/user`: the Terminal prints "This is a protected system file",
+Files shows it in its error box, the alert sound plays and the log has `vfs:
+protected: OP PATH refused (APP)`. The SHA-256 manifest of the system files
+(`/system/manifest.sha256`) is checked at every start of an installed drive
+(`sysfiles: N system files match the manifest (SHA-256)`); a damaged file is a
+kernel panic naming it (shot.py then exits non-zero because of the panic):
+
+```sh
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots-prot ready wait:1.5 \
+    "type:rm -r /system\n" "type:mv /system/boot/boot.cfg /tmp/b\n" "type:echo hi > /system/x.txt\n" \
+    "type:rm -r /home\n" wait:0.5 shot:refused
+# Files: select kernel.bin, Delete, Enter -> "1 item could not be deleted: This is a protected system file."
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Files:/system/boot" --out shots-fprot ready \
+    wait:1.5 click:435,165 key:delete wait:0.5 key:ret wait:0.5 shot:refused
+# a damaged byte in a system file inside an installed disk image -> kernel panic
+cp disk.img d2.img && tools/sysdamage.py d2.img /system/ui/fonts/ui.font
+tools/shot.py --disk d2.img --out shots-panic "serial:KERNEL PANIC" wait:1 shot:panic
+grep -A1 "KERNEL PANIC" shots-panic/serial.log    # A system file is damaged: /system/ui/fonts/ui.font
+# a missing (non-app) system file: "A system file is missing: /system/boot/mbr.bin"
+cp disk.img d3.img && tools/sysdamage.py d3.img /system/boot/mbr.bin --remove
+tools/shot.py --disk d3.img --out shots-missing "serial:KERNEL PANIC"
+```
+
+`tools/sysdamage.py disk.img --list` lists the files in the drive's newest save.
 
 ### Power button, keyboard LEDs, empty IDE channels
 

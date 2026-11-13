@@ -653,28 +653,63 @@ text file per bundled app - every app in the registry, so also the games the
 Games app bundles (`name=`, `category=`, `description=`, `opens=`; `/` in a
 name would become `-`). The kernel and fonts are packed (NVLZ:
 `"NVLZ"`, u32 size, u32 CRC32, an LZ4-format stream - `kernel/fs/lz.h`). An ISO
-start writes them from built-in copies; an installed drive keeps them. NovaOS
-loads its UI from `/system/ui` at startup (a damaged file falls back to the
-built-in copy).
+start writes them from built-in copies. An installed drive starts **without**
+them - the installer writes only the boot loader and the kernel - and its first
+start (the installation menu, `kernel/gui/firststart.c`) writes them, the
+default folders and files and the account, then saves; from then on the drive
+keeps them. NovaOS loads its UI from `/system/ui` at startup.
 
-**No drive found.** If `/system` or `/home` or any of the system files above
-is missing - at startup or while NovaOS runs (checked whenever the files
-change) - NovaOS shows a black screen with the Nova icon and "No drive found"
-and stays there until the computer is reset. On an installed drive the change
-is saved first, so it is still gone after a restart. Do not delete or rename
-these paths from an app; the Terminal's `rm -r /` (or `/system`, `/home`)
-does it on purpose.
+**The manifest.** `/system/manifest.sha256` holds the SHA-256 of every system
+file (`<64 hex digits>  <path>` lines, then `end <SHA-256 of the lines above>`).
+NovaOS rewrites it whenever it writes a system file. An installed drive checks
+every file against it at every start, and every later load of a system file
+(`vfs_read_file`) is checked again: a damaged (or missing) file stops NovaOS
+with a **kernel panic** naming it - *A system file is damaged:
+/system/ui/fonts/ui.font* - on the panic screen, until the computer is reset
+(reinstall from the ISO). A missing `/system/apps` file is *System requirement
+fail* instead (below).
+
+**File protection.** The VFS itself (`kernel/fs/vfs.c`) refuses, with
+`VFS_EPROTECTED` (`vfs_strerror`: "This is a protected system file"), the alert
+sound and a `vfs: protected: OP PATH refused (WHO)` log line:
+
+* any change to the system files (`/system/boot`, `/system/ui`, `/system/apps`,
+  the manifest) except through NovaOS's privileged path (the ISO start, the
+  drive's first start);
+* deleting, renaming or moving `/`, `/system`, `/home` or `/home/user`;
+* from an app: creating, overwriting, appending to, deleting, renaming or
+  moving anything inside `/system` (also `vfs_open` with `VFS_O_WRITE`,
+  `CREATE`, `TRUNC` or `APPEND`, `vfs_mkdir`, `vfs_copy` into it). Reading is
+  always allowed. NovaOS's own code (services, the shell's settings, the
+  account, the logs) still writes its files in `/system/config` and
+  `/system/log`, and of the apps Settings and OSaver may write in
+  `/system/config`, Welcome `/system/config/settings` and the Web Browser
+  `/system/config/browser.cfg`. "From an app" means the call comes from app
+  code (`apps/`, linked after the kernel - `kernel/zz_app_text.c` marks the
+  boundary) while an app runs (`wm_current_app`).
+
+So the Terminal's `rm` / `mv` / `cp` / `mkdir` / `>` redirects, Files (delete,
+rename, paste, new folder) and every app's Save print or show that message for
+paths in `/system`. Keep your app's own data in `/home/user` (e.g. a dot-file).
+
+**No drive found** (`kernel/gui/nodrive.c`): a black screen with the Nova icon
+and "No drive found", forever (until the computer is reset), only when the drive
+of an installed system (`boot=disk`) is really not there: not found on the IDE
+controllers at startup, or not answering while NovaOS runs (a read of the drive
+every 3 s - `persist_probe()` - with failed saves counted too; two failures in a
+row). ISO starts never show it, and deleting files or folders never does (the
+top folders are protected).
 
 **System requirement fail.** The same black screen with "System requirement
 fail" and the reason under it (`kernel/gui/reqfail.c`), also forever, when the
 computer starts but NovaOS cannot boot. Both checks run at startup only:
 *Requires a readable COS:// drive (at least 4 MB)* - on an installed-drive boot
-(`boot=disk`) the drive NovaOS starts from (COS://) must be found on the IDE
-controllers, read without errors (`persist_boot_status()`) and be 4 MB or
-larger; ISO boots start from the CD and pass. *A required bundle app is
-missing* - `/system/apps` is missing, none of the app files is found, or the
-file of a registered app is missing. "No drive found" is checked first, so it
-wins when `/system` itself is gone.
+(`boot=disk`) the drive NovaOS starts from (COS://) was found but could not be
+read without errors (`persist_boot_status()`) or is smaller than 4 MB (not found
+at all is *No drive found*); ISO boots start from the CD and pass. *A required
+bundle app is missing* - `/system/apps` is missing, none of the app files is
+found, or the file of a registered app is missing. On a drive's first start
+both run after the installation menu.
 
 **Boot splash setting:** `/system/config/splash.cfg`, a text file with one
 `key=value` per line. `noanimation=1`: the splash shows the Nova icon in the
@@ -786,7 +821,12 @@ an installed-drive boot was found and read at startup (`DISK_OK`,
 install_step / install_progress / install_cancel ...`) is what `apps/installer.c` and the
 NovaOS Drive installation screen of ISO boots (`kernel/gui/bootsetup.c`)
 drive: `install_begin_sized(disk, bytes, copy_files, err, n)` uses only the
-first `bytes` of the disk (0 = all of it); the drive sizes offered to users are
+first `bytes` of the disk (0 = all of it) and writes only the boot loader and the
+kernel - no files: the drive's first start is its installation menu
+(`persist_first_start()`). `copy_files` (the Installer app's "Copy my current
+files") stores the current files without the system files, and that drive's
+first start is the installation menu too. `persist_probe()` reads the drive to
+see whether it still answers (No drive found). The drive sizes offered to users are
 `install_size_count() / install_size_bytes(i) / install_size_label(i)` (100 MB,
 150 MB, 200 MB, 250 MB, 500 MB, 700 MB, 1 GB, 5 GB, 10 GB),
 `install_size_fits(disk, bytes)` and `install_size_default(disk)` (the largest
@@ -842,7 +882,8 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `autorun=App1,App2` | launch apps after the desktop appears (`_` or `+` for spaces; `App:arg` passes an argument) |
 | `testmouse=1` | 1:1 mouse motion without acceleration and pointer starts at (0,0) - used by `tools/shot.py` |
 | `nosplash` | skip the boot splash |
-| `setup=1` / `setup=0` | show / skip the NovaOS Drive installation screen (by default ISO boots show it, except automated ones with `autorun=` or `testmouse=`; installed drives never do) |
+| `setup=1` / `setup=0` | show / skip the boot screens of a real start: on ISO boots the NovaOS Drive installation (then the save file screen), on an installed drive's first start the installation menu (`setup=0` or an automated start installs with the defaults: account "User", no password), and `setup=1` also brings the start screen. By default real starts show them and automated ones (`autorun=`, `testmouse=`) skip them. Carried into a drive installed from that start |
+| `startscreen=1` / `startscreen=0` | show / skip the start screen (shown at every real start; automated starts skip it). Carried into a drive installed from that start |
 | `res=WxH` | resolution via BGA when available (e.g. `res=1280x720`) |
 | `dark=1` | start in dark mode |
 | `wallpaper=N` | start with built-in wallpaper N |
@@ -863,9 +904,67 @@ Serial markers useful for tests: `NOVA: desktop ready`, `NOVA: autorun done`,
 (the NovaOS Drive installation screen waits for input), `bootsetup: drive
 installed`, `bootsetup: finished screen` (How to start your drive / Restart
 shown), `bootsetup: Cancel at N%` and `install: cancelled at N% ...`,
-`nodrive: No drive found (PATH is missing)`, `reqfail: System requirement fail -
-REASON (DETAIL)`, `reqfail: COS:// drive ok (...)` / `reqfail: COS:// is the CD
-(ISO boot)` and `reqfail: N bundle apps found in /system/apps` (checks passed).
+`nodrive: No drive found (WHY)`, `nodrive: the drive did not answer (...)`,
+`reqfail: System requirement fail - REASON (DETAIL)`, `reqfail: COS:// drive ok
+(...)` / `reqfail: COS:// is the CD (ISO boot)` and `reqfail: N bundle apps found
+in /system/apps` (checks passed), `sysfiles: N system files match the manifest`,
+`vfs: protected: OP PATH refused (WHO)`, `firststart: ready` / `firststart: page
+N (...)` / `firststart: done ...` (the drive's installation menu),
+`startscreen: shown (...)` / `startscreen: ready (...)` (waits for input) /
+`startscreen: wrong password` / `startscreen: opening the desktop`.
+
+---
+
+## 17a. The account and the start screen
+
+`#include <nova/account.h>` (not in `nova.h`). NovaOS has one account. An
+installed drive sets it up in its first start's installation menu and keeps it in
+`/system/config/account` (`name=`, `picture=person|star|mountains|flower|planet|
+cat|file`, and with a password only `salt=` / `hash=` / `rounds=`: SHA-256 of
+salt + password, stretched 4096 times - the password itself is never stored) and
+`/system/config/account.bmp` (a 128x128 copy of a picture from Pictures). ISO
+starts are always **Guest** with the person icon and no password.
+
+```c
+bool        account_is_guest(void);            /* ISO start: nothing can be changed       */
+const char *account_name(void);                /* "Guest" / the name ("User" if none set) */
+int         account_picture(void);             /* ACCOUNT_PIC_PERSON .. _CAT, _FILE       */
+bool        account_has_password(void);
+bool        account_check_password(const char *pw);
+int         account_set_name(const char *name);            /* ACCOUNT_OK or ACCOUNT_E*    */
+int         account_set_picture(int pic);                  /* a built-in picture          */
+int         account_set_picture_file(const char *path);    /* a BMP/PPM: a copy is kept   */
+int         account_set_password(const char *current, const char *pw);  /* NULL/"" removes;
+                                                   `current` must match when one is set */
+const char *account_strerror(int err);
+uint32_t    account_serial(void);              /* changes whenever the account changes   */
+void        account_draw_picture(surface_t *s, int x, int y, int size);   /* round */
+void        account_draw_builtin(int pic, surface_t *s, int x, int y, int size);
+void        account_draw_image(const surface_t *img, surface_t *s, int x, int y, int size);
+```
+
+Settings > Account (`autorun=Settings:account`) changes the name, the picture
+and the password (set, change, remove).
+
+**The start screen** (`kernel/gui/startscreen.c`) comes at every start before
+the desktop: the time (with seconds) and the date slide down to the top left,
+the account name sits at the middle top with the picture under it, then a Start
+button - or a password box that must be typed (a wrong password shows "The
+password is incorrect. Try again." and plays the alert sound). It is a
+full-screen window above all others; the Start menu, Alt+Tab, Alt+F4, Win+R
+and Ctrl+Alt+Del are held back while it is up. Things that should happen only
+once NovaOS has opened wait for it:
+
+```c
+bool startscreen_pending(void);                              /* still to come / shown */
+void startscreen_when_done(void (*fn)(void *ctx), void *ctx);  /* soon after it is passed
+                                                                (at once without one)  */
+```
+
+`autorun=` apps and the Welcome tour use it. Order: ISO - NovaOS Drive
+installation, Continue ISO, save file screen, start screen, desktop; installed
+drive - splash with the loading bar, (first start: the installation menu), start
+screen, desktop.
 
 ---
 
