@@ -1,5 +1,6 @@
 /* startmenu.c - the Start menu: searchable, categorised app list plus power buttons. */
 #include "wm_internal.h"
+#include <nova/account.h>
 
 #define SM_W 460
 #define SM_MAX_H 600
@@ -266,9 +267,8 @@ static void sm_paint(window_t *win) {
     int fy = s->h - FOOTER_H;
     gfx_fill_rect(s, 0, fy, s->w, FOOTER_H, t->dark ? color_shade(bg, -10) : color_shade(bg, -5));
     gfx_hline(s, 0, fy, s->w, t->menu_separator);
-    gfx_fill_circle_aa(s, 36, fy + 28, 16, t->accent);
-    gfx_text_aligned(s, rect_make(20, fy + 12, 32, 32), "U", t->accent_text, FONT_UI_LARGE, ALIGN_CENTER | ALIGN_MIDDLE);
-    gfx_text(s, 62, fy + 12, "User", t->menu_text, FONT_UI_BOLD);
+    account_draw_picture(s, 20, fy + 12, 32);
+    gfx_text_ellipsis(s, 62, fy + 12, s->w - 186 - 62 - 8, account_name(), t->menu_text, FONT_UI_BOLD);
     char ver[64];
     snprintf(ver, sizeof ver, "%s %s", sys_version(), sys_edition());
     gfx_text_ellipsis(s, 62, fy + 29, s->w - 186 - 62 - 8, ver, color_mix(t->menu_text, bg, 100), FONT_UI);
