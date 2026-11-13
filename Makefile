@@ -38,6 +38,8 @@ LDFLAGS := -m32 -nostdlib -static -no-pie -Wl,--build-id=none -Wl,-T,linker.ld -
 KERNEL_C   := $(shell find kernel -name '*.c' | sort)
 KERNEL_ASM := $(shell find boot kernel -name '*.asm' | sort)
 APP_C      := $(sort $(wildcard apps/*.c) $(wildcard apps/*/*.c))
+# NovaJS (apps/js) is built and tested on the host (make jstest) until the browser uses it
+APP_C      := $(filter-out apps/js/%,$(APP_C))
 
 OBJS := $(patsubst %.asm,$(BUILD)/obj/%.asm.o,$(KERNEL_ASM)) \
         $(patsubst %.c,$(BUILD)/obj/%.o,$(KERNEL_C) $(APP_C))
