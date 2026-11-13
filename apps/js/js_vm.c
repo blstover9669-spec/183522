@@ -1235,6 +1235,35 @@ static JSValue run(JSContext *ctx, int stop) {
                     fn = base[0];
                     goto do_call;
                 }
+                if (fo->h.cls == CL_NATIVE && (fo == ctx->fn_call || fo == ctx->fn_apply) && JS_IsObject(base[1]) &&
+                    (OBJ(base[1])->h.cls == CL_FUNCTION || OBJ(base[1])->h.cls == CL_BOUND)) {
+                    /* f.call(t, ...) / f.apply(t, array): the call itself, in this run (so it can pause) */
+                    if (fo == ctx->fn_call) {
+                        JSValue self = argc > 0 ? base[2] : JS_UNDEFINED;
+                        if (argc > 0) { memmove(base + 2, base + 3, sizeof(JSValue) * (argc - 1)); argc--; sp--; }
+                        base[0] = base[1];
+                        base[1] = self;
+                        fn = base[0];
+                        goto do_call;
+                    }
+                    JSValue arr = argc > 1 ? base[3] : JS_UNDEFINED;
+                    if (JS_IsNullish(arr) || js_fast_array(arr)) {
+                        uint32_t n = JS_IsNullish(arr) ? 0 : OBJ(arr)->u.a.len;
+                        if (base + 2 + n + 64 < ctx->stack_end) {
+                            JSValue self = argc > 0 ? base[2] : JS_UNDEFINED;
+                            base[0] = base[1];
+                            base[1] = self;
+                            if (n) {
+                                JSObject *ao = OBJ(arr);
+                                for (uint32_t i = 0; i < n; i++) { JSValue v = i < ao->u.a.cap ? ao->u.a.v[i] : JS_HOLE; base[2 + i] = v == JS_HOLE ? JS_UNDEFINED : v; }
+                            }
+                            argc = n;
+                            sp = base + 2 + n;
+                            fn = base[0];
+                            goto do_call;
+                        }
+                    }
+                }
                 if (fo->h.cls == CL_NATIVE) {
                     SAVE();
                     ctx->can_wait = ctx->run_depth == 1 && ctx->native_depth == 0 && !ctx->no_suspend;

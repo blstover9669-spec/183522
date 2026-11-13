@@ -1128,6 +1128,11 @@ void js_init_lib_obj(JSContext *ctx) {
     (void)fc;
     JSValue fp = JS_MKOBJ(ctx->proto_function);
     js_def_funcs(ctx, fp, funcp_fns, JS_COUNTOF(funcp_fns));
+    {
+        JSValue c = js_get(ctx, fp, "call"), a = js_get(ctx, fp, "apply");
+        ctx->fn_call = JS_IsObject(c) ? OBJ(c) : NULL;
+        ctx->fn_apply = JS_IsObject(a) ? OBJ(a) : NULL;
+    }
     ctx->fn_has_instance = js_def_native(ctx, fp, "@hasInstance", funcp_has_instance, 1, 0);
     js_def_accessor(ctx, fp, ctx->a[A_caller], NULL, NULL, 0, P_C);
     {

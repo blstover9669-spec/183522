@@ -178,6 +178,8 @@ static void set_status(browser_t *b, const char *msg) {
     V(b)->chrome_dirty = true;
 }
 
+void browser_status(browser_t *b, const char *msg) { set_status(b, msg); }
+
 /* ---- tabs ---------------------------------------------------------------------------- */
 static void switch_tab(browser_t *b, int i) {
     if (i < 0 || i >= b->ntabs) return;

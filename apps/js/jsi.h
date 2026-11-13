@@ -294,6 +294,7 @@ struct JSContext {
     JSObject *ctor_promise, *ctor_array, *ctor_object, *ctor_typed[TA_COUNT], *ctor_url;
     JSObject *proto_textenc, *proto_textdec, *proto_url, *proto_usp, *proto_intl_nf, *proto_intl_dtf;
     JSObject *proto_intl_coll, *proto_intl_pr, *proto_intl_rtf;
+    JSObject *fn_call, *fn_apply;  /* Function.prototype.call / apply: run in the caller's run() */
     JSObject *ctor_regexp;        /* (last of the JSObject * block the GC walks) */
     JSValue throw_type_error;     /* %ThrowTypeError% */
     JSValue array_values;         /* Array.prototype.values (arguments[@@iterator]) */

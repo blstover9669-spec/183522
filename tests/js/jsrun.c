@@ -239,7 +239,8 @@ int main(int argc, char **argv) {
                           "log.push(f(10));\n"
                           "Promise.resolve().then(function () { log.push('job'); });\n"
                           "log.push([5].map(function (x) { return hostAsk(x); })[0]);\n"
-                          "try { (function () { throw new Error('e'); })(); } catch (e) { log.push(hostAsk(1)); }\n";
+                          "try { (function () { throw new Error('e'); })(); } catch (e) { log.push(hostAsk(1)); }\n"
+                          "log.push(f.call(null, 3), f.apply(null, [4]));\n";
         int st = js_eval_task(ctx, src, strlen(src), "wait.js", 1);
         int waits = 0;
         while (st == JS_SUSPENDED && waits < 10) {
@@ -251,7 +252,7 @@ int main(int argc, char **argv) {
         }
         JSValue d = js_eval(ctx, "log.join(',')", 13, "check");
         char *ds = js_to_cstring(ctx, d, NULL);
-        bool ok = st == JS_DONE && waits == 2 && ds && !strcmp(ds, "20,21,-1,2,job");
+        bool ok = st == JS_DONE && waits == 4 && ds && !strcmp(ds, "20,21,-1,2,6,8,7,9,job");
         printf("host waits: %d, log %s: %s\n", waits, ds ? ds : "?", ok ? "ok" : "FAIL");
         free(ds);
         js_free_context(ctx);

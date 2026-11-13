@@ -36,7 +36,7 @@ void  cookies_store(const url_t *u, const char *set_cookie);
 void  random_bytes(void *out, size_t n);
 
 #define TICK_MS     30         /* scripts per timer tick, at most            */
-#define SLOW_MS     10000      /* a task running this long is stopped        */
+#define SLOW_MS     8000       /* a task running this long is stopped        */
 #define STORE_MAX   (5u << 20) /* localStorage per site                      */
 #define STORE_DIR   "/home/user/.browser/storage"
 
@@ -103,7 +103,7 @@ typedef struct bjs {
     int ncand, candcap;
     /* tasks */
     jtask_t *qh, *qt, *cur;
-    uint32_t cur_ms;
+    uint32_t cur_ms, cur_t0;     /* time it ran / when it started (wall clock) */
     bool cur_user;
     /* timers */
     jtimer_t *tm;
@@ -943,6 +943,7 @@ static jtask_t *q_call(bjs_t *J, JSValue fn, JSValue self, int argc, const JSVal
 
 static int task_start(bjs_t *J, jtask_t *k) {
     J->cur_ms = 0;
+    J->cur_t0 = sys_uptime_ms();
     J->cur_user = k->user;
     uint32_t t0 = sys_uptime_ms();
     int st;
@@ -982,8 +983,14 @@ static void q_run(bjs_t *J, uint32_t budget_ms) {
 
 static void script_done(bjs_t *J, jscript_t *sc);
 
+static void killed_notice(bjs_t *J) {
+    tab_t *t = J->t;
+    klog("browser: %s: a script ran too long and was stopped (page not responding)", t->url);
+    browser_status(t->b, "Page not responding: a script ran too long and was stopped");
+}
+
 static void finish(bjs_t *J, jtask_t *k, int st) {
-    (void)st;
+    if (st == JS_KILLED) killed_notice(J);
     if (k->kind == JT_SCRIPT && k->sc) script_done(J, k->sc);
     J->cur_user = false;
     task_free(J, k);
@@ -997,6 +1004,7 @@ static bool hook_now(bjs_t *J, const char *name, int argc, const JSValue *argv, 
         return false;
     }
     J->cur_ms = 0;
+    J->cur_t0 = sys_uptime_ms();
     J->cur_user = user;
     uint32_t t0 = sys_uptime_ms();
     int st = js_call_task(J->ctx, fn, JS_UNDEFINED, argc, argv);
@@ -1008,6 +1016,7 @@ static bool hook_now(bjs_t *J, const char *name, int argc, const JSValue *argv, 
         return false;
     }
     J->cur_user = false;
+    if (st == JS_KILLED) killed_notice(J);
     if (ret) *ret = st == JS_DONE ? js_task_value(J->ctx) : JS_UNDEFINED;
     return st == JS_DONE;
 }
@@ -2163,8 +2172,9 @@ static JSValue n_status(JSContext *ctx, JSValue this_val, int argc, JSValue *arg
     int l;
     char *s = to_1252(ctx, JS_ARG(0), &l);
     if (s) {
-        web_1252_to_ui(s, J->t->b->status, sizeof J->t->b->status);
-        browser_tab_changed(J->t);
+        char ui[300];
+        web_1252_to_ui(s, ui, sizeof ui);
+        browser_status(J->t->b, ui);
         free(s);
     }
     return JS_UNDEFINED;
@@ -3104,6 +3114,7 @@ static void carry_on(bjs_t *J) {
         free(J->dlg_text);
         J->dlg_text = NULL;
         uint32_t t0 = sys_uptime_ms();
+        J->cur_t0 = t0;                  /* (waiting for the user does not count) */
         int st = js_resume_with(J->ctx, v);
         J->cur_ms += sys_uptime_ms() - t0;
         if (st != JS_SUSPENDED) cur_finished(J, st);
@@ -3114,13 +3125,12 @@ static void carry_on(bjs_t *J) {
     int st = js_resume(J->ctx);
     J->cur_ms += sys_uptime_ms() - t0;
     if (st != JS_SUSPENDED) { cur_finished(J, st); return; }
-    if (J->cur_ms >= SLOW_MS) {
+    if (sys_uptime_ms() - J->cur_t0 >= SLOW_MS) {
         js_kill(J->ctx);
-        klog("browser: %s: a script ran for %u s and was stopped (page not responding)", t->url, (unsigned)(J->cur_ms / 1000));
-        strlcpy(t->b->status, "Page not responding: a script ran too long and was stopped", sizeof t->b->status);
-        browser_tab_changed(t);
+        host_log(J, JS_LOG_ERROR, "Script stopped: it ran too long (page not responding)");
         cur_finished(J, JS_KILLED);
     }
+    (void)t;
 }
 
 /* things scripts asked for that replace or leave the page: done last, from the tick */

@@ -242,6 +242,7 @@ tab_t *browser_new_tab(browser_t *b, const char *url, bool focus);
 void   browser_tab_changed(tab_t *t);     /* title / URL / state changed: repaint chrome */
 void   browser_page_changed(tab_t *t);    /* new layout: repaint the page              */
 void   browser_set_address(browser_t *b, const char *url);
+void   browser_status(browser_t *b, const char *msg);    /* a message in the status bar for a while */
 rect_t browser_view(browser_t *b);        /* page area (client coords, without scrollbars) */
 bool   browser_is_current(tab_t *t);
 void   browser_find_update(browser_t *b);
