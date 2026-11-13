@@ -394,6 +394,37 @@ tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Web_Browser:http://10
   and serve the copy, or browse the live site when the test machine has
   internet (a network that intercepts TLS gets the certificate warning first).
 
+### HTML Viewer and Notepad code colours
+
+Copy test files into the guest from the host: serve a directory with
+`python3 -m http.server` (network section) and save each file with the
+Terminal's `fetch URL FILE` (`mkdir -p Desktop/site` first), then open them:
+`open Desktop/site/index.html` (HTML Viewer, the default for .html / .htm),
+`open Desktop/hello.c` (Notepad), `open -w Notepad Desktop/site/index.html`.
+`autorun=HTML_Viewer:/path/page.html` opens a page at start (no argument: the
+empty window, File > Open... / Ctrl+O). Pages log the browser's line
+`browser: file:///...: N elements, M stylesheets, ...` once laid out.
+
+```sh
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots-hv ready \
+    "serial:DHCP: address" "type:mkdir -p Desktop/site\n" \
+    "type:fetch http://10.0.2.2:8080/index.html Desktop/site/index.html\n" wait:0.5 \
+    "type:open Desktop/site/index.html\n" wait:2 shot:viewer --extra -nic user,model=e1000
+```
+
+* The 880x600 HTML Viewer window, when it is the first window (frame at
+  (72, 40), client at (73, 72)): File at about (88, 85); Reload, Zoom out,
+  Zoom in and Open in Web Browser at about (119, 118), (211, 118), (343, 118)
+  and (861, 118); the page starts at y = 138 and the status bar (the link
+  under the pointer) is the bottom 22 px. A second window cascades 30 px
+  further right and down.
+* Keys: PgUp / PgDn / Space / arrows / Home / End scroll, Ctrl+= / Ctrl+- /
+  Ctrl+0 zoom, F5 reloads, Ctrl+O opens, Ctrl+W closes.
+* Notepad colours .html .htm, .css, .js, .c .h, .cpp .hpp .cc files and names
+  the language in its status bar ("C", "C++", "JavaScript", "CSS", "HTML";
+  "Plain text" for everything else); check them with `dark=1` too. Files over
+  2 MB open in the big-file viewer, which colours its rows the same way.
+
 ### Finding coordinates
 
 * Screen is 1024x768. There is no taskbar: the bottom 48 px hold separate

@@ -520,7 +520,11 @@ ui_textarea_line_count, ui_textarea_get_cursor / set_cursor` (0-based line,
 column), `ui_textarea_select / get_selection` (byte offsets),
 `ui_textarea_find(w, needle, match_case)`, `ui_textarea_modified /
 set_modified, ui_textarea_undo / redo, ui_textarea_on_cursor`. CRLF is
-normalised to LF. The Widget Gallery's "Text area" tab shows it with line
+normalised to LF. Code colours: `ui_textarea_set_colors(w, fn, ctx)` - while
+painting, `fn(w, text, start, end, colors, ctx)` is called for every line on
+screen (top to bottom, empty ones too) with the whole text and the line's byte
+range and fills `colors[0 .. end - start)`, one colour per byte (0 = the normal
+text colour); Notepad colours HTML, CSS, JavaScript, C and C++ this way. The Widget Gallery's "Text area" tab shows it with line
 numbers and a Ln/Col status bar.
 
 Lists (listbox, dropdown, tabs share these): `ui_list_add` (returns index),
@@ -1014,9 +1018,10 @@ REGISTER_FILETYPE("*", "Hex Viewer", NULL, 0);                          /* offer
 
 `ext` has no dot; `"folder"` means directories, `"*"` any file (offered in
 Open With, never the automatic default). Registrations for apps that are not
-installed are ignored. Built in: `.txt .md .log .cfg .c .h .asm` -> Notepad,
+installed are ignored. Built in: `.txt .md .log .cfg .c .h .asm .css .js .cpp .hpp .cc` -> Notepad,
 `.bmp .ppm` -> Image Viewer (alternative Paint), `.note` -> Sticky Notes,
-`.html .htm` -> Web Browser, any file -> Hex Viewer, folders -> Files.
+`.html .htm` -> HTML Viewer (Web Browser and Notepad in Open With), any file
+-> Hex Viewer, folders -> Files.
 
 | Function | |
 |---|---|
@@ -1027,6 +1032,15 @@ installed are ignored. Built in: `.txt .md .log .cfg .c .h .asm` -> Notepad,
 | `filetype_description(path)` / `filetype_icon(ext)` | "Text document" / `ICON_*` |
 
 `app_for_file()` / `app_open_file()` (section 3) follow the same rules.
+
+**HTML Viewer** (`apps/htmlviewer.c`) opens .html / .htm files with the Web
+Browser's page pipeline (`browser_net.c`: `tab_go`, `tab_tick`, `tab_restyle`,
+`tab_follow_link`, `tab_free`), so pages look and behave as in a browser tab.
+Its `tab_t` lives in a `browser_t` of its own that has no tabs (`ntabs == 0`,
+`win` = the viewer's window): `browser_view()` sizes the page and browser.c
+leaves that window alone. Changes to the pipeline must keep such a host
+working; tabs the pipeline opens in it (`browser_new_tab`) are moved to new
+windows.
 
 **Opening.** `shell_open(path)` opens a file with its default app, a folder in
 Files, an app by name (`"Notepad"` or `"app:Notepad"`), and shows the
@@ -1086,7 +1100,7 @@ icon_draw_alpha(ICON_BELL, s, x, y, 48, 128);                       /* faded */
 Kinds: folders (`ICON_FOLDER`, `_DOCUMENTS`, `_PICTURES`, `_MUSIC`,
 `_DOWNLOADS`, `_DESKTOP`, `_SYSTEM`, `_HOME`), files (`ICON_FILE_TEXT`,
 `_CODE`, `_IMAGE`, `_AUDIO`, `_ARCHIVE`, `_BINARY`, `_UNKNOWN`, `_LOG`,
-`_CONFIG`, `ICON_NOTE`, `ICON_PAINT`), objects (`ICON_APP`, `ICON_DISK`,
+`_CONFIG`, `_HTML`, `_CSS`, `_JS`, `_C`, `_CPP`, `ICON_NOTE`, `ICON_PAINT`), objects (`ICON_APP`, `ICON_DISK`,
 `ICON_COMPUTER`, `ICON_TRASH`, `ICON_GEAR`, `ICON_SERVICE`, `ICON_SETTINGS`,
 `ICON_BELL`, `ICON_ALARM`, `ICON_CLOCK`, `ICON_SEARCH`, `ICON_RUN`, `ICON_PIN`,
 `ICON_TERMINAL`), status (`ICON_INFO`, `ICON_WARNING`, `ICON_ERROR`,
