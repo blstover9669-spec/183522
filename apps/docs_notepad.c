@@ -776,6 +776,7 @@ static void view_draw(widget_t *w, surface_t *s, rect_t r) {
             if (!len || vfs_seek(fd, (int32_t)start, VFS_SEEK_SET) < 0) continue;
             int whole = vfs_read(fd, v->buf, len);
             if (whole <= 0) continue;
+            memset(v->cols, 0, (size_t)whole * sizeof(uint32_t));   /* only coloured bytes get written */
             hst = hl_line(&pal, np->lang, (const char *)v->buf, whole, v->cols, hst);
             got = whole > (int)v->hcol ? (int)MIN(n, (uint32_t)whole - v->hcol) : 0;
         } else {

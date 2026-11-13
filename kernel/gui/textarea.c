@@ -474,13 +474,13 @@ void textarea_paint(surface_t *s, widget_t *w) {
         }
         /* text (in the colours the colour callback gives, if any) */
         uint32_t *cols = NULL;
-        if (t->color_fn && w->enabled && le > ls) {
-            if (le - ls > t->colcap) {
-                int nc = MAX(le - ls, 256);
+        if (t->color_fn && w->enabled) {                  /* every line, empty ones too */
+            if (le - ls >= t->colcap) {
+                int nc = MAX(le - ls + 1, 256);
                 uint32_t *nb = krealloc(t->colbuf, sizeof(uint32_t) * (size_t)nc);
                 if (nb) { t->colbuf = nb; t->colcap = nc; }
             }
-            if (t->colcap >= le - ls) {
+            if (t->colcap > le - ls) {
                 cols = t->colbuf;
                 memset(cols, 0, sizeof(uint32_t) * (size_t)(le - ls));
                 t->color_fn(w, w->text, ls, le, cols, t->color_ctx);
