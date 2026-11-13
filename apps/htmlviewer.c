@@ -4,12 +4,13 @@
  * Pages go through the Web Browser's page pipeline (browser_net.c: tab_go, tab_tick,
  * tab_restyle, tab_follow_link, and the web engine in web_*.c) - the one its tabs
  * use - so a page looks the same here as in a browser tab and runs what the pipeline
- * runs. The viewer keeps one tab_t of its own in a browser_t that has no tabs: for
- * such a host browser.c never touches the window (title, address bar), and the
- * pipeline lays pages out for browser_view(), this window's client area without the
- * browser's chrome - as wide as the viewer's page area, a little less high (which
- * only matters for vh units). The viewer draws the page itself and repaints it when
- * its layout, pictures or scroll position change.
+ * runs, scripts included. The viewer keeps one tab_t of its own in a browser_t that
+ * has no tabs: for such a host browser.c never touches the window (title, address
+ * bar), browser_view() asks the viewer for its page area (the host_view hook), the
+ * page gets the viewer's mouse and keys through tab_page_input() (scripts' event
+ * handlers, form controls), and the viewer draws the page itself, repainting when
+ * the pipeline says the page changed (paint_gen) or its layout, pictures or scroll
+ * position change.
  *
  *   - the file name in the title; links between local pages (other files open in
  *     their own app, folders in Files); stylesheets and pictures load from disk;
@@ -97,6 +98,14 @@ static rect_t page_view(hv_t *v) {
 static rect_t vbar_rect(hv_t *v) { rect_t r = page_view(v); return rect_make(r.x + r.w, r.y, HV_SB, r.h); }
 static rect_t hbar_rect(hv_t *v) { rect_t r = page_view(v); return rect_make(r.x, r.y + r.h, r.w, HV_SB); }
 
+/* browser_t.host_view: the page area the pipeline lays pages out for */
+static rect_t host_view(browser_t *b) {
+    hv_t *v = win_get_userdata(b->win);
+    return v ? page_view(v) : rect_make(0, 0, 0, 0);
+}
+
+static bool is_text(const web_ctrl_t *c) { return c->type == C_TEXT || c->type == C_PASSWORD || c->type == C_TEXTAREA; }
+
 static void thumb(int len, int total, int page, int pos, int *tp, int *tl) {
     *tl = MAX(24, (int)((int64_t)len * page / MAX(1, total)));
     if (*tl > len) *tl = len;
@@ -104,7 +113,7 @@ static void thumb(int len, int total, int page, int pos, int *tp, int *tl) {
     *tp = maxpos > 0 ? (int)((int64_t)(len - *tl) * pos / maxpos) : 0;
 }
 
-/* the pipeline clamps scrolling to its (lower) view; this window shows more of the page */
+/* keep the scroll position inside the page (it may have become shorter) */
 static void clamp_scroll(hv_t *v) {
     tab_t *t = v->tab;
     if (!t) return;
@@ -113,9 +122,10 @@ static void clamp_scroll(hv_t *v) {
     t->sx = CLAMP(t->sx, 0, MAX(0, t->pg.lay.width - r.w));
 }
 
-/* What is on screen: the page, its layout, its pictures and the scroll position. The
-   pipeline changes them from its own steps (pictures decoded, stylesheets, scripts),
-   so the timer compares this every tick and repaints when it differs. */
+/* What is on screen: the page, its layout, its pictures, the scroll position and the
+   pipeline's paint_gen (control values, focus, caret - what scripts change without a
+   new layout). The pipeline changes them from its own steps (pictures decoded,
+   stylesheets, scripts), so the timer compares this every tick and repaints on a change. */
 static uint32_t page_sig(hv_t *v) {
     tab_t *t = v->tab;
     uint32_t h = 2166136261u;
@@ -123,6 +133,7 @@ static uint32_t page_sig(hv_t *v) {
     if (!t) return h;
     const web_layout_t *L = &t->pg.lay;
     MIX(t->gen); MIX(t->styled); MIX(t->sx); MIX(t->sy); MIX(t->hover_link + 1); MIX(t->zoom);
+    MIX(t->paint_gen); MIX(t->focus_ctrl + 1);
     MIX(L->nitems); MIX(L->width); MIX(L->height); MIX(L->bg);
     for (int i = 0; i < L->nitems; i++) {
         const web_item_t *it = &L->items[i];
@@ -165,6 +176,15 @@ static void sync_chrome(hv_t *v) {
 static void page_dirty(hv_t *v) {
     v->pc_valid = false;
     ui_invalidate(v->page);
+}
+
+/* The page's input (scripts' event handlers, form controls): x, y = the pointer in
+   document coordinates. true = the page used the event. */
+static bool page_input(hv_t *v, const event_t *ev, int x, int y) {
+    bool used;
+    PIPE(used = tab_page_input(v->tab, ev, x, y));
+    if (used) page_dirty(v);
+    return used;
 }
 
 /* after the pipeline changed the page: clamp, retitle, repaint */
@@ -329,6 +349,7 @@ static void page_draw(widget_t *w, surface_t *s, rect_t clip) {
             memset(&o, 0, sizeof o);
             o.hover_link = t->hover_link;
             o.focus_ctrl = t->focus_ctrl;
+            o.caret_on = v->host->caret_on;
             o.hl_current = -1;
             web_paint(&t->pg, v->pc, rect_make(0, 0, r.w, r.h), t->sx, t->sy, &o);
         } else {
@@ -376,10 +397,13 @@ static bool page_event(widget_t *w, const event_t *ev) {
     tab_t *t = v->tab;
     if (!t) return false;
     rect_t r = page_view(v);
+    bool in = rect_contains(r, ev->x, ev->y) && t->styled;
+    int dx = ev->x - r.x + t->sx, dy = ev->y - r.y + t->sy;     /* document coordinates */
     switch (ev->type) {
     case EV_MOUSE_WHEEL:
-        if (ev->mods & MOD_CTRL) zoom_step(v, ev->wheel < 0 ? 1 : -1);
-        else if (ev->mods & MOD_SHIFT) scroll_to(v, t->sx + ev->wheel * 60, t->sy);
+        if (ev->mods & MOD_CTRL) { zoom_step(v, ev->wheel < 0 ? 1 : -1); return true; }
+        if (in && page_input(v, ev, dx, dy)) return true;         /* the page scrolled something itself */
+        if (ev->mods & MOD_SHIFT) scroll_to(v, t->sx + ev->wheel * 60, t->sy);
         else scroll_to(v, t->sx, t->sy + ev->wheel * 60);
         return true;
     case EV_MOUSE_DOWN: {
@@ -403,16 +427,21 @@ static bool page_event(widget_t *w, const event_t *ev) {
             return true;
         }
         v->press_link = -1;
-        if (!rect_contains(r, ev->x, ev->y) || !t->styled) return true;
-        int l = web_hit_link(&t->pg, ev->x - r.x + t->sx, ev->y - r.y + t->sy);
-        if (ev->button == MOUSE_LEFT) v->press_link = l;
-        else if (ev->button == MOUSE_MIDDLE && l >= 0) follow_link(v, l, true);
+        if (!in) return true;
+        if (ev->button == MOUSE_LEFT) {
+            if (page_input(v, ev, dx, dy)) return true;           /* a form control */
+            v->press_link = web_hit_link(&t->pg, dx, dy);
+        } else if (ev->button == MOUSE_MIDDLE) {
+            int l = web_hit_link(&t->pg, dx, dy);
+            if (l >= 0) follow_link(v, l, true);
+        }
         return true;
     }
     case EV_MOUSE_UP:
         if (v->drag) { v->drag = 0; page_dirty(v); return true; }
+        if (ev->button == MOUSE_LEFT && in && page_input(v, ev, dx, dy)) { v->press_link = -1; return true; }
         if (ev->button == MOUSE_LEFT && v->press_link >= 0 && t->styled) {
-            int l = web_hit_link(&t->pg, ev->x - r.x + t->sx, ev->y - r.y + t->sy), pl = v->press_link;
+            int l = web_hit_link(&t->pg, dx, dy), pl = v->press_link;
             v->press_link = -1;
             if (l == pl) {
                 set_hover(v, -1);
@@ -436,17 +465,30 @@ static bool page_event(widget_t *w, const event_t *ev) {
             if (hb.w - tl > 0) scroll_to(v, (int)((int64_t)(ev->x - hb.x - v->drag_off) * (total - r.w) / (hb.w - tl)), t->sy);
             return true;
         }
-        int l = -1;
-        if (rect_contains(r, ev->x, ev->y) && t->styled) l = web_hit_link(&t->pg, ev->x - r.x + t->sx, ev->y - r.y + t->sy);
-        win_set_cursor(v->win, l >= 0 ? CURSOR_HAND : CURSOR_ARROW);
+        int l = -1, cursor = CURSOR_ARROW;
+        if (in) {
+            page_input(v, ev, dx, dy);                            /* (the page's scripts: mouse moves) */
+            int c = web_hit_ctrl(&t->pg, dx, dy);
+            if (c >= 0) cursor = is_text(&t->pg.ctrls[c]) ? CURSOR_IBEAM : CURSOR_ARROW;
+            else if ((l = web_hit_link(&t->pg, dx, dy)) >= 0) cursor = CURSOR_HAND;
+        }
+        win_set_cursor(v->win, cursor);
         set_hover(v, l);
         return true;
     }
     case EV_MOUSE_LEAVE:
+        page_input(v, ev, 0, 0);
         set_hover(v, -1);
         return false;
-    case EV_KEY_DOWN:
+    case EV_DOUBLE_CLICK:
+        if (in) page_input(v, ev, dx, dy);
+        return true;
+    case EV_KEY_DOWN: case EV_CHAR:
+        if (page_input(v, ev, 0, 0)) return true;                 /* typing into a control, a script's keys */
         return page_keys(v, ev);
+    case EV_KEY_UP:
+        page_input(v, ev, 0, 0);
+        return false;
     default:
         return false;
     }
@@ -552,6 +594,16 @@ static void hv_event(window_t *win, const event_t *ev) {
             v->msg[0] = 0;
             status_dirty(v);
         }
+        tab_t *t = v->tab;                       /* the caret of a text field blinks */
+        if (t && t->focus_ctrl >= 0 && t->focus_ctrl < t->pg.nctrls && is_text(&t->pg.ctrls[t->focus_ctrl]) &&
+            ui_has_focus(v->page) && now - v->host->caret_t >= 530) {
+            v->host->caret_t = now;
+            v->host->caret_on = !v->host->caret_on;
+            web_ctrl_t *c = &t->pg.ctrls[t->focus_ctrl];
+            rect_t r = page_view(v);
+            v->pc_valid = false;
+            win_invalidate_rect(win, r.x + c->x - t->sx, r.y + c->y - t->sy, c->w, c->h);
+        }
         if (page_sig(v) != v->sig) page_changed(v);
         break;
     }
@@ -583,6 +635,7 @@ static void hv_launch(const char *arg) {
     v->win = win;
     v->host = host;
     host->win = win;
+    host->host_view = host_view;           /* pages are laid out for the viewer's page area */
     v->press_link = -1;
     win_set_userdata(win, v);
     win_set_event_handler(win, hv_event);
