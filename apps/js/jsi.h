@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
+#include <ctype.h>
 
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -289,8 +290,11 @@ struct JSContext {
     JSObject *proto_regexp_iter, *proto_generator, *proto_async_gen, *proto_gen_func, *proto_async_func;
     JSObject *proto_async_gen_func, *proto_promise, *proto_regexp, *proto_date, *proto_map, *proto_set;
     JSObject *proto_weakmap, *proto_weakset, *proto_weakref, *proto_arraybuffer, *proto_dataview;
-    JSObject *proto_typed, *proto_ta[TA_COUNT], *proto_async_from_sync;
-    JSObject *ctor_promise, *ctor_array, *ctor_object, *ctor_typed[TA_COUNT], *ctor_regexp;
+    JSObject *proto_typed, *proto_ta[TA_COUNT], *proto_async_from_sync, *proto_finreg, *proto_async_iter;
+    JSObject *ctor_promise, *ctor_array, *ctor_object, *ctor_typed[TA_COUNT], *ctor_url;
+    JSObject *proto_textenc, *proto_textdec, *proto_url, *proto_usp, *proto_intl_nf, *proto_intl_dtf;
+    JSObject *proto_intl_coll, *proto_intl_pr, *proto_intl_rtf;
+    JSObject *ctor_regexp;        /* (last of the JSObject * block the GC walks) */
     JSValue throw_type_error;     /* %ThrowTypeError% */
     JSValue array_values;         /* Array.prototype.values (arguments[@@iterator]) */
     JSValue fn_has_instance;      /* Function.prototype[@@hasInstance] */
@@ -299,8 +303,11 @@ struct JSContext {
     JSJob *jobs, *jobs_tail, *cur_job;
     bool drive_pending, no_suspend, task_threw, gen_raw, gen_done, gen_awaiting;
     int resume_mode;
-    JSValue resume_val, array_iter_next;
+    JSValue resume_val, array_iter_next, regexp_exec, unhandled;
+    JSValue td_enc_key, sp_list_key, sp_url_key, intl_opts_key;
+    int url_class;
     double slice_t, slice_start_d, task_t0;
+    JSObject *join_stack[64]; int njoin;    /* Array.prototype.join cycle check */
     int task_status;
     JSValue eval_fn;              /* the realm's eval (direct eval check) */
     JSValue async_ok, async_fail; /* the native reaction functions resuming async frames */
@@ -536,6 +543,8 @@ typedef struct JSRegExp JSRegExp;
 JSRegExp *js_re_compile(JSContext *ctx, const uint16_t *pat, uint32_t plen, uint32_t flags, char *err, int errsize);
 void      js_re_free(JSContext *ctx, JSRegExp *re);
 int       js_re_ncaps(JSRegExp *re);
+uint32_t  js_re_get_flags(JSRegExp *re);
+void      js_re_set_flags(JSRegExp *re, uint32_t flags);
 JSValue   js_re_group_names(JSContext *ctx, JSRegExp *re);    /* array of names (or undefined per group) */
 /* match at index; caps[2*ncaps] filled (-1 = unmatched); 1 match, 0 none, -1 error (stack / exception) */
 int       js_re_exec(JSContext *ctx, JSRegExp *re, const uint16_t *s, uint32_t len, uint32_t start, int32_t *caps);

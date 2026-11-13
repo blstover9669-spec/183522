@@ -47,7 +47,7 @@ OBJS := $(patsubst %.asm,$(BUILD)/obj/%.asm.o,$(KERNEL_ASM)) \
 KERNEL := $(BUILD)/kernel.elf
 ISO    := $(BUILD)/$(ISO_NAME)
 
-.PHONY: all kernel iso run run-kernel clean
+.PHONY: all kernel iso run run-kernel clean jstest
 all: $(ISO)
 ifeq ($(BUILD),build)
 	@cp -f $(ISO) ./$(ISO_NAME)
@@ -172,3 +172,17 @@ clean:
 	rm -rf $(BUILD) ./$(ISO_NAME)
 
 -include $(OBJS:.o=.d)
+
+# NovaJS host tests: the engine (apps/js) built for this machine with tests/js/jsrun.c,
+# once as 64-bit code and once as i386 code with x87 maths like the kernel.
+JSTEST_DIR ?= build-jstest
+JSTEST_SRC := tests/js/jsrun.c $(wildcard apps/js/*.c)
+JSTEST_FLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -fno-strict-aliasing
+JSTEST_FILES = $(filter-out tests/js/harness.js,$(sort $(wildcard tests/js/*.js)))
+jstest:
+	@mkdir -p $(JSTEST_DIR)
+	@echo "  HOSTCC $(JSTEST_DIR)/jsrun $(JSTEST_DIR)/jsrun32"
+	@gcc $(JSTEST_FLAGS) -o $(JSTEST_DIR)/jsrun $(JSTEST_SRC) -lm
+	@gcc -m32 -mfpmath=387 -DJSRUN_X87 $(JSTEST_FLAGS) -o $(JSTEST_DIR)/jsrun32 $(JSTEST_SRC) -lm
+	@$(JSTEST_DIR)/jsrun -h tests/js/harness.js $(JSTEST_FILES)
+	@$(JSTEST_DIR)/jsrun32 -h tests/js/harness.js $(JSTEST_FILES) | tail -1

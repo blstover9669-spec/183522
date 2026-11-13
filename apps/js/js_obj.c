@@ -394,7 +394,7 @@ static JSValue proxy_trap(JSContext *ctx, JSObject *p, int atom, JSValue *handle
 }
 
 static JSValue proxy_get(JSContext *ctx, JSObject *p, JSValue key, JSValue recv) {
-    JSValue h, t = js_check_stack(ctx) ? proxy_trap(ctx, p, A_get, &h) : js_throw_range(ctx, "Maximum call stack size exceeded");
+    JSValue h = JS_UNDEFINED, t = js_check_stack(ctx) ? proxy_trap(ctx, p, A_get, &h) : js_throw_range(ctx, "Maximum call stack size exceeded");
     if (JS_IsException(t)) return t;
     if (JS_IsUndefined(t)) return js_getp_recv(ctx, p->u.px.target, key, recv);
     JSValue args[3] = { p->u.px.target, key, recv };
@@ -402,7 +402,7 @@ static JSValue proxy_get(JSContext *ctx, JSObject *p, JSValue key, JSValue recv)
 }
 
 static int proxy_set(JSContext *ctx, JSObject *p, JSValue key, JSValue v, JSValue recv, bool strict) {
-    JSValue h, t = proxy_trap(ctx, p, A_set, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_set, &h);
     if (JS_IsException(t)) return -1;
     if (JS_IsUndefined(t)) return js_setp(ctx, p->u.px.target, key, v, recv, strict);
     JSValue args[4] = { p->u.px.target, key, v, recv };
@@ -416,7 +416,7 @@ static int proxy_set(JSContext *ctx, JSObject *p, JSValue key, JSValue v, JSValu
 }
 
 static int proxy_has(JSContext *ctx, JSObject *p, JSValue key) {
-    JSValue h, t = proxy_trap(ctx, p, A_has, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_has, &h);
     if (JS_IsException(t)) return -1;
     if (JS_IsUndefined(t)) return js_has_prop(ctx, p->u.px.target, key);
     JSValue args[2] = { p->u.px.target, key };
@@ -426,7 +426,7 @@ static int proxy_has(JSContext *ctx, JSObject *p, JSValue key) {
 }
 
 static int proxy_delete(JSContext *ctx, JSObject *p, JSValue key, bool strict) {
-    JSValue h, t = proxy_trap(ctx, p, A_deleteProperty, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_deleteProperty, &h);
     if (JS_IsException(t)) return -1;
     if (JS_IsUndefined(t)) return js_delete_prop(ctx, p->u.px.target, key, strict);
     JSValue args[2] = { p->u.px.target, key };
@@ -437,7 +437,7 @@ static int proxy_delete(JSContext *ctx, JSObject *p, JSValue key, bool strict) {
 }
 
 static int proxy_define(JSContext *ctx, JSObject *p, JSValue key, const JSDesc *d) {
-    JSValue h, t = proxy_trap(ctx, p, A_defineProperty, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_defineProperty, &h);
     if (JS_IsException(t)) return -1;
     if (JS_IsUndefined(t)) return js_define_own(ctx, p->u.px.target, key, d);
     JSValue dobj = js_desc_to_obj(ctx, d);
@@ -453,7 +453,7 @@ static int proxy_define(JSContext *ctx, JSObject *p, JSValue key, const JSDesc *
 }
 
 static int proxy_get_own(JSContext *ctx, JSObject *p, JSValue key, JSDesc *d) {
-    JSValue h, t = proxy_trap(ctx, p, A_getOwnPropertyDescriptor, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_getOwnPropertyDescriptor, &h);
     if (JS_IsException(t)) return -1;
     if (JS_IsUndefined(t)) return js_get_own_desc(ctx, p->u.px.target, key, d);
     JSValue args[2] = { p->u.px.target, key };
@@ -474,7 +474,7 @@ static int proxy_get_own(JSContext *ctx, JSObject *p, JSValue key, JSDesc *d) {
 }
 
 static JSValue proxy_own_keys(JSContext *ctx, JSObject *p) {
-    JSValue h, t = proxy_trap(ctx, p, A_ownKeys, &h);
+    JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, p, A_ownKeys, &h);
     if (JS_IsException(t)) return t;
     if (JS_IsUndefined(t)) return js_own_keys(ctx, p->u.px.target, OK_STRINGS | OK_SYMBOLS);
     JSValue args[1] = { p->u.px.target };
@@ -1254,7 +1254,7 @@ JSObject *js_get_proto_obj(JSContext *ctx, JSValue v, bool *exc) {
     if (!JS_IsObject(v)) return proto_of_prim(ctx, v);
     JSObject *o = OBJ(v);
     if (o->h.cls == CL_PROXY) {
-        JSValue h, t = proxy_trap(ctx, o, A_getPrototypeOf, &h);
+        JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, o, A_getPrototypeOf, &h);
         if (JS_IsException(t)) { *exc = true; return NULL; }
         if (JS_IsUndefined(t)) return js_get_proto_obj(ctx, o->u.px.target, exc);
         JSValue args[1] = { o->u.px.target };
@@ -1270,7 +1270,7 @@ JSObject *js_get_proto_obj(JSContext *ctx, JSValue v, bool *exc) {
 int js_set_proto_obj(JSContext *ctx, JSValue v, JSObject *proto, bool throw) {
     JSObject *o = OBJ(v);
     if (o->h.cls == CL_PROXY) {
-        JSValue h, t = proxy_trap(ctx, o, A_setPrototypeOf, &h);
+        JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, o, A_setPrototypeOf, &h);
         if (JS_IsException(t)) return -1;
         if (JS_IsUndefined(t)) return js_set_proto_obj(ctx, o->u.px.target, proto, throw);
         JSValue args[2] = { o->u.px.target, proto ? JS_MKOBJ(proto) : JS_NULL };
@@ -1295,7 +1295,7 @@ int js_set_proto_obj(JSContext *ctx, JSValue v, JSObject *proto, bool throw) {
 int js_prevent_ext(JSContext *ctx, JSValue v) {
     JSObject *o = OBJ(v);
     if (o->h.cls == CL_PROXY) {
-        JSValue h, t = proxy_trap(ctx, o, A_preventExtensions, &h);
+        JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, o, A_preventExtensions, &h);
         if (JS_IsException(t)) return -1;
         if (JS_IsUndefined(t)) return js_prevent_ext(ctx, o->u.px.target);
         JSValue args[1] = { o->u.px.target };
@@ -1312,7 +1312,7 @@ int js_is_extensible(JSContext *ctx, JSValue v) {
     if (!JS_IsObject(v)) return 0;
     JSObject *o = OBJ(v);
     if (o->h.cls == CL_PROXY) {
-        JSValue h, t = proxy_trap(ctx, o, A_isExtensible, &h);
+        JSValue h = JS_UNDEFINED, t = proxy_trap(ctx, o, A_isExtensible, &h);
         if (JS_IsException(t)) return -1;
         if (JS_IsUndefined(t)) return js_is_extensible(ctx, o->u.px.target);
         JSValue args[1] = { o->u.px.target };

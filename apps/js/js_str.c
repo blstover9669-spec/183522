@@ -407,6 +407,7 @@ bool js_is_space(uint32_t c) {
 }
 
 bool js_is_id_start(uint32_t c) {
+    if (c > 0x10FFFF) return false;
     if (c < 128) return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '$' || c == '_';
     if (js_is_space(c)) return false;
     if (c < 0x100) return c == 0xAA || c == 0xB5 || c == 0xBA || (c >= 0xC0 && c != 0xD7 && c != 0xF7);

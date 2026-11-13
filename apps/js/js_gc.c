@@ -399,6 +399,12 @@ static void mark_roots(JSContext *ctx) {
     }
     js_gc_mark_value(ctx, ctx->eval_fn);
     js_gc_mark_value(ctx, ctx->array_iter_next);
+    js_gc_mark_value(ctx, ctx->regexp_exec);
+    js_gc_mark_value(ctx, ctx->unhandled);
+    js_gc_mark_value(ctx, ctx->td_enc_key);
+    js_gc_mark_value(ctx, ctx->sp_list_key);
+    js_gc_mark_value(ctx, ctx->sp_url_key);
+    js_gc_mark_value(ctx, ctx->intl_opts_key);
     js_gc_mark_value(ctx, ctx->async_ok);
     js_gc_mark_value(ctx, ctx->async_fail);
     for (int i = 0; i < ctx->nroots; i++) if (!JS_IsMarker(ctx->roots[i])) js_gc_mark_value(ctx, ctx->roots[i]);

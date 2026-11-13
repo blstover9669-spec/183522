@@ -1804,7 +1804,7 @@ static JSValue run(JSContext *ctx, int stop) {
         case OP_CLASS: {
             uint32_t fl = RD8();
             SAVE();
-            JSValue proto;
+            JSValue proto = JS_UNDEFINED;
             JSValue r = class_create(ctx, sp[-2], sp[-1], fl & 1, &proto);
             CHECK(r);
             sp[-2] = r;
@@ -2392,7 +2392,8 @@ JSContext *js_new_context(const js_host_t *host) {
     JSValue *vals[] = { &ctx->exception, &ctx->empty_str, &ctx->symreg, &ctx->native_data, &ctx->native_nt, &ctx->global,
                         &ctx->global_lex, &ctx->throw_type_error, &ctx->array_values, &ctx->fn_has_instance,
                         &ctx->obj_to_string, &ctx->template_cache, &ctx->eval_fn, &ctx->async_ok, &ctx->async_fail,
-                        &ctx->resume_val, &ctx->array_iter_next };
+                        &ctx->resume_val, &ctx->array_iter_next, &ctx->regexp_exec, &ctx->unhandled,
+                        &ctx->td_enc_key, &ctx->sp_list_key, &ctx->sp_url_key, &ctx->intl_opts_key };
     for (size_t i = 0; i < sizeof vals / sizeof vals[0]; i++) *vals[i] = JS_UNDEFINED;
     for (int i = 0; i < A_COUNT; i++) ctx->a[i] = JS_UNDEFINED;
     for (int i = 0; i < WK_COUNT; i++) ctx->wk[i] = JS_UNDEFINED;

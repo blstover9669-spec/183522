@@ -366,6 +366,8 @@ int js_dtoa_exp(double v, int frac, char *buf, int size) {
 }
 
 int js_dtoa_prec(double v, int prec, char *buf, int size) {
+    if (prec < 1) prec = 1;
+    if (prec > 100) prec = 100;
     if (v != v) { strlcpy(buf, "NaN", (size_t)size); return 3; }
     int o = 0;
     if (v < 0) { buf[o++] = '-'; v = -v; }
