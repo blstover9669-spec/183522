@@ -425,8 +425,16 @@ static void res_stmt(Comp *c, Scope *s, Node *n) {
     }
 }
 
+static Scope *res_func_begin(Comp *c, Func *f, Scope *outer);
+
 static void res_func(Comp *c, Func *f, Scope *outer) {
-    if (c->failed) return;
+    Scope *S = res_func_begin(c, f, outer);
+    if (S) res_stmts(c, S, f->body);
+}
+
+/* a function's scope and declarations (its statements are resolved after: res_stmts) */
+static Scope *res_func_begin(Comp *c, Func *f, Scope *outer) {
+    if (c->failed) return NULL;
     int nformals = 0;
     for (Node *p = f->params; p; p = p->next) if (p->k != N_REST) nformals++;
     f->nlocals = nformals;
@@ -455,7 +463,7 @@ static void res_func(Comp *c, Func *f, Scope *outer) {
     declare_lex(c, S, f->body, false);
     for (Node *p = f->params; p; p = p->next) res_pattern(c, S, p);
     if (f->kind == FK_DERIVED) hidden(c, f, 0);
-    res_stmts(c, S, f->body);
+    return S;
 }
 
 /* ==== code generation ================================================================================= */
@@ -756,6 +764,12 @@ static void gen_store(FS *fs, Binding *b, JSValue name, int mode) {
 /* initialise the bindings of a scope at its entry (boxes, TDZ, function declarations) */
 static void gen_func_closure(FS *fs, Func *f);
 
+/* a function's name, given by where it is defined (it may be compiled already: js_compile_job) */
+static void set_fn_name(Func *f, JSValue name) {
+    f->name = name;
+    if (f->bc) f->bc->name = name;
+}
+
 static void gen_scope_entry(FS *fs, Scope *s) {
     if (!s) return;
     for (Binding *b = s->b; b; b = b->next) {
@@ -887,7 +901,7 @@ static bool anon_fn(Node *e) {
 /* gen e; if it is an anonymous function / class, name it */
 static void gen_named(FS *fs, Node *e, JSValue name) {
     if (e->k == N_FUNC && JS_IsUndefined(e->fn->name) && JS_IsString(name)) {
-        e->fn->name = name;
+        set_fn_name(e->fn, name);
         gen_expr(fs, e);
         return;
     }
@@ -1227,7 +1241,7 @@ static void gen_object(FS *fs, Node *e) {
                 gen_func_closure(fs, pr->b->fn);
                 emit8(fs, OP_DEFINE_METHOD_ELEM, (uint32_t)(kind | 4));
             } else {
-                if (JS_IsUndefined(pr->b->fn->name)) pr->b->fn->name = pr->a->v;
+                if (JS_IsUndefined(pr->b->fn->name)) set_fn_name(pr->b->fn, pr->a->v);
                 gen_func_closure(fs, pr->b->fn);
                 emit(fs, OP_DEFINE_METHOD);
                 put32(fs, add_const(fs, pr->a->v));
@@ -1599,8 +1613,8 @@ static void gen_class(FS *fs, Node *cls, JSValue name) {
         ctor->parent = fs->f;
         cls->fn = ctor;
         res_func(c, ctor, K);
-    } else ctor->name = cname;
-    if (JS_IsUndefined(ctor->name)) ctor->name = c->ctx->empty_str;
+    } else set_fn_name(ctor, cname);
+    if (JS_IsUndefined(ctor->name)) set_fn_name(ctor, c->ctx->empty_str);
     gen_func_closure(fs, ctor);
     emit8(fs, OP_CLASS, cls->b ? 1 : 0);            /* [heritage ctor] -> [ctor proto] */
     add_sp(fs, 0);
@@ -1621,7 +1635,7 @@ static void gen_class(FS *fs, Node *cls, JSValue name) {
         if (el->flags & NF_PRIVATE) {
             gen_private_sym(fs, el->res, el->a->v);
             Func *mf = el->b->fn;
-            if (JS_IsUndefined(mf->name)) mf->name = el->a->v;
+            if (JS_IsUndefined(mf->name)) set_fn_name(mf, el->a->v);
             gen_func_closure(fs, mf);
             emit8(fs, OP_DEFINE_METHOD_ELEM, (uint32_t)kind);
         } else if (el->flags & NF_COMPUTED) {
@@ -1631,7 +1645,7 @@ static void gen_class(FS *fs, Node *cls, JSValue name) {
             emit8(fs, OP_DEFINE_METHOD_ELEM, (uint32_t)kind);
         } else {
             Func *mf = el->b->fn;
-            if (JS_IsUndefined(mf->name)) mf->name = el->a->v;
+            if (JS_IsUndefined(mf->name)) set_fn_name(mf, el->a->v);
             gen_func_closure(fs, mf);
             emit(fs, OP_DEFINE_METHOD);
             put32(fs, add_const(fs, el->a->v));
@@ -2069,22 +2083,22 @@ static void gen_prologue(FS *fs) {
                 put8(fs, b->kind == BK_CONST ? 1 : 0);
             } else if (b->kind == BK_VAR) emit32(fs, OP_DEFINE_GLOBAL_VAR, add_const(fs, b->name));
         }
-        Node *fd[512];
+    }
+    /* function declarations, in source order (the list is reversed; there can be thousands) */
+    int nfd = 0;
+    for (Node *x = S->fdecls; x; x = x->d) nfd++;
+    Node **fd = nfd ? malloc(sizeof(Node *) * (size_t)nfd) : NULL;
+    if (nfd && !fd) cerr(fs->c, 0, "out of memory");
+    else {
         int n = 0;
-        for (Node *x = S->fdecls; x && n < 512; x = x->d) fd[n++] = x;
+        for (Node *x = S->fdecls; x; x = x->d) fd[n++] = x;
         for (int i = n - 1; i >= 0; i--) {
             gen_func_closure(fs, fd[i]->fn);
-            emit32(fs, OP_DEFINE_GLOBAL_FUNC, add_const(fs, fd[i]->fn->name));
-        }
-    } else {
-        Node *fd[512];
-        int n = 0;
-        for (Node *x = S->fdecls; x && n < 512; x = x->d) fd[n++] = x;
-        for (int i = n - 1; i >= 0; i--) {
-            gen_func_closure(fs, fd[i]->fn);
-            gen_store(fs, scope_find(S, fd[i]->fn->name), fd[i]->fn->name, ST_INIT);
+            if (f->kind == FK_SCRIPT) emit32(fs, OP_DEFINE_GLOBAL_FUNC, add_const(fs, fd[i]->fn->name));
+            else gen_store(fs, scope_find(S, fd[i]->fn->name), fd[i]->fn->name, ST_INIT);
         }
     }
+    free(fd);
     /* base class constructor: instance fields first */
     if (f->kind == FK_CTOR && f->fields) {
         emit(fs, OP_PUSH_THIS);
@@ -2255,6 +2269,119 @@ JSBytecode *js_compile_ex(JSContext *ctx, JSValue src, JSValue name, int line, u
     js_parser_free(p);
     ctx->no_gc--;
     return b;
+}
+
+/* ==== compiling in steps ===================================================================================
+   A big script is compiled a slice at a time so the host's loop keeps running: the program's
+   statements are parsed, then resolved, a few at a time; then every function is compiled on its
+   own, the innermost first (a function's code does not depend on its parent's), and last the
+   program itself, whose functions are then all compiled. The GC stays off until the job ends. */
+enum { CJ_PARSE, CJ_RESOLVE, CJ_FUNCS, CJ_TOP, CJ_DONE, CJ_FAILED };
+struct JSCompileJob {
+    JSContext *ctx;
+    JSValue src, name, requests;
+    uint32_t fflags;
+    int phase, fi;
+    Parser *p;
+    Func *f;
+    Scope *S;
+    Node *cur;
+    Comp c;
+    JSBytecode *b;
+};
+
+JSCompileJob *js_compile_job(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags) {
+    JSString *s = js_flat(ctx, src);
+    if (!s) return NULL;
+    JSCompileJob *j = calloc(1, sizeof *j);
+    if (!j) { js_throw_oom(ctx); return NULL; }
+    j->ctx = ctx;
+    j->src = JS_MKSTR(s);
+    j->name = name;
+    j->requests = JS_UNDEFINED;
+    j->fflags = fflags;
+    ctx->no_gc++;
+    j->p = js_parse_begin(ctx, s->s, s->len, line, fflags);
+    if (!j->p) { ctx->no_gc--; free(j); return NULL; }
+    return j;
+}
+
+static bool cj_late(JSCompileJob *j, double until) { return js_mono_ms(j->ctx) >= until; }
+
+int js_compile_job_step(JSCompileJob *j, double until) {
+    JSContext *ctx = j->ctx;
+    for (;;) {
+        switch (j->phase) {
+        case CJ_PARSE:
+            if (!js_parse_more(j->p, until)) return 0;
+            j->f = js_parse_end(j->p);
+            if (!j->f) { j->phase = CJ_FAILED; return -1; }
+            if (j->fflags & F_MODULE) {
+                j->requests = js_array_from_list(ctx, j->f->mreq, (uint32_t)j->f->nmreq);
+                if (JS_IsException(j->requests)) { j->phase = CJ_FAILED; return -1; }
+                if (j->f->tla) js_setp(ctx, j->requests, js_atomc(ctx, "tla"), JS_TRUE, j->requests, false);
+            }
+            comp_init(&j->c, ctx);
+            j->c.p = j->p;
+            j->c.src = j->src;
+            j->c.srcname = j->name;
+            j->S = res_func_begin(&j->c, j->f, NULL);
+            j->cur = j->f->body;
+            j->phase = CJ_RESOLVE;
+            if (cj_late(j, until)) return 0;
+            break;
+        case CJ_RESOLVE:
+            while (j->cur && !j->c.failed) {
+                res_stmt(&j->c, j->S, j->cur);
+                j->cur = j->cur->next;
+                if (j->cur && cj_late(j, until)) return 0;
+            }
+            if (j->c.failed) goto failed;
+            js_parser_funcs(j->p, &j->fi);
+            j->fi--;
+            j->phase = CJ_FUNCS;
+            if (cj_late(j, until)) return 0;
+            break;
+        case CJ_FUNCS: {
+            int n;
+            Func **fs = js_parser_funcs(j->p, &n);
+            while (j->fi >= 1 && !j->c.failed) {          /* (fs[0] is the program) */
+                Func *f = fs[j->fi--];
+                if (f->scope && !f->bc) f->bc = compile_func(&j->c, f, NULL);
+                if (j->fi >= 1 && cj_late(j, until)) return 0;
+            }
+            if (j->c.failed) goto failed;
+            j->phase = CJ_TOP;
+            if (cj_late(j, until)) return 0;
+            break;
+        }
+        case CJ_TOP:
+            j->b = compile_func(&j->c, j->f, NULL);
+            if (j->c.failed || !j->b) goto failed;
+            j->phase = CJ_DONE;
+            return 1;
+        case CJ_DONE:
+            return 1;
+        default:
+            return -1;
+        }
+    }
+failed:
+    js_throw_syntax(ctx, "%s (line %d)", j->c.err, j->c.err_line);
+    j->phase = CJ_FAILED;
+    return -1;
+}
+
+JSBytecode *js_compile_job_result(JSCompileJob *j, JSValue *requests) {
+    if (requests) *requests = j->requests;
+    return j->phase == CJ_DONE ? j->b : NULL;
+}
+
+void js_compile_job_free(JSCompileJob *j) {
+    if (!j) return;
+    js_parser_free(j->p);
+    j->ctx->no_gc--;
+    free(j);
 }
 
 void js_bytecode_free(JSContext *ctx, JSBytecode *b) {

@@ -13,7 +13,7 @@
 'use strict';
 
 const LS = Symbol('listeners'), HS = Symbol('handlers'), HSRC = Symbol('handlerSource');
-const ES = Symbol('eventState');
+const ES = Symbol('eventState'), BASEC = Symbol('baseURI');
 const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
 const def = (o, props) => {
     for (const k of Reflect.ownKeys(props)) {
@@ -231,7 +231,7 @@ delete G.TouchEvent;     /* (no touch screen: pages test 'ontouchstart' in windo
 function report(e) {
     let msg;
     try {
-        msg = e instanceof Error ? (e.name + ': ' + e.message + (e.stack ? '\n' + e.stack : '')) : 'Uncaught ' + fmt(e);
+        msg = e instanceof Error ? (typeof e.stack === 'string' && e.stack ? e.stack : e.name + ': ' + e.message) : 'Uncaught ' + fmt(e);
     } catch (x) { msg = 'Uncaught exception'; }
     N.log(3, msg.indexOf('Uncaught') === 0 ? msg : 'Uncaught ' + msg);
     try {
@@ -418,7 +418,7 @@ function fmt(v, depth = 0, seen = []) {
     if (t === 'number' || t === 'boolean' || t === 'undefined' || v === null || t === 'bigint') return String(v);
     if (t === 'symbol') return v.toString();
     if (t === 'function') return '[Function: ' + (v.name || 'anonymous') + ']';
-    if (v instanceof Error) return v.name + ': ' + v.message;
+    if (v instanceof Error) return !depth && typeof v.stack === 'string' && v.stack ? v.stack : v.name + ': ' + v.message;
     if (v instanceof Node) {
         if (v.nodeType === 1) return '<' + v.localName + (v.id ? '#' + v.id : '') + (v.className && typeof v.className === 'string' ? '.' + v.className.trim().split(/\s+/).join('.') : '') + '>';
         if (v.nodeType === 3) return '#text ' + JSON.stringify(v.data.slice(0, 60));
@@ -518,7 +518,7 @@ function staticList(a) {
 function liveList(compute, proto) {
     let ver = -1, cur = [];
     const get = () => { const v = N.version(); if (v !== ver) { cur = compute(); ver = v; } return cur; };
-    const idx = (k) => (typeof k === 'string' && /^(0|[1-9][0-9]*)$/.test(k) ? +k : -1);
+    const idx = (k) => { if (typeof k !== 'string') return -1; const i = +k; return i >= 0 && String(i) === k ? i : -1; };
     return new Proxy(Object.create(proto || NodeList.prototype), {
         get(t, k, r) {
             if (k === 'length') return get().length;
@@ -848,11 +848,25 @@ function strAttr(proto, names) {
         });
     }
 }
+/* an attribute's URL made absolute (cached: pages read the same links' href again and again) */
+const urlCache = new Map();
+let urlCacheBase = null;
+function resolveURL(v) {
+    const base = document.baseURI;
+    if (base !== urlCacheBase) { urlCache.clear(); urlCacheBase = base; }
+    let r = urlCache.get(v);
+    if (r === undefined) {
+        try { r = new URL(v, base).href; } catch (e) { r = v; }
+        if (urlCache.size >= 2000) urlCache.clear();
+        urlCache.set(v, r);
+    }
+    return r;
+}
 function urlAttr(proto, names) {
     for (const nm of names) {
         const attr = nm.toLowerCase();
         Object.defineProperty(proto, nm, {
-            get() { const v = this.getAttribute(attr); if (v === null) return ''; try { return new URL(v, document.baseURI).href; } catch (e) { return v; } },
+            get() { const v = this.getAttribute(attr); return v === null ? '' : resolveURL(v); },
             set(v) { this.setAttribute(attr, str(v)); },
             configurable: true, enumerable: true,
         });
@@ -1324,7 +1338,16 @@ def(Document.prototype, {
     set title(v) { N.title(String(v)); },
     get URL() { return N.href(); },
     get documentURI() { return N.href(); },
-    get baseURI() { const b = N.query(this, 'base[href]', false); if (b) { try { return new URL(b.getAttribute('href'), N.href()).href; } catch (e) { /* ignore */ } } return N.href(); },
+    get baseURI() {
+        /* (cached until the document or its address changes) */
+        const ver = N.version(), href = N.href(), c = this[BASEC];
+        if (c && c.ver === ver && c.href === href) return c.base;
+        let base = href;
+        const b = N.query(this, 'base[href]', false);
+        if (b) { try { base = new URL(b.getAttribute('href'), href).href; } catch (e) { /* ignore */ } }
+        hidden(this, BASEC, { ver, href, base });
+        return base;
+    },
     get location() { return location; },
     set location(v) { location.href = v; },
     get domain() { try { return new URL(N.href()).hostname; } catch (e) { return ''; } },

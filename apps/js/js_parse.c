@@ -61,6 +61,12 @@ struct Parser {
     JSValue a_imp, a_exp, a_meta;
     int nre;
     bool tla;                   /* the module awaits at its top level */
+    /* parsing in steps (js_parse_more): the program's statements so far */
+    Node *top_list, **top_tail;
+    bool top_prologue;
+    /* every function made, in source order (the compiler compiles them one by one) */
+    Func **funcs;
+    int nfuncs, funcscap;
 };
 
 /* ==== arena ================================================================================= */
@@ -92,8 +98,11 @@ void js_parser_free(Parser *p) {
     Chunk *c = p->arena;
     while (c) { Chunk *nx = c->next; free(c); c = nx; }
     sb_free(&p->sb);
+    free(p->funcs);
     free(p);
 }
+
+Func **js_parser_funcs(Parser *p, int *n) { *n = p->nfuncs; return p->funcs; }
 
 static void error_at(Parser *p, int line, const char *fmt, ...) {
     if (p->failed) return;
@@ -649,6 +658,12 @@ static Func *new_func(Parser *p, int kind, uint32_t fflags) {
     f->simple_params = true;
     f->rest_slot = -1;
     if (p->fn && (p->fn->flags & F_STRICT)) f->flags |= F_STRICT;
+    if (p->nfuncs == p->funcscap) {
+        int nc = p->funcscap ? p->funcscap * 2 : 64;
+        Func **nf = realloc(p->funcs, sizeof(Func *) * (size_t)nc);
+        if (nf) { p->funcs = nf; p->funcscap = nc; }
+    }
+    if (p->nfuncs < p->funcscap) p->funcs[p->nfuncs++] = f;   /* (missing ones compile with their parent) */
     return f;
 }
 
@@ -2265,9 +2280,9 @@ static Node *parse_stmt(Parser *p) {
 }
 
 /* ==== entry ==================================================================================================== */
-Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_t len, int line, uint32_t fflags) {
+/* parsing in steps: js_parse_begin, js_parse_more until it returns true, js_parse_end */
+Parser *js_parse_begin(JSContext *ctx, const uint16_t *src, uint32_t len, int line, uint32_t fflags) {
     Parser *p = calloc(1, sizeof *p);
-    *pp = p;
     if (!p) { js_throw_oom(ctx); return NULL; }
     p->ctx = ctx;
     p->s = src;
@@ -2294,19 +2309,34 @@ Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_
     f->end = len;
     f->line = p->line;
     p->fn = f;
+    p->top_tail = &p->top_list;
+    p->top_prologue = true;
     next(p);
-    Node *list = NULL, **tail = &list;
-    bool prologue = true;
+    return p;
+}
+
+/* parse statements of the program until it ends (-> true) or the clock reaches until_ms */
+bool js_parse_more(Parser *p, double until_ms) {
+    Func *f = p->fn;
     while (!is(p, TK_EOF) && !p->failed) {
-        bool str_first = prologue && is(p, TK_STR);
+        bool str_first = p->top_prologue && is(p, TK_STR);
         Node *st = parse_stmt(p);
-        if (prologue) {
+        if (p->top_prologue) {
             if (str_first && st->k == N_EXPR && st->a->k == N_STR) { if (directive_strict(p, st)) { f->flags |= F_STRICT; f->use_strict = true; } }
-            else prologue = false;
+            else p->top_prologue = false;
         }
-        *tail = st;
-        tail = &st->next;
+        *p->top_tail = st;
+        p->top_tail = &st->next;
+        if (until_ms < 1e300 && js_mono_ms(p->ctx) >= until_ms) return is(p, TK_EOF) || p->failed;
     }
+    return true;
+}
+
+/* the program's function (NULL: a SyntaxError was thrown) */
+Func *js_parse_end(Parser *p) {
+    JSContext *ctx = p->ctx;
+    Func *f = p->fn;
+    Node *list = p->top_list;
     if (f->kind == FK_MODULE && !p->failed) {
         /* prologue: namespaces, exports, then wait until the graph is linked (await meta.go) */
         Node *aw = nnew(p, N_AWAIT);
@@ -2329,4 +2359,12 @@ Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_
         return NULL;
     }
     return f;
+}
+
+Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_t len, int line, uint32_t fflags) {
+    Parser *p = js_parse_begin(ctx, src, len, line, fflags);
+    *pp = p;
+    if (!p) return NULL;
+    js_parse_more(p, 1e308);
+    return js_parse_end(p);
 }

@@ -19,6 +19,7 @@
 #define ITER_FAST    0x40000000u     /* array iterator marker: 0x40000000 | index */
 
 static double mono(JSContext *ctx) { return ctx->host.mono_ms ? ctx->host.mono_ms(ctx->host.ud) : 0; }
+double js_mono_ms(JSContext *ctx) { return mono(ctx); }
 
 static JSValue run(JSContext *ctx, int stop);
 
@@ -525,6 +526,16 @@ static JSValue not_callable(JSContext *ctx, JSValue fn, JSBytecode *b, uint32_t 
     return js_throw_type(ctx, "%s is not a function", d);
 }
 
+/* the column where a function starts (stack traces: minified scripts are one long line) */
+static uint32_t fn_column(JSContext *ctx, JSBytecode *b) {
+    if (b->col) return b->col;
+    uint32_t col = b->src_start + 1;
+    JSString *str = JS_IsString(b->source) ? js_flat(ctx, b->source) : NULL;
+    if (str && b->src_start <= str->len)
+        for (uint32_t k = b->src_start; k > 0; k--) if (str->s[k - 1] == '\n') { col = b->src_start - k + 1; break; }
+    return b->col = col;
+}
+
 /* log that a runaway script was stopped, and where (allocates nothing on the JS heap) */
 static void log_stopped_at(JSContext *ctx) {
     if (!ctx->host.log) return;
@@ -536,13 +547,8 @@ static void log_stopped_at(JSContext *ctx) {
         char nm[48] = "", src[96] = "";
         if (JS_IsString(b->name)) js_str_to_ascii(ctx, b->name, nm, sizeof nm);
         if (JS_IsString(b->srcname)) js_str_to_ascii(ctx, b->srcname, src, sizeof src);
-        /* (the column where the function starts: minified scripts are one long line) */
-        uint32_t col = b->src_start + 1;
-        JSString *str = JS_IsString(b->source) ? js_flat(ctx, b->source) : NULL;
-        if (str && b->src_start <= str->len)
-            for (uint32_t k = b->src_start; k > 0; k--) if (str->s[k - 1] == '\n') { col = b->src_start - k + 1; break; }
         n += (size_t)snprintf(buf + n, sizeof buf - n, "\n    at %s (%s:%d:%u)%s", nm[0] ? nm : (b->fflags & F_SCRIPT) ? "<script>" : "<anonymous>",
-                              src, js_line_of(b, (uint32_t)(ctx->frames[i].pc - b->code)), (unsigned)col,
+                              src, js_line_of(b, (uint32_t)(ctx->frames[i].pc - b->code)), (unsigned)fn_column(ctx, b),
                               i > 0 && (ctx->frames[i].flags & FR_BOUNDARY) ? ", called from native code" : "");
         shown++;
     }
@@ -2235,6 +2241,7 @@ static void complete_job(JSContext *ctx, JSJob *j, JSValue r, bool threw) {
 }
 
 static void reset_vm(JSContext *ctx) {
+    if (ctx->cjob) { js_compile_job_free(ctx->cjob); ctx->cjob = NULL; }
     ctx->nframes = 0;
     ctx->sp = ctx->stack;
     free(ctx->cur_job);
@@ -2300,35 +2307,76 @@ static int task_result(JSContext *ctx, int st) {
     return ctx->task_threw ? JS_THROWN : JS_DONE;
 }
 
+/* scripts and modules from this size on are compiled a slice at a time */
+#define CJOB_MIN (32u * 1024)
+enum { CJK_SCRIPT = 1, CJK_MODULE };
+
+/* run a compiled script as the task (before the jobs already queued) */
+static int start_script(JSContext *ctx, JSBytecode *bc) {
+    JSValue fn = js_new_closure(ctx, bc, NULL, NULL);
+    JSJob *j = JS_IsException(fn) ? NULL : job_new(ctx, JOB_SCRIPT, fn);
+    if (!j) return JS_THROWN;
+    j->args[0] = ctx->global;
+    j->next = ctx->jobs;
+    ctx->jobs = j;
+    if (!ctx->jobs_tail) ctx->jobs_tail = j;
+    return task_result(ctx, js_drive(ctx));
+}
+
+/* the compile job's next slice; once it is done its task goes on */
+static int cjob_step(JSContext *ctx) {
+    JSCompileJob *j = ctx->cjob;
+    int r = js_compile_job_step(j, mono(ctx) + ctx->host.slice_ms);
+    if (r == 0) return JS_SUSPENDED;
+    JSValue req = JS_UNDEFINED;
+    JSBytecode *bc = r > 0 ? js_compile_job_result(j, &req) : NULL;
+    int kind = ctx->cjob_kind;
+    ctx->cjob = NULL;
+    js_compile_job_free(j);             /* (the GC is back on: bc and req are on the C stack) */
+    if (kind == CJK_SCRIPT) {
+        if (!bc) { report(ctx, js_take_exception(ctx), "Uncaught "); return JS_THROWN; }
+        return start_script(ctx, bc);
+    }
+    /* a module: the waiting native returns [function, requests], or throws */
+    ctx->host_wait = false;
+    JSValue fn = bc ? js_new_closure(ctx, bc, NULL, NULL) : JS_EXCEPTION;
+    JSValue a = JS_EXCEPTION;
+    if (!JS_IsException(fn)) { JSValue v[2] = { fn, req }; a = js_array_from_list(ctx, v, 2); }
+    if (JS_IsException(a)) ctx->resume_mode = GR_THROW;
+    else { ctx->host_push = true; ctx->host_val = a; }
+    return task_result(ctx, js_drive(ctx));
+}
+
 int js_eval_task(JSContext *ctx, const char *utf8, size_t len, const char *name, int line) {
-    if (ctx->drive_pending || ctx->cur_job) return JS_SUSPENDED;
+    if (ctx->drive_pending || ctx->cur_job || ctx->cjob) return JS_SUSPENDED;
     JS_GC_ENTER(ctx);
     ctx->task_threw = false;
     ctx->resume_val = JS_UNDEFINED;
     ctx->task_t0 = mono(ctx);
     JSValue src = js_str_utf8(ctx, utf8, len);
     JSValue nm = js_str_utf8(ctx, name ? name : "script", strlen(name ? name : "script"));
+    if (len >= CJOB_MIN && ctx->host.mono_ms && !JS_IsException(src) && !JS_IsException(nm)) {
+        /* big: compiled a slice at a time (js_resume carries on) */
+        ctx->cjob = js_compile_job(ctx, src, nm, line, 0);
+        int st = JS_THROWN;
+        if (ctx->cjob) { ctx->cjob_kind = CJK_SCRIPT; st = cjob_step(ctx); }
+        else report(ctx, js_take_exception(ctx), "Uncaught ");
+        JS_GC_LEAVE(ctx);
+        return st;
+    }
     JSBytecode *bc = JS_IsException(src) || JS_IsException(nm) ? NULL : js_compile(ctx, src, nm, line, 0);
     if (!bc) {
         report(ctx, js_take_exception(ctx), "Uncaught ");
         JS_GC_LEAVE(ctx);
         return JS_THROWN;
     }
-    JSValue fn = js_new_closure(ctx, bc, NULL, NULL);
-    JSJob *j = JS_IsException(fn) ? NULL : job_new(ctx, JOB_SCRIPT, fn);
-    if (!j) { JS_GC_LEAVE(ctx); return JS_THROWN; }
-    j->args[0] = ctx->global;
-    /* the task runs before the jobs already queued */
-    j->next = ctx->jobs;
-    ctx->jobs = j;
-    if (!ctx->jobs_tail) ctx->jobs_tail = j;
-    int st = js_drive(ctx);
+    int st = start_script(ctx, bc);
     JS_GC_LEAVE(ctx);
-    return task_result(ctx, st);
+    return st;
 }
 
 int js_call_task(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const JSValue *argv) {
-    if (ctx->drive_pending || ctx->cur_job) return JS_SUSPENDED;
+    if (ctx->drive_pending || ctx->cur_job || ctx->cjob) return JS_SUSPENDED;
     JS_GC_ENTER(ctx);
     ctx->task_threw = false;
     ctx->resume_val = JS_UNDEFINED;
@@ -2350,6 +2398,12 @@ int js_call_task(JSContext *ctx, JSValue fn, JSValue this_val, int argc, const J
 }
 
 int js_resume(JSContext *ctx) {
+    if (ctx->cjob) {
+        JS_GC_ENTER(ctx);
+        int st = cjob_step(ctx);
+        JS_GC_LEAVE(ctx);
+        return st;
+    }
     if (ctx->host_wait) return JS_SUSPENDED;
     if (!ctx->drive_pending) {
         if (!ctx->jobs) return JS_DONE;
@@ -2359,7 +2413,7 @@ int js_resume(JSContext *ctx) {
     return task_result(ctx, js_drive(ctx));
 }
 
-bool js_busy(JSContext *ctx) { return ctx->drive_pending; }
+bool js_busy(JSContext *ctx) { return ctx->drive_pending || ctx->cjob; }
 
 JSValue js_task_value(JSContext *ctx) { return ctx->task_threw ? JS_UNDEFINED : ctx->resume_val; }
 
@@ -2374,6 +2428,25 @@ JSValue js_compile_module(JSContext *ctx, const char *utf8, size_t len, const ch
     return fn;
 }
 
+JSValue js_compile_module_task(JSContext *ctx, const char *utf8, size_t len, const char *name) {
+    if (len >= CJOB_MIN && ctx->can_wait && !ctx->cjob && ctx->host.mono_ms) {
+        JS_GC_ENTER(ctx);
+        JSValue src = js_str_utf8(ctx, utf8, len);
+        JSValue nm = js_str_utf8(ctx, name ? name : "module", strlen(name ? name : "module"));
+        JSCompileJob *j = JS_IsException(src) || JS_IsException(nm) ? NULL : js_compile_job(ctx, src, nm, 1, F_MODULE);
+        JS_GC_LEAVE(ctx);
+        if (!j) return JS_EXCEPTION;
+        ctx->cjob = j;
+        ctx->cjob_kind = CJK_MODULE;
+        return js_wait(ctx);
+    }
+    JSValue req = JS_UNDEFINED;
+    JSValue fn = js_compile_module(ctx, utf8, len, name, &req);
+    if (JS_IsException(fn)) return fn;
+    JSValue v[2] = { fn, req };
+    return js_array_from_list(ctx, v, 2);
+}
+
 void js_set_import_hook(JSContext *ctx, JSValue fn) { ctx->import_hook = fn; }
 
 bool js_can_wait(JSContext *ctx) { return ctx->can_wait; }
@@ -2385,7 +2458,7 @@ JSValue js_wait(JSContext *ctx) {
     return JS_SUSPEND;
 }
 
-bool js_waiting(JSContext *ctx) { return ctx->host_wait; }
+bool js_waiting(JSContext *ctx) { return ctx->host_wait && !ctx->cjob; }   /* (a compile is not waiting: js_resume does it) */
 
 int js_resume_with(JSContext *ctx, JSValue result) {
     if (!ctx->host_wait) return js_resume(ctx);
@@ -2504,8 +2577,8 @@ void js_stack_trace(JSContext *ctx, JSSB *sb) {
         else sb_puts(sb, (b->fflags & F_SCRIPT) ? "<script>" : "<anonymous>");
         sb_puts(sb, " (");
         if (JS_IsString(b->srcname)) sb_putv(sb, b->srcname);
-        char ln[16];
-        snprintf(ln, sizeof ln, ":%d)", js_line_of(b, (uint32_t)(f->pc - b->code)));
+        char ln[32];
+        snprintf(ln, sizeof ln, ":%d:%u)", js_line_of(b, (uint32_t)(f->pc - b->code)), (unsigned)fn_column(ctx, b));
         sb_puts(sb, ln);
     }
 }

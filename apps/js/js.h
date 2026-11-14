@@ -114,6 +114,11 @@ JSValue js_eval(JSContext *ctx, const char *utf8, size_t len, const char *name);
    exports(name, getter) for each of its exports (exports('*', namespace) for export *) and
    then awaits meta.go, so all modules of a graph are linked before any of them runs. */
 JSValue js_compile_module(JSContext *ctx, const char *utf8, size_t len, const char *name, JSValue *requests);
+/* The same for a native called by a running script: returns [function, requests]. A big
+   module is compiled a slice at a time while the task waits: then the native returns what
+   this returns (as with js_wait) and js_resume finishes the compile and hands the task the
+   array (or throws its SyntaxError). js_eval_task compiles big scripts in slices too. */
+JSValue js_compile_module_task(JSContext *ctx, const char *utf8, size_t len, const char *name);
 /* import(specifier) calls fn(specifier, the importing script's or module's name), which
    returns a promise of the module's namespace */
 void js_set_import_hook(JSContext *ctx, JSValue fn);

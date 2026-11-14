@@ -10,7 +10,7 @@
  * file failed, threw, or left __fails > 0. setTimeout uses a fake clock: when
  * the script and its jobs are done, timers run in time order.
  */
-#include "../../apps/js/js.h"
+#include "../../apps/js/jsi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,15 +97,10 @@ static JSValue fn_compile_module(JSContext *ctx, JSValue this_val, int argc, JSV
     size_t len;
     char *src = js_to_cstring(ctx, JS_ARG(0), &len);
     char *name = js_to_cstring(ctx, JS_ARG(1), NULL);
-    JSValue req;
-    JSValue fn = src ? js_compile_module(ctx, src, len, name ? name : "module", &req) : JS_EXCEPTION;
+    JSValue r = src ? js_compile_module_task(ctx, src, len, name ? name : "module") : JS_EXCEPTION;
     free(src);
     free(name);
-    if (JS_IsException(fn)) return fn;
-    JSValue a = js_new_array(ctx, 0);
-    js_array_push(ctx, a, fn);
-    js_array_push(ctx, a, req);
-    return a;
+    return r;          /* (a big module: the task waits while js_resume compiles it) */
 }
 
 /* readFile(path) -> text or undefined (debugging pages' scripts on the host) */
@@ -170,11 +165,12 @@ static JSContext *make_ctx(void) {
     h.now_ms = now_ms;
     h.mono_ms = mono_ms;
     h.mem_limit = 512u << 20;
-    h.slice_ms = 50;
+    h.slice_ms = getenv("JS_SLICE_MS") ? (uint32_t)atoi(getenv("JS_SLICE_MS")) : 50;   /* (tests: many pauses) */
     h.nested_limit_ms = getenv("JS_NESTED_MS") ? (uint32_t)atoi(getenv("JS_NESTED_MS")) : 20000;
     h.stack_top = (uintptr_t)&top_marker + 4096;
     JSContext *ctx = js_new_context(&h);
     if (!ctx) return NULL;
+    if (getenv("JS_GC_STRESS")) ctx->gc_threshold = ctx->gc_stress = (size_t)atoi(getenv("JS_GC_STRESS"));   /* (GC tests) */
     JSValue g = js_global(ctx);
     js_def_func(ctx, g, "print", fn_print, 1, 0);
     JSValue con = js_new_object(ctx);
@@ -284,6 +280,44 @@ int main(int argc, char **argv) {
         js_kill(ctx);
         js_free_context(ctx);
         return ok1 && ok2 && st3 == JS_KILLED && st4 == JS_DONE && ok5 ? 0 : 1;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "-compile")) {
+        /* a big script is compiled a slice at a time between the host's turns: same result */
+        JSContext *ctx = make_ctx();
+        ctx->host.slice_ms = 1;
+        size_t cap = 1 << 20, n = 0;
+        char *src = malloc(cap);
+        n += (size_t)snprintf(src + n, cap - n, "var total = 0, names = [];\n");
+        for (int i = 0; i < 700; i++)          /* (more than 512 function declarations) */
+            n += (size_t)snprintf(src + n, cap - n,
+                "function f%d(a) { return a + %d; }\n"
+                "var g%d = function () { return %d; };\n"
+                "const h%d = (x) => x * %d;\n"
+                "class C%d { m() { return %d; } static s() { return 'C%d'; } }\n"
+                "var o%d = { k%d: function () { return %d; }, ['c' + %d]: () => 1 };\n"
+                "total += f%d(1) + g%d() + h%d(2) + new C%d().m() + o%d.k%d();\n"
+                "names.push(g%d.name, h%d.name, C%d.name, o%d.k%d.name);\n",
+                i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        long expect = 0;
+        for (int i = 0; i < 700; i++) expect += 1 + 6 * i;
+        int st = js_eval_task(ctx, src, n, "big.js", 1);
+        int slices = 0;
+        while (st == JS_SUSPENDED) { slices++; st = js_resume(ctx); }
+        JSValue t = js_get(ctx, js_global(ctx), "total");
+        JSValue nm = js_eval(ctx, "names.slice(-4).join() + ' ' + names.length", 43, "check");
+        char *ns = js_to_cstring(ctx, nm, NULL);
+        bool ok = st == JS_DONE && slices > 3 && JS_IsNumber(t) && (long)js_num(t) == expect && ns && !strcmp(ns, "g699,h699,C699,k699 2800");
+        printf("big script (%u KB) in %d slices: %s (%s)\n", (unsigned)(n / 1024), slices, ok ? "ok" : "FAIL", ns ? ns : "?");
+        free(ns);
+        /* a syntax error at its end is reported like any other */
+        n += (size_t)snprintf(src + n, cap - n, "var 5;\n");
+        g_errors = 0;
+        int st2 = drive(ctx, js_eval_task(ctx, src, n, "bad.js", 1));
+        bool ok2 = st2 == JS_THROWN && g_errors == 1;
+        printf("big script with a syntax error: %s\n", ok2 ? "ok" : "FAIL");
+        free(src);
+        js_free_context(ctx);
+        return ok && ok2 ? 0 : 1;
     }
     if (argc >= 2 && !strcmp(argv[1], "-wait")) {
         /* natives that wait for the host (alert / confirm) suspend the task, not the loop */

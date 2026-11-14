@@ -65,6 +65,12 @@ var sources = {
     export const answer = 42;
   `,
 };
+/* a big module: compiled a slice at a time while the script waits, the same as at once */
+var big = 'export let total = 0;\n';
+for (var i = 0; i < 600; i++)
+  big += 'export function f' + i + '(a) { return a + ' + i + '; } const g' + i + ' = function () { return ' + i + '; };' +
+         ' total += f' + i + '(1) + g' + i + '(); export const n' + i + ' = g' + i + '.name;\n';
+sources['big.js'] = big;
 globalThis.log = [];
 var modules = new Map();
 function resolve(spec, base) { return spec.replace(/^\.\//, ''); }
@@ -122,8 +128,9 @@ setImportHook(function (spec, from) { return run(resolve(spec, from)); });
 globalThis.log2 = [];
 run('shared.js');
 run('shared-user.js');
-var result;
+var result, bigNs;
 run('main.js').then(function (ns) { result = ns; }, function (e) { result = e; });
+run('big.js').then(function (ns) { bigNs = ns; }, function (e) { bigNs = e; });
 setTimeout(function () {
   check(result && result.done === true, 'main module finished: ' + (result instanceof Error ? result : typeof result));
   deq(log, ['side effect', 'side after await', 'main counter 0', 'after inc 2 3', 'util 42 default,double,twice',
@@ -134,5 +141,9 @@ setTimeout(function () {
     .then(function () { check(false, 'assignment to an import did not throw'); },
           function (e) { check(e instanceof TypeError, 'assignment to an import: ' + e); });
   throws(function () { eval('import x from "y"'); }, SyntaxError, 'import outside a module');
+  check(big.length > 40000, 'the big module is big');
+  eq(bigNs && bigNs.total, 600 * 600, 'big module ran' + (bigNs instanceof Error ? ' (' + bigNs + ')' : ''));
+  eq(bigNs && bigNs.n599, 'g599', 'big module: names of functions compiled ahead');
+  throws(function () { compileModule(big + 'export let 5;', 'bad.js'); }, SyntaxError, 'a big module with a syntax error');
   print('modules done');
 }, 10);

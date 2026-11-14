@@ -2182,23 +2182,17 @@ static JSValue n_status(JSContext *ctx, JSValue this_val, int argc, JSValue *arg
 
 static void script_write(bjs_t *J, web_node_t *frag);
 
-/* N.module(source, url) -> [async function, [specifiers]] (js_compile_module) */
+/* N.module(source, url) -> [async function, [specifiers]] (a big module is compiled a slice
+   at a time while the script waits: js_compile_module_task) */
 static JSValue n_module(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
     JTHIS;
+    (void)J;
     size_t len;
     char *src = js_utf8(ctx, JS_ARG(0), &len), *url = js_utf8(ctx, JS_ARG(1), NULL);
-    JSValue req = JS_UNDEFINED;
-    uint32_t t0 = sys_uptime_ms();
-    JSValue fn = src ? js_compile_module(ctx, src, len, url ? url : "module", &req) : JS_EXCEPTION;
-    uint32_t ms = sys_uptime_ms() - t0;
-    if (ms > 200) klog("browser: compiling module %s (%u KB) took %u ms", url ? url : "?", (unsigned)(len / 1024), (unsigned)ms);
+    JSValue r = src ? js_compile_module_task(ctx, src, len, url ? url : "module") : JS_EXCEPTION;
     free(src);
     free(url);
-    if (JS_IsException(fn)) return fn;
-    JSValue a = js_new_array(ctx, 0);
-    js_array_push(ctx, a, fn);
-    js_array_push(ctx, a, req);
-    return a;
+    return r;
 }
 
 static JSValue n_module_done(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {

@@ -286,14 +286,15 @@ static void mark_object(JSContext *ctx, JSObject *o) {
         if (o->u.p) js_map_mark(ctx, o->u.p);
         break;
     case CL_WEAKMAP: case CL_WEAKSET:
-        if (ctx->nweak < 4096) {
-            if (ctx->nweak >= ctx->weakcap) {
-                int nc = ctx->weakcap ? ctx->weakcap * 2 : 16;
-                JSObject **n = realloc(ctx->weaks, sizeof *n * (size_t)nc);
-                if (n) { ctx->weaks = n; ctx->weakcap = nc; }
-            }
-            if (ctx->nweak < ctx->weakcap) ctx->weaks[ctx->nweak++] = o;
+        /* (every live weak map is tracked: one left out would keep entries whose key and value
+           were freed; when there is no memory to track it, its entries stay alive) */
+        if (ctx->nweak >= ctx->weakcap) {
+            int nc = ctx->weakcap ? ctx->weakcap * 2 : 16;
+            JSObject **n = realloc(ctx->weaks, sizeof *n * (size_t)nc);
+            if (n) { ctx->weaks = n; ctx->weakcap = nc; }
         }
+        if (ctx->nweak < ctx->weakcap) ctx->weaks[ctx->nweak++] = o;
+        else if (o->u.p) js_map_mark(ctx, o->u.p);
         break;
     case CL_WEAKREF:
         if (ctx->nwrefs >= ctx->wrefcap) {
@@ -544,6 +545,7 @@ static void collect(JSContext *ctx) {
     size_t live = ctx->mem_used;
     ctx->gc_threshold = MAX((size_t)(4u << 20), live);
     if (ctx->gc_threshold > ctx->mem_limit / 2) ctx->gc_threshold = MAX((size_t)(2u << 20), ctx->mem_limit / 8);
+    if (ctx->gc_stress) ctx->gc_threshold = ctx->gc_stress;
     ctx->in_gc = false;
 }
 

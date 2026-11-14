@@ -124,6 +124,12 @@ struct Scope {
 typedef struct Parser Parser;
 /* parse a whole script into a Func (the script function); NULL + SyntaxError thrown */
 Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_t len, int line, uint32_t fflags);
+/* the same in steps: begin, more until it returns true (it stops when the clock reaches
+   until_ms, between two of the program's statements), end */
+Parser *js_parse_begin(JSContext *ctx, const uint16_t *src, uint32_t len, int line, uint32_t fflags);
+bool  js_parse_more(Parser *p, double until_ms);
+Func *js_parse_end(Parser *p);
+Func **js_parser_funcs(Parser *p, int *n);   /* every function made, in source order (the program first) */
 void  js_parser_free(Parser *p);
 /* AST node allocation (arena) */
 void *js_parser_alloc(Parser *p, size_t n);

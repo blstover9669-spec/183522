@@ -171,6 +171,7 @@ struct JSBytecode {
     JSValue srcname;            /* script name string */
     JSValue source;             /* whole script source (string) for Function.prototype.toString */
     uint32_t src_start, src_end;
+    uint32_t col;               /* column of src_start (stack traces), 0 = not known yet */
     uint32_t *lines; uint32_t nlines;   /* (pc, line) pairs */
     int16_t this_slot, nt_slot, func_slot, args_slot;   /* hidden local slots (-1 = none) */
     int16_t rest_param;         /* index of the ...rest param, -1 none */
@@ -255,6 +256,7 @@ struct JSContext {
     GCSeg *segs; int nsegs, segcap;
     GCHdr **large; int nlarge, largecap;
     size_t mem_used, mem_limit, gc_threshold, alloc_since;
+    size_t gc_stress;             /* tests: collect after every this many bytes (0 = normal) */
     uint32_t gc_count;
     bool in_gc, oom, oom_throwing;
     int no_gc;                    /* > 0 while compiling (the AST holds values) */
@@ -308,6 +310,8 @@ struct JSContext {
     bool slice_over;              /* the slice ran out inside a nested call: suspend when back */
     bool no_suspend_saved;        /* js_call / js_construct from the host */
     JSValue import_hook;          /* import(): the host's loader (js_set_import_hook) */
+    struct JSCompileJob *cjob;    /* a big script or module being compiled in slices */
+    uint8_t cjob_kind;            /* CJK_SCRIPT (js_eval_task) or CJK_MODULE (a waiting native) */
     bool host_wait;               /* a native (alert ...) is waiting for the host: js_resume_with */
     bool host_push;               /* push host_val when the task resumes */
     JSValue host_val;
@@ -523,6 +527,11 @@ void      js_async_gen_step_done(JSContext *ctx, JSObject *go, JSValue r, bool t
 /* compile source (UTF-16) to a script function; NULL + SyntaxError on failure */
 JSBytecode *js_compile(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags);
 JSBytecode *js_compile_ex(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags, JSValue *requests);
+typedef struct JSCompileJob JSCompileJob;   /* compiling a big script in steps (js_comp.c) */
+JSCompileJob *js_compile_job(JSContext *ctx, JSValue src, JSValue name, int line, uint32_t fflags);
+int  js_compile_job_step(JSCompileJob *j, double until_ms);   /* 1 done, 0 not yet, -1 failed (thrown) */
+JSBytecode *js_compile_job_result(JSCompileJob *j, JSValue *requests);
+void js_compile_job_free(JSCompileJob *j);                  /* (the GC is off while a job exists) */
 /* new Function(params, body) */
 JSBytecode *js_compile_function(JSContext *ctx, JSValue params, JSValue body, uint32_t kind);
 void      js_bytecode_free(JSContext *ctx, JSBytecode *b);
@@ -579,6 +588,7 @@ void js_init_lib_json(JSContext *ctx);
 void js_init_lib_coll(JSContext *ctx);
 void js_init_lib_misc(JSContext *ctx);
 void js_init_selfhosted(JSContext *ctx);   /* (js_lib_arr.c, once the libraries are set up) */
+double js_mono_ms(JSContext *ctx);          /* the host's monotonic clock (0 without one) */
 JSObject *js_new_ctor(JSContext *ctx, const char *name, JSNativeFn fn, int len, JSObject *proto, int magic);
 typedef struct JSFuncDef { const char *name; JSNativeFn fn; int16_t len, magic; } JSFuncDef;
 void js_def_funcs(JSContext *ctx, JSValue obj, const JSFuncDef *d, int n);
