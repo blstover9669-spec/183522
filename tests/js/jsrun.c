@@ -89,6 +89,8 @@ static JSValue fn_host_ask(JSContext *ctx, JSValue this_val, int argc, JSValue *
     return js_wait(ctx);
 }
 
+static char *read_file(const char *path, size_t *len);
+
 /* compileModule(source, name) -> [async function, [specifiers]] (tests/js/modules.js) */
 static JSValue fn_compile_module(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
     (void)this_val; (void)magic;
@@ -104,6 +106,19 @@ static JSValue fn_compile_module(JSContext *ctx, JSValue this_val, int argc, JSV
     js_array_push(ctx, a, fn);
     js_array_push(ctx, a, req);
     return a;
+}
+
+/* readFile(path) -> text or undefined (debugging pages' scripts on the host) */
+static JSValue fn_read_file(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
+    (void)this_val; (void)magic;
+    char *path = js_to_cstring(ctx, JS_ARG(0), NULL);
+    size_t len = 0;
+    char *d = path ? read_file(path, &len) : NULL;
+    free(path);
+    if (!d) return JS_UNDEFINED;
+    JSValue v = js_new_string_len(ctx, d, len);
+    free(d);
+    return v;
 }
 
 static JSValue fn_set_import_hook(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, int magic) {
@@ -174,6 +189,7 @@ static JSContext *make_ctx(void) {
     js_def_func(ctx, g, "clearInterval", fn_clear_timeout, 1, 0);
     js_def_func(ctx, g, "compileModule", fn_compile_module, 2, 0);
     js_def_func(ctx, g, "setImportHook", fn_set_import_hook, 1, 0);
+    js_def_func(ctx, g, "readFile", fn_read_file, 1, 0);
     return ctx;
 }
 

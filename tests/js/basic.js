@@ -75,3 +75,20 @@ print('basic done');
   src += 'return fs.length + fs[299]() + fs[300].length;';
   eq(new Function(src)(), 600 + 299 + 2, 'many nested functions and constants');
 })();
+/* assigning a property found on the prototype makes an own property (core-js relies on it) */
+(function () {
+  var p = { x: 1, constructor: 'P' };
+  var o = Object.create(p);
+  o.x = 2;
+  o.constructor = {};
+  eq(p.x, 1, 'prototype property kept');
+  eq(o.x, 2, 'own property made');
+  eq(p.constructor, 'P', 'prototype constructor kept');
+  var n = new Promise(function (r) { r(1); });
+  n.constructor = {};
+  eq(Promise.prototype.constructor, Promise, 'Promise.prototype.constructor kept');
+  var q = Object.create(Object.create({ y: 1 }));
+  q.y = 5;
+  eq(Object.getPrototypeOf(Object.getPrototypeOf(q)).y, 1, 'two levels up kept');
+  eq(Object.prototype.hasOwnProperty.call(q, 'y'), true, 'own after two levels');
+})();

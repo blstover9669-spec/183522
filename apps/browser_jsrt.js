@@ -65,6 +65,15 @@ const DocumentFragment = iface('DocumentFragment', Node, function () { return N.
 const Document = iface('Document', Node);
 const HTMLDocument = iface('HTMLDocument', Document);
 const ShadowRoot = iface('ShadowRoot', DocumentFragment);
+/* interfaces pages and polyfills look for (their objects are not made here) */
+for (const [nm, parent] of [['DocumentType', Node], ['Attr', Node], ['ProcessingInstruction', CharacterData],
+    ['CDATASection', Text], ['NamedNodeMap', null], ['DOMRectList', null], ['StyleSheet', null], ['StyleSheetList', null],
+    ['CSSRule', null], ['CSSStyleRule', null], ['CSSRuleList', null], ['MediaList', null], ['Selection', null],
+    ['Navigator', null], ['Screen', null], ['Crypto', null], ['SubtleCrypto', null], ['Performance', EventTarget],
+    ['PerformanceEntry', null], ['PerformanceMark', null], ['PerformanceNavigationTiming', null], ['ValidityState', null],
+    ['HTMLFormControlsCollection', null], ['RadioNodeList', null], ['XPathResult', null], ['Plugin', null],
+    ['PluginArray', null], ['MimeType', null], ['MimeTypeArray', null], ['BarProp', null], ['VisualViewport', EventTarget]])
+    iface(nm, parent);
 Text.prototype.constructor = Text;
 const TAGS = {
     a: 'Anchor', area: 'Area', audio: 'Audio', br: 'BR', base: 'Base', body: 'Body', button: 'Button',

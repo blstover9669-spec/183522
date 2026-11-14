@@ -734,9 +734,10 @@ int js_setp(JSContext *ctx, JSValue objv, JSValue key, JSValue v, JSValue recv, 
         objv = JS_MKOBJ(p);
     }
     JSObject *o = OBJ(objv);
-    bool same = recv == objv;
     uint32_t idx;
     for (;;) {
+        /* (the object being looked at is the receiver only at the start of the chain) */
+        bool same = recv == JS_MKOBJ(o);
         switch (o->h.cls) {
         case CL_ARRAY:
             if (key == ctx->a[A_length]) {
@@ -819,7 +820,7 @@ int js_setp(JSContext *ctx, JSValue objv, JSValue key, JSValue v, JSValue recv, 
         o = o->proto;
     }
     /* not found anywhere: a new property on the receiver */
-    if (same) {
+    if (JS_IsObject(recv)) {
         JSObject *r = OBJ(recv);
         if (r->h.cls == CL_OBJECT || r->h.cls == CL_FUNCTION || r->h.cls == CL_HOST || r->h.cls == CL_ERROR) {
             if (!(r->h.flags & OF_EXT)) return set_fail(ctx, key, strict, "non-extensible");
