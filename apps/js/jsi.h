@@ -304,6 +304,7 @@ struct JSContext {
     JSJob *jobs, *jobs_tail, *cur_job;
     bool drive_pending, no_suspend, task_threw, gen_raw, gen_done, gen_awaiting;
     bool can_wait;                /* the running native was called straight from bytecode */
+    bool slice_over;              /* the slice ran out inside a nested call: suspend when back */
     bool no_suspend_saved;        /* js_call / js_construct from the host */
     JSValue import_hook;          /* import(): the host's loader (js_set_import_hook) */
     bool host_wait;               /* a native (alert ...) is waiting for the host: js_resume_with */

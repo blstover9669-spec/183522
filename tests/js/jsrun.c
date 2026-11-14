@@ -268,8 +268,22 @@ int main(int argc, char **argv) {
         printf("nested runaway: %s after %.0f ms\n", st3 == JS_KILLED ? "killed" : "NOT killed", el);
         int st4 = drive(ctx, js_eval_task(ctx, after, strlen(after), "after2.js", 1));
         printf("after nested kill: %s\n", st4 == JS_DONE ? "ok" : "FAIL");
+        /* a loop that spends its time in short nested calls (a proxy trap, a getter, a
+           native's callback) still yields every slice and is not stopped as nested code */
+        const char *busy = "var w = 'for (var i = 0, s = 0; i < 2000; i++) s += i; return s;';\n"
+                           "var p = new Proxy({}, { get: new Function('t', 'k', w) });\n"
+                           "var o = Object.defineProperty({}, 'g', { get: new Function(w) });\n"
+                           "for (;;) { p.x; o.g; [1].forEach(new Function(w)); }";
+        t0 = mono_ms(NULL);
+        int st5 = js_eval_task(ctx, busy, strlen(busy), "busy.js", 1);
+        int sl5 = 0;
+        while (st5 == JS_SUSPENDED && mono_ms(NULL) - t0 < 1500) { sl5++; st5 = js_resume(ctx); }
+        el = mono_ms(NULL) - t0;
+        bool ok5 = st5 == JS_SUSPENDED && sl5 >= 10;
+        printf("busy nested calls: %s after %.0f ms (%d slices)\n", ok5 ? "still running" : "STOPPED", el, sl5);
+        js_kill(ctx);
         js_free_context(ctx);
-        return ok1 && ok2 && st3 == JS_KILLED && st4 == JS_DONE ? 0 : 1;
+        return ok1 && ok2 && st3 == JS_KILLED && st4 == JS_DONE && ok5 ? 0 : 1;
     }
     if (argc >= 2 && !strcmp(argv[1], "-wait")) {
         /* natives that wait for the host (alert / confirm) suspend the task, not the loop */

@@ -231,6 +231,8 @@ JSValue js_new_closure(JSContext *ctx, JSBytecode *b, JSVarRef **vr, JSObject *h
 }
 
 /* ==== calls from C ==================================================================================== */
+static inline void after_nested(JSContext *ctx);
+
 bool js_check_stack(JSContext *ctx) { return ctx->native_depth < 180; }
 
 static JSValue call_native(JSContext *ctx, JSObject *o, JSValue this_val, int argc, JSValue *argv, JSValue nt) {
@@ -277,6 +279,7 @@ JSValue js_call_internal(JSContext *ctx, JSValue fn, JSValue this_val, int argc,
         ctx->native_depth++;
         JSValue r = run(ctx, stop);
         ctx->native_depth--;
+        after_nested(ctx);
         ctx->sp = base;
         return r;
     }
@@ -332,6 +335,7 @@ static bool host_call_enter(JSContext *ctx) {
     ctx->no_suspend_saved = ctx->no_suspend;
     ctx->no_suspend = true;
     ctx->slice_start_d = mono(ctx);
+    ctx->slice_over = false;
     ctx->budget = BUDGET;
     return true;
 }
@@ -544,13 +548,21 @@ static int budget_expired(JSContext *ctx) {
     if (ctx->killed) return -1;
     double now = mono(ctx);
     double el = now - ctx->slice_start_d;
-    if (ctx->run_depth == 1 && !ctx->no_suspend) return el >= ctx->host.slice_ms ? 1 : 0;
+    if (ctx->run_depth == 1 && !ctx->no_suspend) { ctx->slice_over = false; return el >= ctx->host.slice_ms ? 1 : 0; }
     if (el >= ctx->host.nested_limit_ms) {
         log_stopped_at(ctx);
         ctx->killed = true;
         return -1;
     }
+    /* inside a nested call (a getter, a proxy trap, a callback of a native): when the slice
+       is used up, look again soon, so the task suspends as soon as its own frame runs again */
+    if (el >= ctx->host.slice_ms && !ctx->no_suspend) { ctx->budget = 200; ctx->slice_over = true; }
     return 0;
+}
+
+/* back from a nested run: the task's own frame suspends at once when the slice ran out */
+static inline void after_nested(JSContext *ctx) {
+    if (ctx->slice_over && ctx->run_depth == 1) ctx->budget = 1;
 }
 
 static JSValue killed_error(JSContext *ctx) {
@@ -2047,6 +2059,7 @@ JSValue js_gen_resume(JSContext *ctx, JSObject *go, JSValue v, int mode, bool *d
     ctx->native_depth++;
     JSValue r = run(ctx, stop);
     ctx->native_depth--;
+    after_nested(ctx);
     ctx->sp = saved_sp;
     if (JS_IsException(r)) { g->state = GS_DONE; return r; }
     *done = ctx->gen_done;
@@ -2221,6 +2234,7 @@ static void reset_vm(JSContext *ctx) {
 int js_drive(JSContext *ctx) {
     JS_GC_ENTER(ctx);
     ctx->slice_start_d = mono(ctx);
+    ctx->slice_over = false;
     ctx->budget = BUDGET;
     int status = JS_DONE;
     for (;;) {
@@ -2427,6 +2441,7 @@ void js_async_gen_resume(JSContext *ctx, JSObject *go, JSValue v, bool threw) {
     ctx->native_depth++;
     JSValue r = run(ctx, stop);
     ctx->native_depth--;
+    after_nested(ctx);
     ctx->sp = saved_sp;
     js_async_gen_step_done(ctx, go, r, JS_IsException(r), ctx->gen_done, ctx->gen_awaiting);
     (void)g;
@@ -2451,6 +2466,7 @@ JSValue js_async_gen_run(JSContext *ctx, JSObject *go, JSValue v, int mode, bool
     ctx->native_depth++;
     JSValue r = run(ctx, stop);
     ctx->native_depth--;
+    after_nested(ctx);
     ctx->sp = saved_sp;
     *done = ctx->gen_done;
     *awaiting = ctx->gen_awaiting;
