@@ -340,7 +340,6 @@ static JSValue host_call_leave(JSContext *ctx, bool top, JSValue r) {
     if (!top) return r;
     ctx->no_suspend = ctx->no_suspend_saved;
     if (ctx->killed) {
-        if (ctx->host.log) ctx->host.log(ctx->host.ud, JS_LOG_ERROR, "Script stopped: it ran too long (page not responding)");
         reset_vm(ctx);
         ctx->killed = false;
         return JS_EXCEPTION;
@@ -522,6 +521,24 @@ static JSValue not_callable(JSContext *ctx, JSValue fn, JSBytecode *b, uint32_t 
     return js_throw_type(ctx, "%s is not a function", d);
 }
 
+/* log that a runaway script was stopped, and where (allocates nothing on the JS heap) */
+static void log_stopped_at(JSContext *ctx) {
+    if (!ctx->host.log) return;
+    char buf[700];
+    size_t n = (size_t)snprintf(buf, sizeof buf, "Script stopped: it ran too long (page not responding)");
+    for (int i = ctx->nframes - 1, shown = 0; i >= 0 && shown < 6 && n < sizeof buf - 150; i--) {
+        JSBytecode *b = ctx->frames[i].b;
+        if (!b) continue;
+        char nm[48] = "", src[80] = "";
+        if (JS_IsString(b->name)) js_str_to_ascii(ctx, b->name, nm, sizeof nm);
+        if (JS_IsString(b->srcname)) js_str_to_ascii(ctx, b->srcname, src, sizeof src);
+        n += (size_t)snprintf(buf + n, sizeof buf - n, "\n    at %s (%s:%d)", nm[0] ? nm : (b->fflags & F_SCRIPT) ? "<script>" : "<anonymous>",
+                              src, js_line_of(b, (uint32_t)(ctx->frames[i].pc - b->code)));
+        shown++;
+    }
+    ctx->host.log(ctx->host.ud, JS_LOG_ERROR, buf);
+}
+
 static int budget_expired(JSContext *ctx) {
     ctx->budget = BUDGET;
     if (ctx->killed) return -1;
@@ -529,6 +546,7 @@ static int budget_expired(JSContext *ctx) {
     double el = now - ctx->slice_start_d;
     if (ctx->run_depth == 1 && !ctx->no_suspend) return el >= ctx->host.slice_ms ? 1 : 0;
     if (el >= ctx->host.nested_limit_ms) {
+        log_stopped_at(ctx);
         ctx->killed = true;
         return -1;
     }
@@ -2235,7 +2253,6 @@ int js_drive(JSContext *ctx) {
         }
     }
     if (status == JS_KILLED) {
-        if (ctx->host.log) ctx->host.log(ctx->host.ud, JS_LOG_ERROR, "Script stopped: it ran too long (page not responding)");
         reset_vm(ctx);
         ctx->killed = false;
     }
@@ -2346,6 +2363,7 @@ int js_resume_with(JSContext *ctx, JSValue result) {
 }
 
 void js_kill(JSContext *ctx) {
+    log_stopped_at(ctx);
     reset_vm(ctx);
     ctx->killed = false;
 }

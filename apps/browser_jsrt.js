@@ -317,8 +317,8 @@ function attrHandler(t, type) {
     else if (WINDOW_BODY_EVENTS.has(type) && (t.localName === 'body' || t.localName === 'frameset')) return;
     src = N.attr(host, 'on' + type);
     const srcs = t[HSRC] || (hidden(t, HSRC, new Map()), t[HSRC]);
-    if (src === null) { if (srcs.has(type)) { srcs.delete(type); handlerMap(t).set(type, null); } return; }
-    if (srcs.get(type) === src) return;
+    if (srcs.has(type) ? srcs.get(type) === src : src === null) return;    /* (unchanged: a handler set as a property stays) */
+    if (src === null) { srcs.delete(type); handlerMap(t).set(type, null); return; }
     srcs.set(type, src);
     const fn = compileHandler(src, t);
     const a = listeners(t, type, true);

@@ -3185,7 +3185,6 @@ static void carry_on(bjs_t *J) {
     if (st != JS_SUSPENDED) { cur_finished(J, st); return; }
     if (sys_uptime_ms() - J->cur_t0 >= SLOW_MS) {
         js_kill(J->ctx);
-        host_log(J, JS_LOG_ERROR, "Script stopped: it ran too long (page not responding)");
         cur_finished(J, JS_KILLED);
     }
     (void)t;
