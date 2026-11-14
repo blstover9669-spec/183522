@@ -182,6 +182,7 @@ static void test_time(void) {
 int crypto_selftest(void (*report)(const char *name, bool ok));   /* kernel/crypto/crypto_test.c */
 
 void selftest_run(void) {
+    passed = failed = 0;
     klog("SELFTEST: starting");
     test_printf();
     test_strings();
@@ -192,4 +193,10 @@ void selftest_run(void) {
     test_time();
     crypto_selftest(check);
     klog("SELFTEST: done, %d passed, %d failed", passed, failed);
+}
+
+/* the counts of the last selftest_run() (the Terminal's `test selftest`) */
+void selftest_result(int *npassed, int *nfailed) {
+    *npassed = passed;
+    *nfailed = failed;
 }

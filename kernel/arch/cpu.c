@@ -270,8 +270,8 @@ void fpu_check(void) {
 
 /* fputest=1: 2 s after boot, unmask every x87 exception and divide by zero, so the
    #MF handler above runs (QEMU only reports x87 errors at FWAIT, hence the fwait). */
-static void fputest_cb(void *ctx) {
-    (void)ctx;
+void fpu_test_error(void);                 /* also the Terminal's `test fpu` */
+void fpu_test_error(void) {
     volatile double a = 1.0, b = 0.0, r;
     uint16_t cw = 0x0240;
     klog("fputest: unmasking x87 exceptions and dividing by zero");
@@ -280,6 +280,11 @@ static void fputest_cb(void *ctx) {
     __asm__ volatile("fwait");
     __asm__ volatile("fnstcw %0" : "=m"(cw));
     klog("fputest: still running (result %d, control word %04x)", (int)(r == r), cw);
+}
+
+static void fputest_cb(void *ctx) {
+    (void)ctx;
+    fpu_test_error();
 }
 
 static void fputest_init(void) {

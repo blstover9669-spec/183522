@@ -100,4 +100,19 @@ const char *sys_cmdline_get(const char *key) {
 
 const char *sys_cmdline(void) { return g_boot.cmdline; }
 
+/* Add (or replace) a token while NovaOS runs - the Terminal's `test` turns on test
+   hooks that are read when they are used (pztest, osaver_test=log). sys_cmdline()
+   keeps the boot command line as it was. */
+bool cmdline_set(const char *key, const char *val) {
+    int i = nargs - 1;
+    while (i >= 0 && strcmp(args[i].key, key)) i--;
+    if (i < 0) {
+        if (nargs >= MAX_ARGS) return false;
+        i = nargs++;
+        strlcpy(args[i].key, key, sizeof args[i].key);
+    }
+    strlcpy(args[i].val, val ? val : "", sizeof args[i].val);
+    return true;
+}
+
 int sys_boot_drive(void) { return g_boot.has_boot_device ? (int)(g_boot.boot_device >> 24) : -1; }

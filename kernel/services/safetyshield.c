@@ -795,8 +795,10 @@ static void build_eicar(void) {
                                    "ANTIVIRUS-", "TEST-FILE!", "$H+H*");
 }
 
-/* Harmless sample files for testing the rules (safetyshield_samples=1 only). */
-static void make_samples(void) {
+/* Harmless sample files for testing the rules (safetyshield_samples=1, or the
+   Terminal's `test shield`). */
+void safetyshield_write_samples(void);
+void safetyshield_write_samples(void) {
     static const struct { const char *name, *body; } s[] = {
         /* each matches one rule */
         { "ransom_note.txt", "Attention! Your files have been encrypted.\n"
@@ -846,7 +848,7 @@ static int ss_start(void) {
         vfs_write_file(TEST_FILE, body, (uint32_t)strlen(body));
     }
     const char *sm = sys_cmdline_get("safetyshield_samples");
-    if (sm && strcmp(sm, "0")) make_samples();
+    if (sm && strcmp(sm, "0")) safetyshield_write_samples();
     running = true;
     next_scan_ms = sys_uptime_ms() + (test_risk ? TEST_FIRST_MS : SCAN_INTERVAL_MS);
     log_info("safetyshield", "protection on, %d signatures, automatic scan every %d s%s", NCSIG + 1,
