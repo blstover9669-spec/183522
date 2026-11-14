@@ -60,6 +60,7 @@ struct Parser {
     Node *pro_ns, **pro_ns_tail, *pro_exp, **pro_exp_tail;
     JSValue a_imp, a_exp, a_meta;
     int nre;
+    bool tla;                   /* the module awaits at its top level */
 };
 
 /* ==== arena ================================================================================= */
@@ -1269,6 +1270,7 @@ static Node *parse_unary(Parser *p) {
         if (kw == KW_delete && strict(p) && r->a->k == N_IDENT) ERR("Delete of an unqualified identifier in strict mode.");
     } else if (is_kw(p, KW_await) && p->fn && (p->fn->flags & (F_ASYNC | F_MODULE)) && !(p->fn->flags & F_ARROW && !(p->fn->flags & F_ASYNC))) {
         next(p);
+        if (p->fn->kind == FK_MODULE) p->tla = true;
         r = nnew(p, N_AWAIT);
         r->line = line;
         r->a = parse_unary(p);
@@ -2006,6 +2008,7 @@ static Node *parse_for(Parser *p) {
     bool await_ = false;
     if (is_kw(p, KW_await)) {
         if (!(p->fn && (p->fn->flags & (F_ASYNC | F_MODULE)))) { unexpected(p); return nnew(p, N_EMPTY); }
+        if (p->fn->kind == FK_MODULE) p->tla = true;
         next(p);
         await_ = true;
     }
@@ -2318,6 +2321,7 @@ Func *js_parse_program(JSContext *ctx, Parser **pp, const uint16_t *src, uint32_
         list = p->pro_ns;
         f->mreq = p->req;
         f->nmreq = p->nreq;
+        f->tla = p->tla;
     }
     f->body = list;
     if (p->failed) {

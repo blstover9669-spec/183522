@@ -49,6 +49,17 @@ var sources = {
     await null;
     globalThis.log.push('side after await');
   `,
+  'shared-user.js': `
+    import { slow } from './shared.js';
+    globalThis.log2.push('user sees ' + slow);
+  `,
+  'shared.js': `
+    import './shared-dep.js';
+    export var slow = 'ready';
+  `,
+  'shared-dep.js': `
+    await new Promise((r) => setTimeout(r, 2));
+  `,
   'late.js': `
     export default 'late';
     export const answer = 42;
@@ -83,11 +94,22 @@ function instantiate(rec) {
   rec.done = rec.fn(function (i) { return rec.deps[i].ns; }, function (n, g) { exportName(rec, n, g); }, { url: 'test:' + rec.url, go: p });
   rec.state = 'linked';
 }
-function evaluate(rec) {
+function reaches(a, b, seen) {
+  seen = seen || new Set();
+  if (a === b) return true;
+  if (seen.has(a)) return false;
+  seen.add(a);
+  return a.deps.some(function (d) { return reaches(d, b, seen); });
+}
+function evaluate(rec, chain) {
   if (rec.ev) return rec.ev;
+  chain = chain ? chain.concat([rec]) : [rec];
   rec.state = 'evaluating';
   rec.ev = (async function () {
-    for (var d of rec.deps) if (d.state !== 'evaluating') await evaluate(d);
+    for (var d of rec.deps) {
+      if (chain.includes(d) || (d.state === 'evaluating' && reaches(d, rec))) continue;
+      await evaluate(d, chain);
+    }
     rec.go();
     await rec.done;
     rec.state = 'evaluated';
@@ -96,12 +118,17 @@ function evaluate(rec) {
 }
 async function run(url) { var rec = load(url); instantiate(rec); await evaluate(rec); return rec.ns; }
 setImportHook(function (spec, from) { return run(resolve(spec, from)); });
+/* two graphs share a module that is still running when the second one starts */
+globalThis.log2 = [];
+run('shared.js');
+run('shared-user.js');
 var result;
 run('main.js').then(function (ns) { result = ns; }, function (e) { result = e; });
 setTimeout(function () {
   check(result && result.done === true, 'main module finished: ' + (result instanceof Error ? result : typeof result));
   deq(log, ['side effect', 'side after await', 'main counter 0', 'after inc 2 3', 'util 42 default,double,twice',
             'cycle a+b b+a', 'star 5 meta test:main.js', 'dynamic late 42'], 'module order and bindings');
+  deq(log2, ['user sees ready'], 'a shared module still running is waited for');
   throws(function () { compileModule('export default 1; export default 2;', 'x'); }, SyntaxError, 'duplicate default export');
   compileModule('import { x } from "a"; x = 1;', 'y')[0](function () { return { x: 1 }; }, function () {}, { go: null })
     .then(function () { check(false, 'assignment to an import did not throw'); },

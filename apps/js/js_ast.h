@@ -93,6 +93,7 @@ struct Func {
     JSBytecode *bc;        /* after compilation */
     JSValue *mreq;         /* FK_MODULE: the module specifiers it imports (parser arena) */
     int nmreq;
+    bool tla;              /* FK_MODULE: awaits at its top level */
 };
 
 /* binding kinds */

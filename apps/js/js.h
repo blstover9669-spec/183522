@@ -108,7 +108,8 @@ int     js_resume_with(JSContext *ctx, JSValue result);
    JS_EXCEPTION. Code that runs out of budget here is stopped. */
 JSValue js_eval(JSContext *ctx, const char *utf8, size_t len, const char *name);
 /* ES modules: compile a module's source. Returns an async function (imports, exports, meta)
-   and sets *requests to an array of the module specifiers it imports. The host links the
+   and sets *requests to an array of the module specifiers it imports (with a property
+   tla = true when the module awaits at its top level). The host links the
    graph: imports(i) returns the namespace object of request i; the module calls
    exports(name, getter) for each of its exports (exports('*', namespace) for export *) and
    then awaits meta.go, so all modules of a graph are linked before any of them runs. */

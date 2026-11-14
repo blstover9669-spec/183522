@@ -2237,6 +2237,7 @@ JSBytecode *js_compile_ex(JSContext *ctx, JSValue src, JSValue name, int line, u
     if (f && requests) {
         *requests = js_array_from_list(ctx, f->mreq, (uint32_t)f->nmreq);
         if (JS_IsException(*requests)) f = NULL;
+        else if (f->tla) js_setp(ctx, *requests, js_atomc(ctx, "tla"), JS_TRUE, *requests, false);
     }
     if (f) {
         Comp c;

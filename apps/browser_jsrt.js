@@ -2478,7 +2478,7 @@ function key(type, k, repeat, mods, code, rawmods) {
    NovaJS compiles a module to async function (imports, exports, meta) (see js_compile_module):
    here the graph is fetched and compiled, linked (every module registers its exports, then
    waits), and run dependencies first. */
-const modRecs = new Map();
+const modRecs = new Map(), FETCHFAIL = Symbol('fetch failed');
 const importMap = { imports: {}, scopes: {} };
 function addImportMap(text) {
     let m;
@@ -2513,12 +2513,15 @@ function modRec(key, url, src) {
     rec.fetched = (async () => {
         let text = src;
         if (text === undefined || text === null) {
-            const r = await fetch(url);
-            if (!r.ok) throw new TypeError('Failed to fetch module ' + url + ' (HTTP ' + r.status + ')');
+            const fail = (why) => { const e = new TypeError('Failed to fetch module ' + url + ' (' + why + ')'); hidden(e, FETCHFAIL, true); return e; };
+            let r;
+            try { r = await fetch(url); } catch (e) { throw fail(e.message); }
+            if (!r.ok) throw fail('HTTP ' + r.status);
             text = await r.text();
         }
         const c = N.module(text, url);
         rec.fn = c[0];
+        rec.tla = !!c[1].tla;
         rec.deps = Array.from(c[1], (s) => { const u = resolveModule(s, url); return modRec(u, u); });
     })();
     rec.fetched.catch(() => {});
@@ -2549,16 +2552,37 @@ function modLink(rec) {
     rec.done.catch(() => {});
     rec.state = 'linked';
 }
-function modRun(rec) {
-    if (rec.ev) return rec.ev;
-    rec.state = 'evaluating';
-    rec.ev = (async () => {
-        for (const d of rec.deps) if (d.state !== 'evaluating') await modRun(d);
-        rec.go();
-        await rec.done;
-        rec.state = 'evaluated';
-    })();
-    return rec.ev;
+/* does module a (transitively) import b? */
+function modReaches(a, b, seen = new Set()) {
+    if (a === b) return true;
+    if (seen.has(a)) return false;
+    seen.add(a);
+    return a.deps.some((d) => modReaches(d, b, seen));
+}
+/* run a graph: dependencies first (depth first, cycles cut where they close, like
+   browsers), all in one go unless a module awaits at its top level; a module another
+   graph is still running (awaiting) is waited for */
+async function modRun(root) {
+    const order = [], seen = new Set();
+    const visit = (r) => {
+        if (seen.has(r) || r.ev) return;
+        seen.add(r);
+        r.deps.forEach(visit);
+        order.push(r);
+    };
+    visit(root);
+    const mine = new Set(order);
+    for (const m of order) {
+        for (const d of m.deps)     /* (ours run before m anyway: their bodies are queued first) */
+            if (!mine.has(d) && d.ev && d.state === 'evaluating' && !modReaches(d, m)) await d.ev;
+        m.state = 'evaluating';
+        m.go();
+        m.ev = m.done.then(() => { m.state = 'evaluated'; }, (e) => { m.state = 'evaluated'; throw e; });
+        m.ev.catch(() => {});
+        if (m.tla) await m.ev;
+    }
+    for (const m of order) await m.ev;
+    if (root.ev) await root.ev;
 }
 async function importModule(key, url, src) {
     const rec = modRec(key, url, src);
@@ -2635,8 +2659,9 @@ const hooks = {
     /* <script type=module>: src (url) or inline (source); N.moduleDone(el, ok) at the end */
     runModule(el, url, src) {
         const key = url || document.URL + '#module' + (++inlineModules);
+        /* (only a module that could not be fetched makes the element's error event) */
         importModule(key, url || document.baseURI, url ? undefined : src)
-            .then(() => N.moduleDone(el, true), (e) => { report(e); N.moduleDone(el, false); });
+            .then(() => N.moduleDone(el, true), (e) => { report(e); N.moduleDone(el, !(e && e[FETCHFAIL])); });
     },
     importMap: addImportMap,
     dynamicImport(spec, from) {
