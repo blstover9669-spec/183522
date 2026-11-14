@@ -560,7 +560,6 @@ void wm_focus(window_t *w) {
     }
     wm_update_taskbar_visibility();
     wm_taskbar_changed();
-    if (w && frozen(w)) wd_show_dialog(w->app);   /* not responding: its watchdog window on top */
 }
 
 /* The bottom islands (Start, running apps, app rectangle, clock) hide while a
@@ -688,6 +687,7 @@ void win_focus(window_t *w) {
     if (w->minimized) win_restore(w);
     if (!w->visible) win_show(w);
     wm_focus(w);
+    if (frozen(w)) wd_show_dialog(w->app);     /* not responding: its watchdog window on top */
 }
 
 bool win_is_focused(window_t *w) { return w && w == wm_focused; }
@@ -1198,10 +1198,10 @@ static void mouse_down(int button) {
         return;
     }
     int ht = hit_test(w, wm_mouse_x, wm_mouse_y);
-    if (ht == HT_CLIENT && frozen(w)) {          /* not responding: up comes the watchdog's window */
+    if (frozen(w)) {                             /* not responding: up comes the watchdog's window */
         wm_focus(w);
         wd_show_dialog(w->app);
-        return;
+        if (ht == HT_CLIENT) return;             /* (the window can still be moved) */
     }
     if (w->layer == LAYER_NORMAL || w->layer == LAYER_DESKTOP || (w->layer == LAYER_TOPMOST && !taskbar_owns(w)))
         wm_focus(w);
