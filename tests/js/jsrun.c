@@ -261,7 +261,7 @@ int main(int argc, char **argv) {
         bool ok2 = st2 == JS_DONE && JS_IsNumber(a) && js_num(a) == 42;
         printf("after kill: %s\n", ok2 ? "ok" : "FAIL");
         /* a runaway inside a native callback cannot yield: stopped after nested_limit_ms */
-        const char *nested = "[1].forEach(function () { for (;;) {} });";
+        const char *nested = "'a'.replace(/a/, function () { for (;;) {} });";
         t0 = mono_ms(NULL);
         int st3 = drive(ctx, js_eval_task(ctx, nested, strlen(nested), "nested.js", 1));
         el = mono_ms(NULL) - t0;
@@ -294,6 +294,7 @@ int main(int argc, char **argv) {
                           "log.push(f(10));\n"
                           "Promise.resolve().then(function () { log.push('job'); });\n"
                           "log.push([5].map(function (x) { return hostAsk(x); })[0]);\n"
+                          "log.push('a'.replace('a', function () { return hostAsk(7); }));\n"
                           "try { (function () { throw new Error('e'); })(); } catch (e) { log.push(hostAsk(1)); }\n"
                           "log.push(f.call(null, 3), f.apply(null, [4]));\n";
         int st = js_eval_task(ctx, src, strlen(src), "wait.js", 1);
@@ -307,7 +308,8 @@ int main(int argc, char **argv) {
         }
         JSValue d = js_eval(ctx, "log.join(',')", 13, "check");
         char *ds = js_to_cstring(ctx, d, NULL);
-        bool ok = st == JS_DONE && waits == 4 && ds && !strcmp(ds, "20,21,-1,2,6,8,7,9,job");
+        /* (callbacks of the self-hosted Array methods can wait; those of a native cannot) */
+        bool ok = st == JS_DONE && waits == 5 && ds && !strcmp(ds, "20,21,10,-1,2,6,8,7,9,job");
         printf("host waits: %d, log %s: %s\n", waits, ds ? ds : "?", ok ? "ok" : "FAIL");
         free(ds);
         js_free_context(ctx);

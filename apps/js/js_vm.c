@@ -528,16 +528,22 @@ static JSValue not_callable(JSContext *ctx, JSValue fn, JSBytecode *b, uint32_t 
 /* log that a runaway script was stopped, and where (allocates nothing on the JS heap) */
 static void log_stopped_at(JSContext *ctx) {
     if (!ctx->host.log) return;
-    char buf[700];
+    char buf[1100];
     size_t n = (size_t)snprintf(buf, sizeof buf, "Script stopped: it ran too long (page not responding)");
-    for (int i = ctx->nframes - 1, shown = 0; i >= 0 && shown < 6 && n < sizeof buf - 150; i--) {
+    for (int i = ctx->nframes - 1, shown = 0; i >= 0 && shown < 8 && n < sizeof buf - 200; i--) {
         JSBytecode *b = ctx->frames[i].b;
         if (!b) continue;
-        char nm[48] = "", src[80] = "";
+        char nm[48] = "", src[96] = "";
         if (JS_IsString(b->name)) js_str_to_ascii(ctx, b->name, nm, sizeof nm);
         if (JS_IsString(b->srcname)) js_str_to_ascii(ctx, b->srcname, src, sizeof src);
-        n += (size_t)snprintf(buf + n, sizeof buf - n, "\n    at %s (%s:%d)", nm[0] ? nm : (b->fflags & F_SCRIPT) ? "<script>" : "<anonymous>",
-                              src, js_line_of(b, (uint32_t)(ctx->frames[i].pc - b->code)));
+        /* (the column where the function starts: minified scripts are one long line) */
+        uint32_t col = b->src_start + 1;
+        JSString *str = JS_IsString(b->source) ? js_flat(ctx, b->source) : NULL;
+        if (str && b->src_start <= str->len)
+            for (uint32_t k = b->src_start; k > 0; k--) if (str->s[k - 1] == '\n') { col = b->src_start - k + 1; break; }
+        n += (size_t)snprintf(buf + n, sizeof buf - n, "\n    at %s (%s:%d:%u)%s", nm[0] ? nm : (b->fflags & F_SCRIPT) ? "<script>" : "<anonymous>",
+                              src, js_line_of(b, (uint32_t)(ctx->frames[i].pc - b->code)), (unsigned)col,
+                              i > 0 && (ctx->frames[i].flags & FR_BOUNDARY) ? ", called from native code" : "");
         shown++;
     }
     ctx->host.log(ctx->host.ud, JS_LOG_ERROR, buf);
@@ -1264,6 +1270,19 @@ static JSValue run(JSContext *ctx, int stop) {
                     argc += (uint32_t)ba;
                     sp += ba;
                     fn = base[0];
+                    goto do_call;
+                }
+                if (fo == ctx->fn_callwith && argc >= 1 && JS_IsObject(base[2]) &&
+                    (OBJ(base[2])->h.cls == CL_FUNCTION || OBJ(base[2])->h.cls == CL_BOUND)) {
+                    /* call(fn, this, ...args) of the self-hosted methods: the call itself, in this run */
+                    uint32_t drop = argc >= 2 ? 2 : 1;
+                    JSValue callee = base[2], self = argc >= 2 ? base[3] : JS_UNDEFINED;
+                    memmove(base + 2, base + 2 + drop, sizeof(JSValue) * (argc - drop));
+                    argc -= drop;
+                    sp -= drop;
+                    base[0] = callee;
+                    base[1] = self;
+                    fn = callee;
                     goto do_call;
                 }
                 if (fo->h.cls == CL_NATIVE && (fo == ctx->fn_call || fo == ctx->fn_apply) && JS_IsObject(base[1]) &&
@@ -2585,6 +2604,7 @@ JSContext *js_new_context(const js_host_t *host) {
     js_init_lib_json(ctx);
     js_init_lib_coll(ctx);
     js_init_lib_misc(ctx);
+    js_init_selfhosted(ctx);
     ctx->no_gc--;
     JS_GC_LEAVE(ctx);
     return ctx;

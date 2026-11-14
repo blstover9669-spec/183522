@@ -115,4 +115,30 @@ eq(new TextEncoder().encode('é').join(), '195,169', 'TextEncoder'); eq(new Text
 eq(btoa('hello'), 'aGVsbG8=', 'btoa'); eq(atob('aGVsbG8='), 'hello', 'atob');
 var sc = structuredClone({ a: [1, { b: new Date(5) }], m: new Map([[1, 2]]) }); eq(sc.a[1].b.getTime(), 5, 'structuredClone'); eq(sc.m.get(1), 2, 'clone map');
 eq(new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(1234.5), '$1,234.50', 'Intl currency');
+// the self-hosted Array methods (callbacks run in the caller's run) behave like the natives
+var holes = [1, , 3], seen = [];
+holes.forEach(function (v, i, a) { seen.push(i + ':' + v + ':' + (a === holes) + ':' + (this === holes)); }, holes);
+eq(seen.join(), '0:1:true:true,2:3:true:true', 'forEach skips holes, passes thisArg');
+eq(holes.map(function (v) { return v * 2; }).length, 3, 'map keeps length'); check(!(1 in holes.map(function (v) { return v; })), 'map keeps holes');
+eq([1, 2, 3, 4].filter(function (v) { return v % 2; }).join(), '1,3', 'filter');
+eq(Array.prototype.map.call('ab', function (c) { return c + c; }).join(), 'aa,bb', 'map on a string');
+eq(Array.prototype.filter.call({ length: 3, 0: 'a', 2: 'c' }, function () { return true; }).join(), 'a,c', 'filter on an array-like');
+eq([3, 4].find(function (v) { return v > 3; }), 4, 'find'); eq([3, 4].findIndex(function (v) { return v > 5; }), -1, 'findIndex');
+eq([1, 2, 3].findLast(function (v) { return v < 3; }), 2, 'findLast'); eq([1, 2, 3].findLastIndex(function (v) { return v < 2; }), 0, 'findLastIndex');
+eq([, 1].find(function (v) { return v === undefined; }), undefined, 'find visits holes');
+eq([1, 2, 3].reduce(function (a, b) { return a + b; }), 6, 'reduce'); eq([1, 2, 3].reduceRight(function (a, b) { return a + '' + b; }), '321', 'reduceRight');
+eq([].reduce(function (a, b) { return a + b; }, 'init'), 'init', 'reduce with initial value');
+throws(function () { [].reduce(function () {}); }, TypeError, 'reduce of empty array');
+throws(function () { [1].map(5); }, TypeError, 'map needs a function');
+throws(function () { Array.prototype.forEach.call(null, function () {}); }, TypeError, 'forEach on null');
+eq([1, 2].some(function (v) { return v > 1; }), true, 'some'); eq([1, 2].every(function (v) { return v > 1; }), false, 'every');
+class MyArr extends Array {}
+check(new MyArr(1, 2, 3).map(function (v) { return v; }) instanceof MyArr, 'map uses Symbol.species');
+eq(Array.prototype.map.length, 1, 'map.length'); eq(Array.prototype.reduce.length, 1, 'reduce.length');
+eq(Array.prototype.forEach.name, 'forEach', 'forEach.name'); check(/native code/.test(String(Array.prototype.map)), 'map looks native');
+throws(function () { new Array.prototype.forEach(function () {}); }, TypeError, 'methods are not constructors');
+check(!Object.keys(Array.prototype).length, 'methods are not enumerable');
+eq([1.5, 2.5].map(Math.floor).join(), '1,2', 'native callback');
+eq([1, 2].map(function (v) { return this.k + v; }.bind({ k: 10 })).join(), '11,12', 'bound callback');
+eq([1].map(new Proxy(function (v) { return v + 1; }, {}))[0], 2, 'proxy callback');
 print('builtins done');

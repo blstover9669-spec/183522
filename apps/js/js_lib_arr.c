@@ -1465,6 +1465,137 @@ uint8_t *js_get_bytes(JSContext *ctx, JSValue v, size_t *len) {
     return NULL;
 }
 
+/* ==== self-hosted methods ===============================================================================
+   The Array methods that call back into the script are written in JS: their callbacks then run in
+   the caller's run(), so a long loop pauses between time slices like any script (a native's
+   callbacks cannot pause, and code that cannot pause is stopped after a few seconds). They work
+   on any array-like exactly as the natives did; H holds the few natives they need. */
+static const char selfhosted_js[] =
+"(function (H, AP) {\n"
+"'use strict';\n"
+"const call = H.call, obj = H.obj, len = H.len, notFn = H.notFn, species = H.species, put = H.put, TE = TypeError;\n"
+"const M = {\n"
+"    forEach(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = 0; k < n; k++) if (k in o) call(fn, t, o[k], k, o);\n"
+"    },\n"
+"    map(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        const r = species(o, n);\n"
+"        for (let k = 0; k < n; k++) if (k in o) put(r, k, call(fn, t, o[k], k, o));\n"
+"        return r;\n"
+"    },\n"
+"    filter(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        const r = species(o, 0);\n"
+"        for (let k = 0, j = 0; k < n; k++) if (k in o) { const v = o[k]; if (call(fn, t, v, k, o)) put(r, j++, v); }\n"
+"        return r;\n"
+"    },\n"
+"    some(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = 0; k < n; k++) if (k in o && call(fn, t, o[k], k, o)) return true;\n"
+"        return false;\n"
+"    },\n"
+"    every(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = 0; k < n; k++) if (k in o && !call(fn, t, o[k], k, o)) return false;\n"
+"        return true;\n"
+"    },\n"
+"    find(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = 0; k < n; k++) { const v = o[k]; if (call(fn, t, v, k, o)) return v; }\n"
+"        return undefined;\n"
+"    },\n"
+"    findIndex(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = 0; k < n; k++) if (call(fn, t, o[k], k, o)) return k;\n"
+"        return -1;\n"
+"    },\n"
+"    findLast(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = n - 1; k >= 0; k--) { const v = o[k]; if (call(fn, t, v, k, o)) return v; }\n"
+"        return undefined;\n"
+"    },\n"
+"    findLastIndex(fn, t) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        for (let k = n - 1; k >= 0; k--) if (call(fn, t, o[k], k, o)) return k;\n"
+"        return -1;\n"
+"    },\n"
+"    reduce(fn, init) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        let k = 0, acc;\n"
+"        if (arguments.length > 1) acc = init;\n"
+"        else {\n"
+"            while (k < n && !(k in o)) k++;\n"
+"            if (k >= n) throw new TE('Reduce of empty array with no initial value');\n"
+"            acc = o[k++];\n"
+"        }\n"
+"        for (; k < n; k++) if (k in o) acc = call(fn, undefined, acc, o[k], k, o);\n"
+"        return acc;\n"
+"    },\n"
+"    reduceRight(fn, init) {\n"
+"        const o = obj(this), n = len(o);\n"
+"        if (typeof fn !== 'function') notFn(fn);\n"
+"        let k = n - 1, acc;\n"
+"        if (arguments.length > 1) acc = init;\n"
+"        else {\n"
+"            while (k >= 0 && !(k in o)) k--;\n"
+"            if (k < 0) throw new TE('Reduce of empty array with no initial value');\n"
+"            acc = o[k--];\n"
+"        }\n"
+"        for (; k >= 0; k--) if (k in o) acc = call(fn, undefined, acc, o[k], k, o);\n"
+"        return acc;\n"
+"    },\n"
+"};\n"
+"for (const k in M) { H.native(M[k]); H.define(AP, k, M[k]); }\n"
+"})\n";
+
+FN(sh_call) { return js_callv(ctx, A(0), A(1), argc > 2 ? argc - 2 : 0, argv + 2); }
+FN(sh_obj) { return this_obj(ctx, A(0)); }
+FN(sh_len) { int64_t n = js_length_of(ctx, A(0)); return n < 0 ? JS_EXCEPTION : js_mknum((double)n); }
+FN(sh_species) { return array_species_create(ctx, A(0), (int64_t)js_num(A(1))); }
+FN(sh_put) { return create_i(ctx, A(0), (int64_t)js_num(A(1)), A(2)) < 0 ? JS_EXCEPTION : JS_UNDEFINED; }
+FN(sh_not_fn) {
+    char d[64];
+    js_value_desc(ctx, A(0), d, sizeof d);
+    return js_throw_type(ctx, "%s is not a function", d);
+}
+/* native(fn): length 1, and toString shows [native code] like the natives it replaces */
+FN(sh_native) {
+    if (!js_is_cls(A(0), CL_FUNCTION)) return JS_UNDEFINED;
+    OBJ(A(0))->u.f.b->source = JS_UNDEFINED;
+    if (js_define_value(ctx, A(0), ctx->a[A_length], js_mknum(1), P_C) < 0) return JS_EXCEPTION;
+    return JS_UNDEFINED;
+}
+FN(sh_define) { return js_define_value(ctx, A(0), A(1), A(2), P_W | P_C) < 0 ? JS_EXCEPTION : JS_UNDEFINED; }
+
+void js_init_selfhosted(JSContext *ctx) {
+    JSValue h = js_obj_new(ctx, CL_OBJECT, NULL);
+    JSValue c = js_def_native(ctx, h, "call", sh_call, 2, 0);
+    ctx->fn_callwith = OBJ(c);
+    js_def_native(ctx, h, "obj", sh_obj, 1, 0);
+    js_def_native(ctx, h, "len", sh_len, 1, 0);
+    js_def_native(ctx, h, "species", sh_species, 2, 0);
+    js_def_native(ctx, h, "put", sh_put, 3, 0);
+    js_def_native(ctx, h, "notFn", sh_not_fn, 1, 0);
+    js_def_native(ctx, h, "native", sh_native, 1, 0);
+    js_def_native(ctx, h, "define", sh_define, 3, 0);
+    JSValue f = js_eval(ctx, selfhosted_js, sizeof selfhosted_js - 1, "<builtins>");
+    JSValue args[2] = { h, JS_MKOBJ(ctx->proto_array) };
+    JSValue r = JS_IsException(f) ? f : js_call(ctx, f, JS_UNDEFINED, 2, args);
+    if (JS_IsException(r)) js_take_exception(ctx);    /* (the natives stay) */
+}
+
 /* ==== setup ============================================================================================ */
 static const JSFuncDef arrp_fns[] = {
     { "at", arr_at, 1, 0 }, { "concat", arr_concat, 1, 0 }, { "copyWithin", arr_copy_within, 2, 0 },

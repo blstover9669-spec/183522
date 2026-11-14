@@ -295,6 +295,7 @@ struct JSContext {
     JSObject *proto_textenc, *proto_textdec, *proto_url, *proto_usp, *proto_intl_nf, *proto_intl_dtf;
     JSObject *proto_intl_coll, *proto_intl_pr, *proto_intl_rtf;
     JSObject *fn_call, *fn_apply;  /* Function.prototype.call / apply: run in the caller's run() */
+    JSObject *fn_callwith;        /* the self-hosted methods' call(fn, this, ...args): the same */
     JSObject *ctor_regexp;        /* (last of the JSObject * block the GC walks) */
     JSValue throw_type_error;     /* %ThrowTypeError% */
     JSValue array_values;         /* Array.prototype.values (arguments[@@iterator]) */
@@ -577,6 +578,7 @@ void js_init_lib_num(JSContext *ctx);
 void js_init_lib_json(JSContext *ctx);
 void js_init_lib_coll(JSContext *ctx);
 void js_init_lib_misc(JSContext *ctx);
+void js_init_selfhosted(JSContext *ctx);   /* (js_lib_arr.c, once the libraries are set up) */
 JSObject *js_new_ctor(JSContext *ctx, const char *name, JSNativeFn fn, int len, JSObject *proto, int magic);
 typedef struct JSFuncDef { const char *name; JSNativeFn fn; int16_t len, magic; } JSFuncDef;
 void js_def_funcs(JSContext *ctx, JSValue obj, const JSFuncDef *d, int n);

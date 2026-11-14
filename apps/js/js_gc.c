@@ -254,9 +254,11 @@ static void mark_object(JSContext *ctx, JSObject *o) {
     if (o->h.flags & OF_LAZY) { /* nothing extra */ }
     mark_props(ctx, o);
     switch (o->h.cls) {
-    case CL_ARRAY: case CL_ARGUMENTS:
-        for (uint32_t i = 0; i < o->u.a.len; i++) js_gc_mark_value(ctx, o->u.a.v[i]);
+    case CL_ARRAY: case CL_ARGUMENTS: {
+        uint32_t n = o->u.a.len < o->u.a.cap ? o->u.a.len : o->u.a.cap;   /* (slots past cap are holes) */
+        for (uint32_t i = 0; i < n; i++) js_gc_mark_value(ctx, o->u.a.v[i]);
         break;
+    }
     case CL_FUNCTION:
         js_gc_mark_cell(ctx, o->u.f.b);
         if (o->u.f.vr && o->u.f.b) for (int i = 0; i < o->u.f.b->ncv; i++) if (o->u.f.vr[i]) js_gc_mark_cell(ctx, o->u.f.vr[i]);
