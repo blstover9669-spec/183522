@@ -148,7 +148,7 @@ static bool build_request(http_request_t *r) {
     if (def_port) o += (size_t)snprintf(q + o, cap - o, "Host: %s\r\n", u->host);
     else o += (size_t)snprintf(q + o, cap - o, "Host: %s:%u\r\n", u->host, u->port);
     if (!has_xheader(r, "User-Agent"))
-        o += (size_t)snprintf(q + o, cap - o, "User-Agent: Mozilla/5.0 (NovaOS 2.5; i686) NovaBrowser/2.5\r\n");
+        o += (size_t)snprintf(q + o, cap - o, "User-Agent: Mozilla/5.0 (NovaOS 2.9; i686) NovaBrowser/2.9\r\n");
     if (!has_xheader(r, "Accept"))
         o += (size_t)snprintf(q + o, cap - o, "Accept: text/html,application/xhtml+xml,*/*;q=0.8\r\n");
     if (!has_xheader(r, "Accept-Language"))

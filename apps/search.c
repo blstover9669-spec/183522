@@ -7,7 +7,7 @@
  * a tab is loading), at most one request every 3 s per site (or the site's
  * Crawl-delay), robots.txt (groups for NovaOS-Search or *, Allow / Disallow
  * with * and $, longest match wins) and <meta name=robots> are obeyed, no
- * cookies are sent or kept and the User-Agent is "NovaOS-Search/2.5". Pages
+ * cookies are sent or kept and the User-Agent is "NovaOS-Search/2.9". Pages
  * are read a slice per tick so the window stays smooth.
  *
  * A search with few results also looks on the web right away: the Wikipedia
@@ -31,7 +31,7 @@
 #define SDIR        "/home/user/.search"
 #define IDX_PATH    SDIR "/index"
 #define FRONT_PATH  SDIR "/frontier"
-#define UA_HEADER   "User-Agent: NovaOS-Search/2.5\r\n"
+#define UA_HEADER   "User-Agent: NovaOS-Search/2.9\r\n"
 #define CAP_DISK    (8u << 20)
 #define CAP_RAM     (3u << 20)
 #define FRONT_MAX   3000

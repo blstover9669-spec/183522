@@ -1691,13 +1691,13 @@ hidden(G, 'history', history);
 hidden(G, 'History', History);
 
 /* navigator, screen */
-const UA = 'Mozilla/5.0 (NovaOS 2.5; i686) AppleWebKit/537.36 (KHTML, like Gecko) NovaBrowser/2.5 Safari/537.36';
+const UA = 'Mozilla/5.0 (NovaOS 2.9; i686) AppleWebKit/537.36 (KHTML, like Gecko) NovaBrowser/2.9 Safari/537.36';
 const navigator = {
     userAgent: UA, appVersion: UA.slice(8), appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko', productSub: '20030107',
     vendor: 'NovaOS', vendorSub: '', platform: 'Linux i686', language: 'en-US', languages: ['en-US', 'en'], onLine: true,
     cookieEnabled: true, doNotTrack: null, hardwareConcurrency: 1, maxTouchPoints: 0, deviceMemory: 1, pdfViewerEnabled: false,
     webdriver: false, plugins: [], mimeTypes: [],
-    userAgentData: { brands: [{ brand: 'NovaBrowser', version: '2.5' }], mobile: false, platform: 'NovaOS', getHighEntropyValues() { return Promise.resolve({}); } },
+    userAgentData: { brands: [{ brand: 'NovaBrowser', version: '2.9' }], mobile: false, platform: 'NovaOS', getHighEntropyValues() { return Promise.resolve({}); } },
     javaEnabled() { return false; },
     sendBeacon(url, data) { try { fetch(new URL(String(url), document.baseURI).href, { method: 'POST', body: data }).catch(() => {}); } catch (e) { return false; } return true; },
     clipboard: { writeText(t) { N.clip(String(t)); return Promise.resolve(); }, readText() { return Promise.resolve(N.clip()); } },

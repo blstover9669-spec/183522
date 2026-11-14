@@ -464,7 +464,7 @@ static const tut_item_t tut_items[2][TUT_ITEMS] = {
         "NovaOS.iso, choose \"Remove Disk from Virtual Drive\" and start the VM.", false },
       { "Keep the hard disk on the IDE controller: NovaOS does not find hard disks on SATA, SCSI or NVMe "
         "controllers.", false },
-      { "To reinstall, pick NovaOS 2.5 Developer Preview in the boot menu within those 2 seconds.", false } },
+      { "To reinstall, pick NovaOS 2.9 Developer Preview in the boot menu within those 2 seconds.", false } },
     { { "NovaOS only reads IDE hard disks, so the installed drive can't run from a USB stick.", false },
       { "What works: write NovaOS.iso to a USB stick with balenaEtcher or Rufus (DD mode) and boot a PC with "
         "legacy BIOS/CSM from it with its boot menu key (often F12). NovaOS runs from the ISO and nothing is "

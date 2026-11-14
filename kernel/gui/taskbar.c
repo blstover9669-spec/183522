@@ -16,7 +16,7 @@
  *    app's window is open; while the app is open its outline glows (the glow
  *    grows in, a light keeps running round it, and it fades out when the app
  *    closes). A window timer drives this and repaints only this island.
- *  - the clock (click: calendar) with the "Developer version 2.5" label.
+ *  - the clock (click: calendar) with the "Developer version 2.9" label.
  *
  * Each island is its own frameless topmost window with rounded corners, so
  * whatever lies between them stays visible and clickable. The pin data
@@ -130,7 +130,7 @@ static int apps_x(void) { return ISLAND_GAP + START_W + ISLAND_GAP; }
 static int dock_w(void) { return 2 * DOCK_PAD + NDOCK * SLOT_W + (NDOCK - 1) * SLOT_GAP; }
 static int dock_x(void) { return (screen_width() - dock_w()) / 2; }
 
-/* "Developer version 2.5" on developer editions (NOVA_EDITION "Developer Preview"), else NULL */
+/* "Developer version 2.9" on developer editions (NOVA_EDITION "Developer Preview"), else NULL */
 static const char *developer_label(void) {
     return strstr(NOVA_EDITION, "Developer") ? "Developer version " NOVA_VERSION : NULL;
 }
@@ -543,7 +543,7 @@ static void paint_clock(window_t *win) {
     gfx_text_aligned(s, rect_make(tx, s->h / 2 - fh + 1, CLOCK_TXT_W, fh), tbuf, t->taskbar_text, FONT_UI_BOLD, ALIGN_RIGHT);
     gfx_text_aligned(s, rect_make(tx, s->h / 2 + 1, CLOCK_TXT_W, fh), dbuf,
                      color_mix(t->taskbar_text, t->dark ? COLOR_BLACK : COLOR_WHITE, 60), FONT_UI, ALIGN_RIGHT);
-    /* developer editions: "Developer version 2.5", drawn last so it is always in
+    /* developer editions: "Developer version 2.9", drawn last so it is always in
        front of the time; black, white in dark mode */
     const char *label = developer_label();
     if (label) gfx_text(s, 12, (s->h - fh) / 2, label, t->dark ? COLOR_WHITE : COLOR_BLACK, FONT_UI);

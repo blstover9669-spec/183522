@@ -476,7 +476,7 @@ tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Web_Browser:http://10
   the test network intercepts TLS, and use `monitor:set_link e1000.0 off` to
   check that searches still work offline from the index.
 * Real sites: mirror a page with its stylesheets and pictures on the host
-  (`wget -p -k -E -U "Mozilla/5.0 (NovaOS 2.5; i686) NovaBrowser/2.5" URL`)
+  (`wget -p -k -E -U "Mozilla/5.0 (NovaOS 2.9; i686) NovaBrowser/2.9" URL`)
   and serve the copy, or browse the live site when the test machine has
   internet (a network that intercepts TLS gets the certificate warning first).
 

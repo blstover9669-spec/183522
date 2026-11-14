@@ -1,6 +1,6 @@
 # NovaOS
 
-**NovaOS 2.5 Developer Preview** - a hobby operating system with a modern
+**NovaOS 2.9 Developer Preview** - a hobby operating system with a modern
 graphical desktop, written from scratch in C and assembly.
 
 ![NovaOS desktop with the Start menu open](docs/screenshots/start-menu.png)
@@ -16,7 +16,7 @@ disk, which then boots NovaOS on its own and keeps your files across
 restarts.
 
 **Download:** [`NovaOS.iso`](NovaOS.iso) in this repository (about 10 MB).
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 2.5.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 2.9.
 
 > **Developer Preview:** NovaOS is a hobby project and a technology preview.
 > It has been tested in QEMU, which emulates the same hardware VirtualBox
@@ -39,7 +39,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what is new in 2.5.
 
 ## Screenshots
 
-Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release build; in 2.5 the ten games live inside the Games app):
+Every app in NovaOS 1.5 (each one screenshotted in QEMU from the 1.5 release build; in 2.9 the ten games live inside the Games app):
 
 ![All 30 NovaOS apps](docs/screenshots/all-apps.png)
 
@@ -222,7 +222,7 @@ Select the VM and click **Settings**:
 
 ### 3. Start NovaOS from the ISO
 
-1. Click **Start**. The GRUB menu boots **NovaOS 2.5 Developer Preview**
+1. Click **Start**. The GRUB menu boots **NovaOS 2.9 Developer Preview**
    after 2 seconds and the splash screen plays.
 2. **Click inside the VM window** to capture the mouse. Press **Right Ctrl**
    (VirtualBox's host key) to release it again. NovaOS has no VirtualBox
@@ -273,7 +273,7 @@ start is the installation menu too).
 ### 5. Boot from the disk
 
 1. With the ISO attached, the GRUB menu picks **Boot from the first hard disk
-   (installed NovaOS)** by itself after 2 seconds (choose the NovaOS 2.5 entry
+   (installed NovaOS)** by itself after 2 seconds (choose the NovaOS 2.9 entry
    within those 2 seconds to get the NovaOS Drive installation again). To
    start without the ISO: power off the VM, open *Settings -> Storage*, select
    the optical drive with NovaOS.iso, choose *Remove Disk from Virtual Drive*
@@ -297,7 +297,7 @@ start is the installation menu too).
    deleted. A SHA-256 manifest of the system files is checked at every start:
    if a system file is damaged (e.g. a broken disk sector) NovaOS stops with a
    **kernel panic** naming the file. Reinstall from the ISO (pick the NovaOS
-   2.5 entry in the GRUB menu, then Install).
+   2.9 entry in the GRUB menu, then Install).
    NovaOS shows **No drive found** (black screen, Nova icon) when the installed
    drive is not there at startup, or stops responding while NovaOS runs.
 4. NovaOS checks two more requirements at every start of the drive and shows
@@ -314,7 +314,7 @@ start is the installation menu too).
 
 ### Troubleshooting
 
-* **Black screen:** pick **NovaOS 2.5 Developer Preview (safe graphics
+* **Black screen:** pick **NovaOS 2.9 Developer Preview (safe graphics
   800x600)** in the GRUB menu (press the arrow keys while it is shown). Installing from
   this entry makes the installed system use 800x600 too.
 * **The pointer does not move:** the pointing device must be *PS/2 Mouse*,
@@ -455,7 +455,7 @@ and screenshots: [docs/TESTING.md](docs/TESTING.md);
 
 ## Known limitations
 
-NovaOS 2.5 is a **Developer Preview**. Things that are not there (yet):
+NovaOS 2.9 is a **Developer Preview**. Things that are not there (yet):
 
 * **Not yet tested on real VirtualBox or on real PCs.** All testing was done
   in QEMU (`qemu-system-i386`, PIIX chipset, IDE, PS/2, std VGA, AC'97 and

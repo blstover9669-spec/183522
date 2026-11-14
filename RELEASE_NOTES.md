@@ -1,9 +1,9 @@
-# NovaOS 2.5 Developer Preview - Release Notes
+# NovaOS 2.9 Developer Preview - Release Notes
 
-**Kernel version:** 2.5.0
+**Kernel version:** 2.9.0
 **Download:** `NovaOS.iso` (bootable CD image, BIOS / GRUB)
 
-NovaOS 2.5 is the biggest update yet: internet and a web browser, a new
+NovaOS 2.9 is the biggest update yet: internet and a web browser, a new
 way to install, save codes, a virus scanner and a new bottom of the screen.
 As before, everything was tested in QEMU only, not yet on real VirtualBox.
 
@@ -27,7 +27,7 @@ As before, everything was tested in QEMU only, not yet on real VirtualBox.
 * **The taskbar is gone:** Start button at the bottom left with the running
   apps next to it, the rectangle with Settings, Welcome and Files in the
   middle (spinner while opening, glowing outline while open), and the time
-  at the bottom right with "Developer version 2.5".
+  at the bottom right with "Developer version 2.9".
 * **Games:** the ten games now live in one Games app.
 * **Settings > Styles:** five screensavers (Nova Drop, Original, Bubbles,
   Bouncing App Logos, Lines) with live preview.

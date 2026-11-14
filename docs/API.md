@@ -748,8 +748,8 @@ u32 ctime, u32 size, data}`. A self-test at boot round-trips the tree.
   prefix + an in-memory ring (`sys_log_text(buf, size)` for a log viewer).
   `printf` also goes to serial. `kpanic("fmt", ...)` = blue screen with
   registers and a symbolised stack trace.
-* Info: `sys_version()` ("NovaOS 2.5"), `sys_edition()` ("Developer
-  Preview"), `sys_kernel_version()` ("2.5.0 (build date)"),
+* Info: `sys_version()` ("NovaOS 2.9"), `sys_edition()` ("Developer
+  Preview"), `sys_kernel_version()` ("2.9.0 (build date)"),
   `sys_cpu_name()`, `sys_uptime_ms()`, `sys_fps()` (compositor frames last
   second), `sys_cmdline()`, `sys_cmdline_get("key")`, `sys_boot_drive()`.
 * Time: `sys_datetime(&dt)` (local time from the CMOS RTC: year, month 1-12,
@@ -1413,7 +1413,7 @@ and file - the browser's *Clear cookies* button).
 **NovaOS Search** (the Web Browser's own search engine, `apps/search*.c`; no
 outside search service is used). While a browser window is open it crawls the
 web from a built-in list of well-known sites, breadth first, as
-`User-Agent: NovaOS-Search/2.5`: robots.txt (groups for `NovaOS-Search` or
+`User-Agent: NovaOS-Search/2.9`: robots.txt (groups for `NovaOS-Search` or
 `*`, Allow / Disallow with `*` and `$`, Crawl-delay) and `<meta name=robots>`
 are obeyed, a site gets at most one request every 3 s, no cookies are sent or
 kept, and nothing is fetched while a tab is loading. Pages the user opens are
