@@ -511,6 +511,65 @@ tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots
   "Plain text" for everything else); check them with `dark=1` too. Files over
   2 MB open in the big-file viewer, which colours its rows the same way.
 
+### App watchdog (Hang Test)
+
+**Hang Test** is a hidden app that stops responding on purpose: `hangtest=1`
+shows it on the desktop and in the Start menu, `test hang` in the Terminal or
+`autorun=Hang_Test` opens it. Its 420x230 window, as the first window (frame at
+(72, 40)), has **Freeze** at about (183, 136) (loops forever), **Busy 12 s** at
+(183, 178) (works 12 s, then returns) and **Freeze in malloc loop** at (183, 220)
+(allocates and frees forever - the switch must only happen outside the heap's
+critical sections); the line under them counts the seconds of a window timer.
+About 5 s after a click the window "Hang Test is not responding" opens in the
+middle of the screen: at 1024x768 **Close the app** is at about (532, 419) and
+**Wait** at (662, 419); at 800x600 (420, 335) and (550, 335). Each Close logs a
+heap check (`watchdog: heap check after closing it: ok`).
+
+```sh
+# Freeze: the window after 5 s, the desktop goes on (Notepad, the Start menu), Close
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Hang_Test" --out shots-wd ready wait:1 \
+    click:183,136 "serial:Hang Test is not responding" wait:0.5 shot:dialog \
+    dclick:141,410 wait:1.5 "type:still typing" shot:notepad click:78,744 wait:0.5 \
+    click:532,419 wait:1 shot:closed
+# Busy 12 s + Wait: the app comes back by itself
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Hang_Test" --out shots-wd ready wait:1 \
+    click:183,178 "serial:Hang Test is not responding" click:662,419 wait:1 shot:waiting \
+    "serial:responds again" wait:1 shot:back
+# Freeze in malloc loop, Wait (it runs in 20 ms slices next to the desktop), then Close
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Hang_Test" --out shots-wd ready wait:1 \
+    click:183,220 "serial:Hang Test is not responding" click:662,419 wait:5 \
+    click:78,744 wait:0.5 click:532,419 "serial:heap check after closing it"
+```
+
+Repeated hangs: with `hangtest=1` the Hang Test icon is at about (141, 45);
+each new Hang Test window cascades 30 px further, so cycle k (from 0) clicks
+Freeze at (183 + 30k, 136 + 30k) and waits for `(hang #N)` in the log. The
+markers are listed in docs/API.md section 7a; a long normal operation (an
+installation, a big copy, an 8 MB page) must not log `is not responding`.
+
+### Test apps and hooks from NOVA CMD (`test`)
+
+`test` in the Terminal lists the test apps people aren't normally supposed to
+see and the kernel's test hooks, one line each; `test NAME` runs one:
+
+| Name | What it does |
+|---|---|
+| `hang` | opens Hang Test (above) |
+| `icons` | opens the hidden Icon Library (every system icon at every size) |
+| `selftest` | runs the kernel self tests and prints `Kernel self tests: N passed, M failed` (like `selftest=1`; the `SELFTEST:` lines go to the log) |
+| `fpu` | raises the handled x87 floating-point error (like `fputest=1`): NovaOS keeps running, `[fpu]` warning in the log |
+| `shield` | writes the harmless SafetyShield samples to `/tmp/ss-samples` (like `safetyshield_samples=1`) and starts a scan |
+| `panic` | asks "This stops NovaOS until you restart. Type yes to continue" in a window; `yes` shows the kernel panic screen (like `crashtest=1`) |
+| `pz` | turns the puzzle test keys on until the next restart (like `pztest`): Breakout F11 / F12, Minesweeper F12 |
+| `osaver-log` | OSaver writes its codes to the serial log (like `osaver_test=log`) |
+| `osaver-prompt` | opens "Do you have a save file?" (like `osaver_test=promptN`) |
+| `osaver-restore` | restores `~/Documents/OSaver code.txt` (like `osaver_test=restorefileN`) |
+
+```sh
+tools/shot.py --kernel build/kernel.elf --cmdline "autorun=Terminal" --out shots-test ready wait:1.5 \
+    "type:test\n" wait:0.5 "type:test selftest\n" "serial:SELFTEST: done" wait:0.5 shot:tests
+```
+
 ### Finding coordinates
 
 * Screen is 1024x768. There is no taskbar: the bottom 48 px hold separate

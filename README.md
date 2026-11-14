@@ -480,9 +480,11 @@ NovaOS 2.9 is a **Developer Preview**. Things that are not there (yet):
 * **One address space, ring 0, one CPU core:** apps are compiled into the
   kernel, there is no user mode and no memory protection between apps (only
   NULL-pointer accesses and writes to kernel code are caught); a crashing app
-  stops the whole system (with a panic screen and stack trace), and an app
-  that blocks freezes the desktop. You cannot install new apps without
-  rebuilding.
+  stops the whole system (with a panic screen and stack trace). An app that
+  stops responding (a callback that has not returned for 5 seconds) is
+  suspended and the desktop goes on: *"App is not responding"* offers **Close
+  the app** (the memory the app still holds is not freed) or **Wait**. You
+  cannot install new apps without rebuilding.
 * **Files:** the file system lives in memory. Live CD: files are lost at
   shut down. Installed system: the whole file system is saved as a snapshot
   to the drive (each of its two save slots takes half of the chosen drive

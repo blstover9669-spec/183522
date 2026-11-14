@@ -94,6 +94,7 @@ static volatile int req;                 /* REQ_*, set by the timer interrupt   
 static uint32_t req_at, req_serial;
 static uint32_t gui_since;               /* when the GUI loop got the CPU back         */
 static uint32_t gave_up_serial;          /* no rescue possible for this callback       */
+static volatile bool gave_up_log;        /* ... to be logged by the GUI loop           */
 static int nstuck;                       /* contexts FROZEN or WAITING                 */
 static uint32_t hangs;
 
@@ -177,7 +178,9 @@ void wd_cb_end(void) {
 void wd_preempt_slow(void) {
     uint32_t d = g_ticks - wd_cs_start;
     if (d >= WD_LONG_MS && cur->depth > 0) cur->exempt += d;   /* kernel work: not the app's */
-    if (wd_pending) {
+    uint32_t fl;
+    __asm__ volatile("pushf; pop %0" : "=r"(fl));
+    if (wd_pending && (fl & 0x200)) {            /* never from an interrupt handler */
         wd_pending = 0;
         if (req) yield(Y_PENDING, NULL);
     }
@@ -281,9 +284,8 @@ static regs_t *suspend(regs_t *r) {
     wd_ctx_t *n = top > STACK_FLOOR + WD_MIN_STACK ? new_ctx(top) : NULL;
     if (!n) {
         gave_up_serial = s->serial;
+        gave_up_log = true;
         req = REQ_NONE;
-        klog("watchdog: an app callback has not returned for %u s, but there is no room for "
-             "another GUI loop (%d apps are stuck already)", WD_HANG_MS / 1000, nstuck);
         return r;
     }
     s->state = C_FROZEN;
@@ -343,6 +345,8 @@ static wd_ctx_t *ctx_of(intptr_t i) {
     return i >= 0 && i < WD_MAX && is_stuck(&ctxs[i]) ? &ctxs[i] : NULL;
 }
 
+static void dlg_close(wd_ctx_t *c);
+
 static void dlg_update(wd_ctx_t *c) {
     if (!c->dlg_status) return;
     bool waiting = c->state == C_WAITING;
@@ -376,11 +380,12 @@ static void dlg_handler(window_t *win, const event_t *ev) {
     case EV_PAINT:
         ui_draw_glyph(win_surface(win), UI_GLYPH_WARNING, 22, 22, 32, theme_get()->accent);
         break;
-    case EV_CLOSE_REQUEST:                       /* the X button: same as Wait */
+    case EV_CLOSE_REQUEST:                       /* X or Esc: Wait, and the question goes away */
         on_wait(NULL, (void *)i);
+        if (c) dlg_close(c);
         break;
     case EV_KEY_DOWN:
-        if (ev->key == KEY_ESCAPE) on_wait(NULL, (void *)i);
+        if (ev->key == KEY_ESCAPE) { on_wait(NULL, (void *)i); if (c) dlg_close(c); }
         break;
     case EV_CLOSE:
         if (c && c->dlg == win_id(win)) { c->dlg = 0; c->dlg_text = c->dlg_status = c->dlg_wait = NULL; }
@@ -468,6 +473,11 @@ void wd_loop_top(void) {
         gui->base = STACK_TOP;
         gui_since = g_ticks;
         ready = true;
+    }
+    if (gave_up_log) {
+        gave_up_log = false;
+        klog("watchdog: an app callback did not return for %u s, but there is no room for another "
+             "GUI loop (%d apps are stuck already)", WD_HANG_MS / 1000, nstuck);
     }
     if (!nstuck && gui->base == STACK_TOP) return;
     for (int i = 0; i < WD_MAX; i++) {

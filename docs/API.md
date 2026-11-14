@@ -15,6 +15,7 @@ available after
 * [5. Events](#5-events)
 * [6. Painting](#6-painting)
 * [7. Timers and long-running work](#7-timers-and-long-running-work)
+* [7a. Stuck apps: the app watchdog](#7a-stuck-apps-the-app-watchdog)
 * [8. Graphics](#8-graphics)
 * [9. Text and fonts](#9-text-and-fonts)
 * [10. Widgets](#10-widgets)
@@ -48,7 +49,9 @@ available after
   handlers, widget callbacks, timer callbacks, dialog callbacks.
   **Callbacks must return quickly. Never block, never busy-wait, never sleep.**
   A loop that waits for something freezes the whole OS. Split long work into
-  chunks driven by a timer (see section 7).
+  chunks driven by a timer (see section 7). A callback that has not returned
+  after about 5 seconds is suspended by the app watchdog and the user is asked
+  whether to close your app or wait for it (section 7a).
 * The x87 FPU is on (53-bit double precision, every exception masked);
   `float`/`double` are fine in apps. Do not use the FPU in IRQ handlers. Maths
   errors never stop the system: an x87 floating-point error (#MF) is cleared,
@@ -373,6 +376,81 @@ loop use `win_set_timer(win, 16)` and compute movement from
 Long work (search a big file, render a fractal, copy many files): keep a
 cursor in your state, do a bounded slice of work per `EV_TIMER` (a few ms),
 `win_invalidate()` to show progress, and kill the timer when done.
+
+---
+
+## 7a. Stuck apps: the app watchdog
+
+`kernel/core/watchdog.c`. The main loop brackets every call into an app's code
+(window events and widget callbacks, `EV_PAINT`, window timers and the app's
+`timer_add` timers, `launch()`, `draw_icon`, the callbacks of its `http_fetch`
+requests) with `wd_cb_begin(app)` / `wd_cb_end()`. The timer interrupt checks
+it every millisecond. When one app callback has run for **5 s** without
+returning:
+
+1. The interrupt suspends it (its registers and stack stay as they are, its FPU
+   state is saved) and starts the normal GUI main loop again on a fresh part of
+   the kernel stack, 256 KiB below the stuck frames. Everything else keeps
+   working: other apps, moving windows, the clock, the Start menu.
+2. The window **"*App* is not responding"** opens with the alert sound and two
+   buttons. The app's windows show "(Not responding)" in their title and get
+   no input; they can still be moved and minimized. Clicking one, its close
+   button or Alt+F4 brings the question back.
+   * **Close the app** - the suspended callback is never resumed. The app's
+     windows (and their widgets and surfaces), its timers and its pending
+     network callbacks go away without calling the app again; the app's own
+     memory (window userdata, buffers) **is leaked**: NovaOS has no record of
+     what an app owns, and the app's `EV_CLOSE` is not called because its state
+     is half-way through the stuck callback. The app can be opened again.
+   * **Wait** - the callback goes on in 20 ms time slices that alternate with
+     the GUI loop ("Waiting for *App* to respond..."). When it returns, the
+     window closes by itself and the app works again; still stuck 10 s later,
+     the question comes again. X or Esc is Wait too (the window goes away).
+3. While the app is stuck the GUI loop never calls it: its events are dropped
+   (posted `EV_USER` events are kept and delivered afterwards), its windows are
+   not painted, resized or destroyed, its timers and network callbacks wait,
+   launching it again only brings the question up. The Web Browser and the
+   HTML Viewer share the web engine, so one stuck holds the other too.
+
+Safety rules for kernel code:
+
+* **Critical sections.** Code between `preempt_disable()` and `preempt_enable()`
+  (`kernel/core/watchdog.h`; `CRITICAL_SECTION();` at the top of a block
+  covers the rest of the block) is never suspended, switched away from or
+  abandoned. The heap, the VFS, disk I/O (`ata.c`), the network stack and the
+  window manager's lists (windows, dirty rectangles, timers, posted events)
+  are critical sections. A switch the timer wanted meanwhile happens as soon
+  as the counter drops to zero. They nest and do not disable interrupts;
+  **never call an app callback inside one** (the network stack runs its HTTP
+  callbacks after its tick for that reason).
+* A suspension also waits for a point where the app's own code runs (the
+  instruction pointer is in the apps' code, linked after the kernel's) or a
+  critical section that returns straight into app code ends, so kernel code
+  between two critical sections is not cut either; after 0.5 s any point
+  outside a critical section is taken.
+* Kernel code outside app callbacks (services, the shell's windows, boot
+  screens) is not watched. Time an app spends inside one long critical
+  section (0.2 s or more: a big copy, disk or network work) is not counted as
+  its own, so long kernel work called by an app does not trip the watchdog.
+* A waiting callback only ends when it returns to the main loop's dispatcher:
+  its context then ends instead of returning into a dispatcher the GUI loop
+  has long left. When no app is stuck any more the GUI loop starts again at
+  the top of the kernel stack. Every stack is part of the boot stack, so code
+  that scans the stack up to `kernel_stack_top` (the JavaScript engine's
+  garbage collector) stays correct.
+* Limits: interrupts-off loops and hangs inside a critical section can't be
+  suspended; an app needs 256 KiB of stack below its stuck frames for the new
+  GUI loop (else the hang stays a freeze and the serial log says so), so two
+  apps can be stuck at the same time; a global timer an app added from code that
+  ran outside its callbacks (a `REGISTER_INIT` function) is not tied to it.
+
+Serial markers: `watchdog: APP is not responding (a callback has run for 5 s)
+- suspended, the desktop goes on (hang #N)`, `watchdog: Wait - APP gets time
+slices of 20 ms`, `watchdog: APP is still not responding`, `watchdog: APP
+responds again (its callback returned after N s)`, `watchdog: Close the app -
+APP closed ...`, `watchdog: heap check after closing it: ok`, `watchdog: back to
+one main loop`. The hidden test app **Hang Test** makes an app hang on purpose
+(docs/TESTING.md).
 
 ---
 
@@ -892,6 +970,7 @@ QEMU `-append`. Tokens are `key=value` or bare flags.
 | `selftest=1` | run kernel self tests (libc, heap, VFS, time, cryptography test vectors, certificate checks) and log `SELFTEST:` lines |
 | `crashtest=1` | trigger a divide error 1.5 s after boot (tests the panic screen) |
 | `fputest=1` | raise an x87 floating-point error 2 s after boot (tests that it is not fatal: `fpu: warning: ...` in the log) |
+| `hangtest=1` | show the hidden test app **Hang Test** on the desktop and in the Start menu (it makes an app stop responding on purpose, for the app watchdog - section 7a; without the option the Terminal's `test hang` opens it) |
 | `screensaver=SECONDS` | screensaver idle timeout for this boot (e.g. `screensaver=5` for tests; `0` = never) |
 | `safetyshield_test=N` | SafetyShield test rule: flags `/tmp/safetyshield-test.txt` with risk level N (1 Risky .. 6 Severe) and runs the first automatic scan after 5 s - tests the threat log, list and notification |
 | `safetyshield_samples=1` | SafetyShield test files: writes harmless sample files that match the detection rules (plus the EICAR test file, and some that must stay Safe) to `/tmp/ss-samples/` - for tests only |
@@ -1071,6 +1150,11 @@ REGISTER_COMMAND("hello", "hello [NAME] - greet someone", cmd_hello);
   quotes and `\` escapes; 127 = no such command), `cmd_write / cmd_puts /
   cmd_printf`, and `cmd_buffer_t` + `cmd_buffer_init(&b)` to collect output in a
   heap string (`free(b.buf)` after).
+* `test` (`kernel/core/testcmd.c`) lists the test apps people aren't
+  normally supposed to see and the kernel's test hooks; `test NAME` runs one:
+  `hang` (Hang Test), `icons` (Icon Library), `selftest`, `fpu`, `shield`,
+  `panic` (asks first), `pz`, `osaver-log`, `osaver-prompt`, `osaver-restore`
+  (docs/TESTING.md).
 * The Run dialog runs a command line and shows its output in a small window.
   The Terminal runs them like its own commands (shell built-ins win a name
   clash, registry commands come before apps; pipes and `>` work, `help`
