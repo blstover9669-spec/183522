@@ -153,6 +153,7 @@ static void conn_free(tcp_conn_t *c) {
 }
 
 tcp_conn_t *tcp_open(uint32_t ip, uint16_t port) {
+    CRITICAL_SECTION();
     if (!net_is_up()) return NULL;
     tcp_conn_t *c = kcalloc(1, sizeof *c);
     if (!c) return NULL;
@@ -209,8 +210,8 @@ static uint32_t copy_out(tcp_conn_t *c, void *buf, uint32_t max, bool consume) {
     return n;
 }
 
-uint32_t tcp_read(tcp_conn_t *c, void *buf, uint32_t max) { return copy_out(c, buf, max, true); }
-uint32_t tcp_peek(tcp_conn_t *c, void *buf, uint32_t max) { return copy_out(c, buf, max, false); }
+uint32_t tcp_read(tcp_conn_t *c, void *buf, uint32_t max) { CRITICAL_SECTION(); return copy_out(c, buf, max, true); }
+uint32_t tcp_peek(tcp_conn_t *c, void *buf, uint32_t max) { CRITICAL_SECTION(); return copy_out(c, buf, max, false); }
 
 uint32_t tcp_writable(tcp_conn_t *c) {
     if (c->err || c->fin_queued || c->st == ST_CLOSED) return 0;
@@ -218,6 +219,7 @@ uint32_t tcp_writable(tcp_conn_t *c) {
 }
 
 uint32_t tcp_write(tcp_conn_t *c, const void *data, uint32_t len) {
+    CRITICAL_SECTION();
     uint32_t n = MIN(len, tcp_writable(c));
     if (!n) return 0;
     memcpy(c->sbuf + c->slen, data, n);
@@ -227,6 +229,7 @@ uint32_t tcp_write(tcp_conn_t *c, const void *data, uint32_t len) {
 }
 
 void tcp_close(tcp_conn_t *c, bool abort) {
+    CRITICAL_SECTION();
     if (!c) return;
     c->released = true;
     if (abort || c->err || c->st == ST_SYN_SENT || c->st == ST_CLOSED) {

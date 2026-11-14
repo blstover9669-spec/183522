@@ -157,6 +157,7 @@ static void send_query(dns_query_t *q) {
 }
 
 dns_query_t *dns_resolve(const char *host) {
+    CRITICAL_SECTION();
     dns_query_t *q = kcalloc(1, sizeof *q);
     if (!q) return NULL;
     strlcpy(q->host, host, sizeof q->host);
@@ -179,6 +180,7 @@ int dns_result(dns_query_t *q, uint32_t *ip) {
 }
 
 void dns_free(dns_query_t *q) {
+    CRITICAL_SECTION();
     if (!q) return;
     for (dns_query_t **pp = &queries; *pp; pp = &(*pp)->next)
         if (*pp == q) { *pp = q->next; break; }

@@ -20,6 +20,7 @@
  * reports no hard disks cleanly.
  */
 #include "kernel.h"
+#include "core/watchdog.h"
 #include <nova/disk.h>
 
 #define REG_DATA     0
@@ -223,6 +224,7 @@ static void probe_status(int ch, uint8_t st[2]) {
 }
 
 int disk_rescan(void) {
+    CRITICAL_SECTION();                   /* disk I/O: never suspended by the app watchdog */
     ndisks = 0;
     for (int ch = 0; ch < 2; ch++) {
         const char *name = ch ? "secondary" : "primary";
@@ -314,6 +316,7 @@ static int rw_chunk(const disk_info_t *d, uint64_t lba, uint32_t count, void *bu
 }
 
 static int disk_rw(int disk, uint64_t lba, uint32_t count, void *buf, bool write) {
+    CRITICAL_SECTION();
     const disk_info_t *d = disk_get(disk);
     if (!d || !buf) return DISK_EINVAL;
     if (count == 0) return DISK_OK;
@@ -346,6 +349,7 @@ int disk_write(int disk, uint64_t lba, uint32_t count, const void *buf) {
 }
 
 int disk_flush(int disk) {
+    CRITICAL_SECTION();
     const disk_info_t *d = disk_get(disk);
     if (!d) return DISK_EINVAL;
     int ch = d->channel;

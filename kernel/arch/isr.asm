@@ -29,6 +29,13 @@ irq%1:
     jmp isr_common
 %endmacro
 
+; The watchdog's yield vector (kernel/core/watchdog.c): a context switch from C code.
+global isr_yield
+isr_yield:
+    push dword 0
+    push dword 0x81
+    jmp isr_common
+
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -92,8 +99,8 @@ isr_common:
     mov gs, ax
     cld
     push esp                ; regs_t *
-    call isr_dispatch
-    add esp, 4
+    call isr_dispatch       ; returns the frame to resume: the same one, or another
+    mov esp, eax            ; context's (the watchdog switches stacks here)
     pop gs
     pop fs
     pop es

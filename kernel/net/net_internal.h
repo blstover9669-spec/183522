@@ -12,6 +12,7 @@
 #define NET_INTERNAL_H
 
 #include "kernel.h"
+#include "core/watchdog.h"   /* preempt_disable(): the network stack is a critical section */
 #include <nova/net.h>
 
 /* ---- byte order ---------------------------------------------------------------- */
@@ -92,6 +93,7 @@ void dns_tick(void);
 void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint32_t len);
 void tcp_tick(void);
 void http_tick(void);
+void http_dispatch(void);          /* the callbacks of finished requests (outside the tick) */
 void tcp_flush(void);           /* send pending ACKs at the end of a tick */
 
 /* ---- DNS (dns.c) ------------------------------------------------------------------ */

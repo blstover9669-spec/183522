@@ -18,6 +18,7 @@
  */
 #include "kernel.h"
 #include "gui/bootscreen.h"
+#include "core/watchdog.h"   /* every operation is a critical section for the app watchdog */
 
 /* ---- file protection ------------------------------------------------------------------ */
 enum { OP_WRITE, OP_DELETE, OP_MOVE };
@@ -257,6 +258,7 @@ static int ensure_cap(vnode_t *n, uint32_t need) {
 
 /* ---- public namespace API -------------------------------------------------------- */
 int vfs_stat(const char *path, vfs_stat_t *st) {
+    CRITICAL_SECTION();
     vnode_t *n = lookup(path);
     if (!n) return VFS_ENOENT;
     if (st) {
@@ -268,10 +270,11 @@ int vfs_stat(const char *path, vfs_stat_t *st) {
     return 0;
 }
 
-bool vfs_exists(const char *path) { return lookup(path) != NULL; }
-bool vfs_is_dir(const char *path) { vnode_t *n = lookup(path); return n && n->is_dir; }
+bool vfs_exists(const char *path) { CRITICAL_SECTION(); return lookup(path) != NULL; }
+bool vfs_is_dir(const char *path) { CRITICAL_SECTION(); vnode_t *n = lookup(path); return n && n->is_dir; }
 
 int vfs_mkdir(const char *path) {
+    CRITICAL_SECTION();
     if (!vfs_is_dir(path)) PROTECT(path, OP_WRITE);
     char name[VFS_NAME_MAX];
     vnode_t *p = lookup_parent(path, name);
@@ -286,6 +289,7 @@ int vfs_mkdir(const char *path) {
 }
 
 int vfs_mkdirs(const char *path) {
+    CRITICAL_SECTION();
     char norm[VFS_PATH_MAX];
     if (vfs_normalize(NULL, path, norm) != 0) return VFS_EINVAL;
     if (!vfs_is_dir(norm)) PROTECT(norm, OP_WRITE);
@@ -307,6 +311,7 @@ int vfs_mkdirs(const char *path) {
 }
 
 int vfs_create(const char *path) {
+    CRITICAL_SECTION();
     PROTECT(path, OP_WRITE);
     vnode_t *n = lookup(path);
     if (n) return n->is_dir ? VFS_EISDIR : 0;
@@ -321,6 +326,7 @@ int vfs_create(const char *path) {
 }
 
 int vfs_remove(const char *path) {
+    CRITICAL_SECTION();
     PROTECT(path, OP_DELETE);
     vnode_t *n = lookup(path);
     if (!n) return VFS_ENOENT;
@@ -334,6 +340,7 @@ int vfs_remove(const char *path) {
 }
 
 int vfs_remove_recursive(const char *path) {
+    CRITICAL_SECTION();
     PROTECT(path, OP_DELETE);
     vnode_t *n = lookup(path);
     if (!n) return VFS_ENOENT;
@@ -346,6 +353,7 @@ int vfs_remove_recursive(const char *path) {
 }
 
 int vfs_rename(const char *from, const char *to) {
+    CRITICAL_SECTION();
     PROTECT(from, OP_MOVE);
     PROTECT(to, OP_WRITE);
     vnode_t *n = lookup(from);
@@ -392,6 +400,7 @@ static int copy_node(vnode_t *src, vnode_t *dstdir, const char *name) {
 }
 
 int vfs_copy(const char *from, const char *to) {
+    CRITICAL_SECTION();
     PROTECT(to, OP_WRITE);
     vnode_t *src = lookup(from);
     if (!src) return VFS_ENOENT;
@@ -419,6 +428,7 @@ static int dirent_cmp(const void *a, const void *b) {
 }
 
 int vfs_list(const char *path, vfs_dirent_t *out, int max) {
+    CRITICAL_SECTION();
     vnode_t *d = lookup(path);
     if (!d) return VFS_ENOENT;
     if (!d->is_dir) return VFS_ENOTDIR;
@@ -442,6 +452,7 @@ int vfs_list(const char *path, vfs_dirent_t *out, int max) {
 
 /* ---- whole files ------------------------------------------------------------------- */
 void *vfs_read_file(const char *path, uint32_t *size) {
+    CRITICAL_SECTION();
     vnode_t *n = lookup(path);
     if (!n || n->is_dir) return NULL;
     char *buf = kmalloc(n->size + 1);
@@ -457,6 +468,7 @@ void *vfs_read_file(const char *path, uint32_t *size) {
 }
 
 int vfs_write_file(const char *path, const void *data, uint32_t size) {
+    CRITICAL_SECTION();
     PROTECT(path, OP_WRITE);
     int r = vfs_create(path);
     if (r) return r;
@@ -481,6 +493,7 @@ int vfs_write_file(const char *path, const void *data, uint32_t size) {
 }
 
 int vfs_append_file(const char *path, const void *data, uint32_t size) {
+    CRITICAL_SECTION();
     PROTECT(path, OP_WRITE);
     int r = vfs_create(path);
     if (r) return r;
@@ -495,6 +508,7 @@ int vfs_append_file(const char *path, const void *data, uint32_t size) {
 
 /* ---- descriptors ------------------------------------------------------------------- */
 int vfs_open(const char *path, int flags) {
+    CRITICAL_SECTION();
     if (flags & (VFS_O_WRITE | VFS_O_CREATE | VFS_O_TRUNC | VFS_O_APPEND)) PROTECT(path, OP_WRITE);
     vnode_t *n = lookup(path);
     if (!n) {
@@ -519,6 +533,7 @@ int vfs_open(const char *path, int flags) {
 static bool fd_ok(int fd) { return fd >= 0 && fd < MAX_FDS && fds[fd].used; }
 
 int vfs_read(int fd, void *buf, uint32_t len) {
+    CRITICAL_SECTION();
     if (!fd_ok(fd)) return VFS_EBADF;
     vnode_t *n = fds[fd].node;
     if (fds[fd].pos >= n->size) return 0;
@@ -530,6 +545,7 @@ int vfs_read(int fd, void *buf, uint32_t len) {
 }
 
 int vfs_write(int fd, const void *buf, uint32_t len) {
+    CRITICAL_SECTION();
     if (!fd_ok(fd)) return VFS_EBADF;
     if (!(fds[fd].flags & (VFS_O_WRITE | VFS_O_APPEND))) return VFS_EBADF;
     vnode_t *n = fds[fd].node;
@@ -545,6 +561,7 @@ int vfs_write(int fd, const void *buf, uint32_t len) {
 }
 
 int vfs_seek(int fd, int32_t off, int whence) {
+    CRITICAL_SECTION();
     if (!fd_ok(fd)) return VFS_EBADF;
     int64_t base = whence == VFS_SEEK_CUR ? fds[fd].pos : whence == VFS_SEEK_END ? fds[fd].node->size : 0;
     int64_t np = base + off;
@@ -553,9 +570,10 @@ int vfs_seek(int fd, int32_t off, int whence) {
     return (int)np;
 }
 
-int vfs_tell(int fd) { return fd_ok(fd) ? (int)fds[fd].pos : VFS_EBADF; }
+int vfs_tell(int fd) { CRITICAL_SECTION(); return fd_ok(fd) ? (int)fds[fd].pos : VFS_EBADF; }
 
 int vfs_close(int fd) {
+    CRITICAL_SECTION();
     if (!fd_ok(fd)) return VFS_EBADF;
     fds[fd].used = false;
     return 0;
@@ -566,7 +584,7 @@ static uint32_t total_bytes(vnode_t *n) {
     for (vnode_t *c = n->children; c; c = c->next) t += total_bytes(c);
     return t;
 }
-uint32_t vfs_total_bytes(void) { return root ? total_bytes(root) : 0; }
+uint32_t vfs_total_bytes(void) { CRITICAL_SECTION(); return root ? total_bytes(root) : 0; }
 
 const char *vfs_strerror(int e) {
     switch (e) {
@@ -623,6 +641,7 @@ static void ser_node(ser_t *s, vnode_t *n, uint32_t parent) {
 }
 
 int32_t vfs_serialize(uint8_t *buf, uint32_t cap) {
+    CRITICAL_SECTION();
     if (!root) return VFS_EINVAL;
     ser_t s = { buf, cap, 16, 0, false };
     ser_node(&s, root, 0xFFFFFFFFu);
@@ -639,6 +658,7 @@ int32_t vfs_serialize(uint8_t *buf, uint32_t cap) {
 }
 
 int vfs_deserialize(const uint8_t *buf, uint32_t size) {
+    CRITICAL_SECTION();
     if (!buf || size < 16 || memcmp(buf, VFS_MAGIC, 4)) return VFS_ECORRUPT;
     uint32_t ver, count, sum;
     memcpy(&ver, buf + 4, 4);
@@ -719,6 +739,7 @@ void vfs_set_sync_hook(vfs_sync_fn fn, uint32_t delay_ms) {
 }
 
 void vfs_tick(void) {
+    CRITICAL_SECTION();
     if (!sync_hook || generation == synced_generation) return;
     if (g_ticks - last_change_tick < sync_delay) return;
     synced_generation = generation;

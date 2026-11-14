@@ -1,5 +1,6 @@
 /* cpu.c - GDT, IDT, PIC, PIT, FPU and CPUID. */
 #include "kernel.h"
+#include "core/watchdog.h"
 
 /* ---- GDT: flat 4 GiB code + data segments, ring 0 only -------------------- */
 typedef struct PACKED { uint16_t limit_lo, base_lo; uint8_t base_mid, access, gran, base_hi; } gdt_entry_t;
@@ -34,6 +35,7 @@ typedef struct PACKED { uint16_t limit; uint32_t base; } idt_ptr_t;
 static idt_entry_t idt[256];
 static idt_ptr_t idt_ptr;
 extern uint32_t isr_stub_table[48];
+extern void isr_yield(void);
 
 void idt_set_gate(int n, uint32_t handler, uint16_t sel, uint8_t flags) {
     idt[n].off_lo = handler & 0xFFFF;
@@ -46,6 +48,7 @@ void idt_set_gate(int n, uint32_t handler, uint16_t sel, uint8_t flags) {
 void idt_init(void) {
     memset(idt, 0, sizeof idt);
     for (int i = 0; i < 48; i++) idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
+    idt_set_gate(WD_YIELD_VECTOR, (uint32_t)isr_yield, 0x08, 0x8E);
     idt_ptr.limit = sizeof(idt) - 1;
     idt_ptr.base = (uint32_t)&idt;
     __asm__ volatile("lidt %0" : : "m"(idt_ptr));
@@ -120,11 +123,15 @@ static const char *exception_names[32] = {
 extern void panic_exception(regs_t *r, const char *name) NORETURN;
 static void fpu_error(regs_t *r);
 
-void isr_dispatch(regs_t *r) {
+/* Returns the register frame isr_common resumes: r, or another context's frame when
+   the watchdog switches (after the PIT IRQ's EOI, or on its yield vector). */
+regs_t *isr_dispatch(regs_t *r);
+regs_t *isr_dispatch(regs_t *r) {
     if (r->int_no == 16) {           /* x87 floating-point error: never fatal */
         fpu_error(r);
-        return;
+        return r;
     }
+    if (r->int_no == WD_YIELD_VECTOR) return wd_switch_point(r);
     if (r->int_no < 32) {
         panic_exception(r, exception_names[r->int_no]);
     }
@@ -135,11 +142,12 @@ void isr_dispatch(regs_t *r) {
         outb(port, 0x0B);
         if (!(inb(port) & 0x80)) {
             if (irq == 15) outb(PIC1_CMD, 0x20);
-            return;
+            return r;
         }
     }
     if (irq >= 0 && irq < 16 && irq_handlers[irq]) irq_handlers[irq](r);
     pic_eoi(irq);
+    return irq == 0 ? wd_switch_point(r) : r;
 }
 
 /* ---- PIT -------------------------------------------------------------------------- */
@@ -152,6 +160,7 @@ static void pit_irq(regs_t *r) {
     pit_acc += 1000;
     while (pit_acc >= pit_hz) { pit_acc -= pit_hz; g_ticks++; }
     speaker_tick();
+    wd_tick();                       /* app watchdog: a callback running too long? */
 }
 
 void pit_init(uint32_t hz) {

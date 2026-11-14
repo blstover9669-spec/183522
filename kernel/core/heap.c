@@ -9,9 +9,11 @@
  *     sizes in [2^k, 2^(k+1))), so allocation is roughly O(1) and big
  *     multi-megabyte requests are as cheap as small ones;
  *   - neighbouring free blocks are coalesced on free.
- * Not interrupt safe: never allocate from IRQ handlers.
+ * Not interrupt safe: never allocate from IRQ handlers. Every operation is a
+ * critical section for the app watchdog (never suspended half-way).
  */
 #include "kernel.h"
+#include "core/watchdog.h"
 
 #define HDR_SIZE   16u
 #define MIN_BLOCK  32u
@@ -88,6 +90,7 @@ static void heap_corrupt(block_t *b, const char *what) {
 }
 
 void *kmalloc(size_t req) {
+    CRITICAL_SECTION();
     if (!heap_start) return NULL;
     if (req > 0x7FFFFFF0u) return NULL;
     uint32_t need = ((uint32_t)req + HDR_SIZE + 15u) & ~15u;
@@ -130,6 +133,7 @@ void *kmalloc(size_t req) {
 
 void kfree(void *p) {
     if (!p) return;
+    CRITICAL_SECTION();
     block_t *b = (block_t *)((uint8_t *)p - HDR_SIZE);
     if ((uint8_t *)b < heap_start || (uint8_t *)b >= heap_end || ((uintptr_t)p & 15))
         kpanic("kfree: invalid pointer %p", p);
@@ -176,6 +180,7 @@ size_t kmalloc_usable_size(void *p) {
 void *krealloc(void *p, size_t req) {
     if (!p) return kmalloc(req);
     if (req == 0) { kfree(p); return NULL; }
+    CRITICAL_SECTION();
     block_t *b = (block_t *)((uint8_t *)p - HDR_SIZE);
     if (b->magic != MAGIC_USED) heap_corrupt(b, "krealloc");
     uint32_t need = ((uint32_t)req + HDR_SIZE + 15u) & ~15u;
@@ -213,6 +218,7 @@ void *krealloc(void *p, size_t req) {
 }
 
 bool heap_check(void) {
+    CRITICAL_SECTION();
     block_t *b = (block_t *)heap_start;
     uint32_t prev = 0;
     while ((uint8_t *)b < heap_end) {

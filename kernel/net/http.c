@@ -6,8 +6,10 @@
  *   -> SEND -> HEAD (status line + headers) -> BODY -> DONE
  * Bodies are de-chunked as they arrive and decompressed (gzip / deflate) when
  * complete. Redirects loop back to RESOLVE with the new URL. Up to MAX_ACTIVE
- * requests run at once. Callbacks are only ever called from http_tick's dispatch
- * loop, never from inside an API call, so they may free requests or start new ones.
+ * requests run at once. Callbacks are only ever called from http_dispatch (right
+ * after each network tick, outside the network stack's critical section), never from
+ * inside an API call, so they may free requests or start new ones. They run as the
+ * app that started the request (the app watchdog watches them).
  */
 #include "net_internal.h"
 
@@ -33,6 +35,7 @@ struct http_request {
     uint32_t flags, max_body, timeout_ms;
     http_cb  on_done, on_progress;
     void    *ctx;
+    const app_desc_t *app;     /* the app that asked (its callbacks run as it) */
     /* progress */
     int      phase, error;
     char     errtext[200];
@@ -608,24 +611,47 @@ void http_tick(void) {
         if (r->phase == P_QUEUED && active_count() < MAX_ACTIVE) start(r);
         else step(r);
     }
-    /* callbacks: restart the scan after each one (a callback may free or add requests) */
+}
+
+/* The callbacks: restart the scan after each one (a callback may free or add requests).
+   Requests of an app the watchdog holds (stuck) keep their callbacks for later. */
+void http_dispatch(void) {
     for (;;) {
+        http_cb cb = NULL;
+        preempt_disable();
         http_request_t *r = reqs;
-        while (r && !r->progress_pending && !r->done_pending) r = r->next;
-        if (!r) break;
-        if (r->progress_pending) {
+        while (r && ((!r->progress_pending && !r->done_pending) || wd_blocked(r->app))) r = r->next;
+        if (r && r->progress_pending) {
             r->progress_pending = false;
-            if (r->on_progress && !r->done_pending) { r->on_progress(r, r->ctx); continue; }
+            if (r->on_progress && !r->done_pending) cb = r->on_progress;
         }
-        if (r->done_pending) {
+        if (r && !cb && r->done_pending) {
             r->done_pending = false;
-            if (r->on_done) r->on_done(r, r->ctx);
+            cb = r->on_done;
         }
+        preempt_enable();
+        if (!r) break;
+        if (!cb) continue;
+        const app_desc_t *app = r->app, *saved = wm_current_app;
+        wm_current_app = app;
+        if (app) wd_cb_begin(app);
+        cb(r, r->ctx);
+        if (app) wd_cb_end();
+        wm_current_app = saved;
     }
+}
+
+/* The watchdog closed a stuck app: its requests never call it again (they stay
+   allocated - the app's memory is not freed - and finish quietly). */
+void http_forget_app(const app_desc_t *app) {
+    CRITICAL_SECTION();
+    for (http_request_t *r = reqs; r; r = r->next)
+        if (r->app == app) { r->on_done = r->on_progress = NULL; r->app = NULL; }
 }
 
 /* ---- API ---------------------------------------------------------------------------------------- */
 http_request_t *http_fetch_ex(const char *url, const http_options_t *opt, http_cb on_done, void *ctx) {
+    CRITICAL_SECTION();
     http_options_t none = { 0 };
     if (!opt) opt = &none;
     http_request_t *r = kcalloc(1, sizeof *r);
@@ -647,6 +673,7 @@ http_request_t *http_fetch_ex(const char *url, const http_options_t *opt, http_c
     r->on_done = on_done;
     r->on_progress = opt->on_progress;
     r->ctx = ctx;
+    r->app = wm_current_app;
     r->error = HTTP_PENDING;
     r->phase = P_QUEUED;
     r->cstate = C_SIZE;
@@ -675,6 +702,7 @@ http_request_t *http_fetch(const char *method, const char *url, const char *body
 }
 
 void http_cancel(http_request_t *r) {
+    CRITICAL_SECTION();
     if (!valid(r) || r->phase == P_DONE) return;
     close_conn(r, true);
     r->phase = P_DONE;
@@ -684,6 +712,7 @@ void http_cancel(http_request_t *r) {
 }
 
 void http_free(http_request_t *r) {
+    CRITICAL_SECTION();
     if (!valid(r)) return;
     close_conn(r, true);
     for (http_request_t **pp = &reqs; *pp; pp = &(*pp)->next)
@@ -748,6 +777,7 @@ bool http_header_at(const http_request_t *r, int i, const char **name, const cha
 const uint8_t *http_body(const http_request_t *r) { return valid(r) ? r->body : NULL; }
 uint32_t http_body_len(const http_request_t *r) { return valid(r) ? r->blen : 0; }
 uint8_t *http_take_body(http_request_t *r, uint32_t *len) {
+    CRITICAL_SECTION();
     if (!valid(r)) { if (len) *len = 0; return NULL; }
     uint8_t *b = r->body;
     if (len) *len = r->blen;

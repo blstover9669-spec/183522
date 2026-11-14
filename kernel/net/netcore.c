@@ -67,6 +67,7 @@ void net_get_info(net_info_t *o) {
 }
 
 void net_set_config(const net_config_t *cfg) {
+    CRITICAL_SECTION();
     if (cfg) g_netcfg = *cfg;
     else memset(&g_netcfg, 0, sizeof g_netcfg);
     net_changed();
@@ -261,6 +262,7 @@ bool ip_send(uint32_t dst, uint8_t proto, const void *payload, uint32_t len) {
 static struct { bool used; uint32_t dst; uint16_t id, seq; uint32_t sent; ping_fn fn; void *ctx; } pings[PING_N];
 
 bool icmp_ping(uint32_t dst, uint16_t id, uint16_t seq, ping_fn fn, void *ctx) {
+    CRITICAL_SECTION();
     int slot = -1;
     for (int i = 0; i < PING_N; i++) if (!pings[i].used || net_now() - pings[i].sent > 10000) { slot = i; break; }
     if (slot < 0) return false;
@@ -283,6 +285,7 @@ bool icmp_ping(uint32_t dst, uint16_t id, uint16_t seq, ping_fn fn, void *ctx) {
 }
 
 void icmp_cancel(void *ctx) {
+    CRITICAL_SECTION();
     for (int i = 0; i < PING_N; i++) if (pings[i].ctx == ctx) pings[i].used = false;
 }
 
@@ -313,6 +316,7 @@ static void icmp_input(uint32_t src, int ttl, const uint8_t *m, uint32_t len) {
 static struct { uint16_t port; udp_rx_fn fn; void *ctx; } udp_binds[UDP_N];
 
 bool udp_bind(uint16_t port, udp_rx_fn fn, void *ctx) {
+    CRITICAL_SECTION();
     for (int i = 0; i < UDP_N; i++) if (udp_binds[i].port == port) return false;
     for (int i = 0; i < UDP_N; i++)
         if (!udp_binds[i].port) { udp_binds[i].port = port; udp_binds[i].fn = fn; udp_binds[i].ctx = ctx; return true; }
@@ -320,6 +324,7 @@ bool udp_bind(uint16_t port, udp_rx_fn fn, void *ctx) {
 }
 
 void udp_unbind(uint16_t port) {
+    CRITICAL_SECTION();
     for (int i = 0; i < UDP_N; i++) if (udp_binds[i].port == port) udp_binds[i].port = 0;
 }
 
@@ -333,6 +338,7 @@ uint16_t net_ephemeral_port(void) {
 }
 
 bool udp_send(uint32_t dst, uint16_t sport, uint16_t dport, const void *data, uint32_t len) {
+    CRITICAL_SECTION();
     if (len > ETH_MTU - 28) return false;
     uint8_t *u = kmalloc(8 + len);
     if (!u) return false;
@@ -392,9 +398,15 @@ static void net_tick(void *ctx) {
     (void)ctx;
     if (in_tick) return;
     in_tick = true;
+    /* The network stack is a critical section for the app watchdog: never suspended
+       half-way. The apps' HTTP callbacks run after it (http_dispatch), so a callback
+       that hangs can be suspended and the network keeps working for everyone else. */
+    preempt_disable();
     if (!ndev) {                     /* no card: only finish HTTP requests (with "no network") */
         http_tick();
+        preempt_enable();
         in_tick = false;
+        http_dispatch();
         return;
     }
     uint32_t now = net_now();
@@ -417,7 +429,12 @@ static void net_tick(void *ctx) {
     tcp_tick();
     http_tick();
     tcp_flush();
+    preempt_enable();
     in_tick = false;
+    http_dispatch();
+    preempt_disable();
+    tcp_flush();                     /* what the callbacks wrote */
+    preempt_enable();
 }
 
 /* The 1 ms tick runs once a card is registered, or once an HTTP request is made
@@ -439,4 +456,5 @@ __attribute__((weak)) void tcp_input(uint32_t s, uint32_t d, const uint8_t *g, u
 __attribute__((weak)) void tcp_tick(void) {}
 __attribute__((weak)) void tcp_flush(void) {}
 __attribute__((weak)) void http_tick(void) {}
+__attribute__((weak)) void http_dispatch(void) {}
 __attribute__((weak)) int tcp_count(void) { return 0; }

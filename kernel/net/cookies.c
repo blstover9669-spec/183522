@@ -166,6 +166,7 @@ int cookies_count(void) {
 }
 
 void cookies_clear(void) {
+    CRITICAL_SECTION();
     load();
     while (jar) unlink_cookie(&jar);
     njar = 0;
@@ -218,6 +219,7 @@ static void trim(const char **s, const char **e) {
 }
 
 void cookies_store(const url_t *u, const char *sc) {
+    CRITICAL_SECTION();
     load();
     const char *end = sc + strcspn(sc, ";");
     const char *eq = memchr(sc, '=', (size_t)(end - sc));
@@ -316,6 +318,7 @@ void cookies_store(const url_t *u, const char *sc) {
 }
 
 char *cookies_header_for(const url_t *u) {
+    CRITICAL_SECTION();
     load();
     uint32_t now = sys_time();
     bool https = !strcmp(u->scheme, "https");

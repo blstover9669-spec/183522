@@ -1,5 +1,6 @@
 /* apps.c - application registry (the ".apps" linker section), launching and icon cache. */
 #include "wm_internal.h"
+#include "core/watchdog.h"
 
 extern const app_desc_t *const __apps_start[];
 extern const app_desc_t *const __apps_end[];
@@ -18,6 +19,22 @@ static int cmp_app(const void *a, const void *b) {
    bundle app check (reqfail.c) still passes. The registry holds a copy of their
    descriptor with APP_HIDDEN set. */
 static const char *const iso_apps[] = { "OSaver", "Installer" };
+
+/* hangtest=1: the hidden test app Hang Test (apps/hangtest.c) is shown on the desktop
+   and in the Start menu, like any app (otherwise only the Terminal's `test hang` opens it). */
+static void show_test_apps(void) {
+    const char *v = sys_cmdline_get("hangtest");
+    if (!v || !strcmp(v, "0")) return;
+    for (int i = 0; i < napps; i++) {
+        if (strcasecmp(apps[i]->name, "Hang Test") || !(apps[i]->flags & APP_HIDDEN)) continue;
+        app_desc_t *c = kmalloc(sizeof *c);
+        if (!c) continue;
+        *c = *apps[i];
+        c->flags &= ~(uint32_t)APP_HIDDEN;
+        apps[i] = c;
+        klog("apps: %s shown (hangtest=1)", c->name);
+    }
+}
 
 static void hide_iso_apps(void) {
     const char *boot = sys_cmdline_get("boot");
@@ -46,6 +63,7 @@ void apps_init(void) {
     }
     qsort(apps, (size_t)napps, sizeof *apps, cmp_app);
     hide_iso_apps();
+    show_test_apps();
     klog("apps: %d registered", napps);
     for (int i = 0; i < napps; i++)
         klog("  app: %-20s [%s]", apps[i]->name, apps[i]->category ? apps[i]->category : "-");
@@ -87,6 +105,11 @@ int app_window_count(const app_desc_t *app) {
 
 bool app_launch(const app_desc_t *app, const char *arg) {
     if (!app || !app->launch) return false;
+    if (wd_blocked(app)) {                 /* stuck (app watchdog): never entered again meanwhile */
+        klog("apps: %s is not responding - not launched again", app->name);
+        wd_show_dialog(app);
+        return true;
+    }
     if (app->flags & APP_SINGLE) {
         for (window_t *w = wm_top; w; w = w->below)
             if (w->app == app && !w->closing && w->layer == LAYER_NORMAL && !w->owner) {
@@ -98,7 +121,9 @@ bool app_launch(const app_desc_t *app, const char *arg) {
     shell_note_launch(app, arg);           /* recent items */
     const app_desc_t *saved = wm_current_app;
     wm_current_app = app;
+    wd_cb_begin(app);
     app->launch(arg);
+    wd_cb_end();
     wm_current_app = saved;
     return true;
 }
@@ -184,6 +209,7 @@ typedef struct icon_entry {
     const app_desc_t *app;
     int size;
     bool dark;
+    bool stand_in;           /* the default icon, drawn while the app was not responding */
     surface_t *img;
     struct icon_entry *next;
 } icon_entry_t;
@@ -201,14 +227,20 @@ void app_icon_cache_clear(void) {
 
 const surface_t *app_icon(const app_desc_t *app, int size) {
     if (!app || size <= 0 || size > 256) return NULL;
+    bool held = wd_blocked(app);          /* stuck app: its draw_icon is not called */
     for (icon_entry_t *e = icon_cache; e; e = e->next)
-        if (e->app == app && e->size == size) return e->img;
+        if (e->app == app && e->size == size && (!e->stand_in || held)) return e->img;
     /* render at 2x into a transparent surface, then area-downsample for anti-aliasing */
     int big = size * 2;
     surface_t *hi = surface_create_alpha(big, big);
     if (!hi) return NULL;
-    if (app->draw_icon) app->draw_icon(hi, 0, 0, big);
-    else default_icon(hi, 0, 0, big, app->name);
+    if (app->draw_icon && !held) {
+        wd_cb_begin(app);
+        app->draw_icon(hi, 0, 0, big);
+        wd_cb_end();
+    } else {
+        default_icon(hi, 0, 0, big, app->name);
+    }
     surface_reset_clip(hi);
     surface_t *img = surface_scaled(hi, size, size);
     surface_destroy(hi);
@@ -218,6 +250,7 @@ const surface_t *app_icon(const app_desc_t *app, int size) {
     e->app = app;
     e->size = size;
     e->img = img;
+    e->stand_in = held && app->draw_icon;
     e->next = icon_cache;
     icon_cache = e;
     return img;

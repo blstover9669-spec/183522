@@ -7,8 +7,15 @@
  * topmost window that fully covers it, paints from there upwards (drop
  * shadows, then window pixels with anti-aliased rounded-corner masks), draws
  * the cursor and copies the rectangle to the linear framebuffer.
+ *
+ * App watchdog (kernel/core/watchdog.c): every call into an app's code is bracketed
+ * with wd_cb_begin/wd_cb_end; while an app is stuck in a suspended callback its
+ * windows get no events (posted events are held), are not painted, resized or
+ * destroyed, and show "(Not responding)". The window lists, the dirty rectangles and
+ * the posted-event queue are watchdog critical sections.
  */
 #include "wm_internal.h"
+#include "core/watchdog.h"
 
 window_t *wm_bottom, *wm_top, *wm_focused;
 surface_t *wm_backbuf;
@@ -39,6 +46,7 @@ static int ndirty;
 static int area(rect_t r) { return r.w * r.h; }
 
 void wm_invalidate_screen(rect_t r) {
+    CRITICAL_SECTION();
     r = rect_intersect(r, rect_make(0, 0, scr_w, scr_h));
     if (rect_empty(r)) return;
     for (int i = 0; i < ndirty; i++) {
@@ -69,6 +77,9 @@ void wm_invalidate_all(void) {
 /* ---- geometry helpers -------------------------------------------------------------- */
 static bool framed(const window_t *w) { return !(w->flags & (WIN_FRAMELESS | WIN_POPUP)) && !w->fullscreen; }
 static bool drawn(const window_t *w) { return w->visible && !w->minimized && !w->closing; }
+/* A window of an app the watchdog holds (stuck in a suspended callback): the GUI loop
+   sends it nothing and leaves its surface alone - the suspended code may draw into it. */
+static bool frozen(const window_t *w) { return w && w->app && wd_blocked(w->app); }
 
 static bool has_shadow(const window_t *w) {
     if (!theme_get()->shadows || (w->flags & WIN_NO_SHADOW) || w->layer == LAYER_DESKTOP) return false;
@@ -208,6 +219,7 @@ static int fps_value;
 int sys_fps(void) { return fps_value; }
 
 static void composite(void) {
+    CRITICAL_SECTION();
     if (!ndirty) return;
     int n = ndirty;
     rect_t local[MAX_DIRTY];
@@ -233,6 +245,7 @@ surface_t *screen_capture(void) {
 
 /* ---- z-order ------------------------------------------------------------------------ */
 static void zlist_unlink(window_t *w) {
+    CRITICAL_SECTION();
     if (w->below) w->below->above = w->above; else if (wm_bottom == w) wm_bottom = w->above;
     if (w->above) w->above->below = w->below; else if (wm_top == w) wm_top = w->below;
     w->above = w->below = NULL;
@@ -240,6 +253,7 @@ static void zlist_unlink(window_t *w) {
 
 /* insert w at the top of its layer */
 static void zlist_insert(window_t *w) {
+    CRITICAL_SECTION();
     window_t *pos = wm_bottom;   /* first window with a higher layer */
     while (pos && pos->layer <= w->layer) pos = pos->above;
     if (!pos) {
@@ -333,7 +347,13 @@ void wm_redraw_decor(window_t *w) {
     }
     int nbtn = 1 + has_max_btn(w) + has_min_btn(w);
     int maxw = W - nbtn * BTN_W - tx - 8;
-    gfx_text_ellipsis(s, tx, (WIN_TITLE_H - font_height(FONT_UI)) / 2, maxw, w->title, tc, FONT_UI);
+    const char *title = w->title;
+    char stuck[sizeof w->title + 20];
+    if (wd_app_stuck(w->app)) {               /* the app watchdog holds this app */
+        snprintf(stuck, sizeof stuck, "%s (Not responding)", w->title);
+        title = stuck;
+    }
+    gfx_text_ellipsis(s, tx, (WIN_TITLE_H - font_height(FONT_UI)) / 2, maxw, title, tc, FONT_UI);
 
     int hts[3] = { HT_CLOSE, HT_MAXIMIZE, HT_MINIMIZE };
     for (int i = 0; i < 3; i++) {
@@ -487,10 +507,12 @@ static void resize_client(window_t *w, int cw, int ch) {
     cw = MAX(cw, 1);
     ch = MAX(ch, 1);
     if (cw == w->cw && ch == w->ch) return;
+    if (frozen(w)) return;
     int fw, fh;
     frame_size_for(w, cw, ch, &fw, &fh);
+    preempt_disable();                       /* the surface swap is never cut half-way */
     surface_t *ns = surface_create(fw, fh);
-    if (!ns) return;
+    if (!ns) { preempt_enable(); return; }
     gfx_clear(ns, theme_get()->window_bg);
     /* keep old client pixels to avoid flashing until the app repaints */
     gfx_blit_rect(ns, w->cx, w->cy, w->surf, w->cx, w->cy, MIN(cw, w->cw), MIN(ch, w->ch));
@@ -506,6 +528,7 @@ static void resize_client(window_t *w, int cw, int ch) {
     w->need_paint = true;
     w->paint_rect = rect_make(0, 0, cw, ch);
     if (drawn(w)) wm_invalidate_window(w);
+    preempt_enable();
     event_t ev = { .type = EV_RESIZE, .w = cw, .h = ch };
     wm_send(w, &ev);
 }
@@ -537,6 +560,7 @@ void wm_focus(window_t *w) {
     }
     wm_update_taskbar_visibility();
     wm_taskbar_changed();
+    if (w && frozen(w)) wd_show_dialog(w->app);   /* not responding: its watchdog window on top */
 }
 
 /* The bottom islands (Start, running apps, app rectangle, clock) hide while a
@@ -682,7 +706,7 @@ void win_minimize(window_t *w) {
 }
 
 void win_maximize(window_t *w) {
-    if (!w || w->maximized || !framed(w)) return;
+    if (!w || w->maximized || !framed(w) || frozen(w)) return;
     if (w->minimized) { w->minimized = false; }
     wm_invalidate_window(w);
     w->normal_frame = w->frame;
@@ -707,7 +731,7 @@ void win_restore(window_t *w) {
         wm_taskbar_changed();
         return;
     }
-    if (!w->maximized) return;
+    if (!w->maximized || frozen(w)) return;
     wm_invalidate_window(w);
     w->maximized = false;
     w->radius = 8;
@@ -721,7 +745,7 @@ void win_restore(window_t *w) {
 }
 
 void win_set_fullscreen(window_t *w, bool on) {
-    if (!w || w->closing || w->layer != LAYER_NORMAL || w->fullscreen == on) return;
+    if (!w || w->closing || w->layer != LAYER_NORMAL || w->fullscreen == on || frozen(w)) return;
     wm_invalidate_window(w);
     if (on) {
         w->fs_saved_max = w->maximized;
@@ -758,6 +782,14 @@ bool win_is_fullscreen(window_t *w) { return w && w->fullscreen; }
 /* ---- closing ------------------------------------------------------------------------------ */
 static void close_window(window_t *w, bool callbacks) {
     if (!w || w->closing || w->magic != WIN_MAGIC) return;
+    if (frozen(w)) {
+        /* a stuck app's window: its popups close without calling it (destroyed once it
+           responds again or is closed); anything else stays - the "not responding"
+           window decides */
+        if (!(w->flags & WIN_POPUP)) { wd_show_dialog(w->app); return; }
+        w->handler = NULL;
+        callbacks = false;
+    }
     if (!callbacks) w->no_callbacks = true;
     /* close owned windows (dialogs, popups) first - without firing their callbacks */
     for (window_t *o = wm_bottom; o; o = o->above)
@@ -766,7 +798,11 @@ static void close_window(window_t *w, bool callbacks) {
     event_t ev = { .type = EV_CLOSE };
     const app_desc_t *saved = wm_current_app;
     wm_current_app = w->app;
-    if (w->handler) w->handler(w, &ev);
+    if (w->handler) {
+        if (w->app) wd_cb_begin(w->app);
+        w->handler(w, &ev);
+        if (w->app) wd_cb_end();
+    }
     wm_current_app = saved;
     if (w->owner && w->owner->modal == w) w->owner->modal = NULL;
     wm_invalidate_window(w);
@@ -784,10 +820,11 @@ void win_close(window_t *w) { close_window(w, true); }
 static window_t *capture_win, *hover_win, *drag_win;
 
 static void destroy_closed(void) {
+    CRITICAL_SECTION();
     window_t *w = wm_bottom;
     while (w) {
         window_t *next = w->above;
-        if (w->closing) {
+        if (w->closing && !frozen(w)) {          /* a stuck app may still use its windows */
             zlist_unlink(w);
             if (w->on_destroy) w->on_destroy(w);
             ui_destroy_all(w);
@@ -811,10 +848,14 @@ static void destroy_closed(void) {
 /* ---- event delivery ---------------------------------------------------------------------- */
 void wm_send(window_t *w, const event_t *ev) {
     if (!w || w->closing || w->magic != WIN_MAGIC) return;
+    const app_desc_t *app = w->app;
+    if (app && wd_blocked(app)) return;      /* stuck app: its events are dropped */
     const app_desc_t *saved = wm_current_app;
-    wm_current_app = w->app;
+    wm_current_app = app;
     wm_stat_events++;
+    if (app) wd_cb_begin(app);
     if (!ui_dispatch(w, ev) && w->handler && !w->closing) w->handler(w, ev);
+    if (app) wd_cb_end();
     wm_current_app = saved;
 }
 
@@ -825,6 +866,7 @@ static int post_head, post_tail;
 
 void win_post_event(window_t *w, intptr_t data) {
     if (!w) return;
+    CRITICAL_SECTION();
     int next = (post_head + 1) % POST_Q;
     if (next == post_tail) return;
     postq[post_head].win_id = w->id;
@@ -832,17 +874,61 @@ void win_post_event(window_t *w, intptr_t data) {
     post_head = next;
 }
 
+/* posted events of windows whose app is stuck wait here (wm_requeue_posted) */
+static struct { int win_id; intptr_t data; } heldq[POST_Q];
+static int nheld;
+
 static void deliver_posted(void) {
     int end = post_head;
     while (post_tail != end) {
+        preempt_disable();
         int id = postq[post_tail].win_id;
         intptr_t data = postq[post_tail].data;
         post_tail = (post_tail + 1) % POST_Q;
+        preempt_enable();
         window_t *w = win_find_by_id(id);
-        if (w) {
+        if (w && frozen(w)) {
+            if (nheld < POST_Q) { heldq[nheld].win_id = id; heldq[nheld].data = data; nheld++; }
+        } else if (w) {
             event_t ev = { .type = EV_USER, .data = data };
             wm_send(w, &ev);
         }
+    }
+}
+
+void wm_requeue_posted(void) {
+    int n = nheld;
+    nheld = 0;
+    for (int i = 0; i < n; i++) {
+        window_t *w = win_find_by_id(heldq[i].win_id);
+        if (w && frozen(w)) { heldq[nheld++] = heldq[i]; continue; }
+        if (w) win_post_event(w, heldq[i].data);
+    }
+}
+
+/* The watchdog's state changed: every title bar again ("(Not responding)" on or off). */
+void wm_app_windows_changed(const app_desc_t *app) {
+    for (window_t *w = wm_bottom; w; w = w->above) {
+        if (app && w->app != app) continue;
+        if (framed(w)) w->deco_dirty = true;
+    }
+    wm_taskbar_changed();
+}
+
+/* The watchdog closed a stuck app: its windows go away without calling it again. */
+void wm_close_app_windows(const app_desc_t *app) {
+    for (window_t *w = wm_bottom; w; w = w->above)
+        if (w->app == app && !w->closing) { w->handler = NULL; w->no_callbacks = true; }
+    bool again = true;
+    while (again) {
+        again = false;
+        for (window_t *w = wm_bottom; w; w = w->above)
+            if (w->app == app && !w->closing) {
+                w->handler = NULL;
+                close_window(w, false);
+                again = true;
+                break;
+            }
     }
 }
 
@@ -1112,6 +1198,11 @@ static void mouse_down(int button) {
         return;
     }
     int ht = hit_test(w, wm_mouse_x, wm_mouse_y);
+    if (ht == HT_CLIENT && frozen(w)) {          /* not responding: up comes the watchdog's window */
+        wm_focus(w);
+        wd_show_dialog(w->app);
+        return;
+    }
     if (w->layer == LAYER_NORMAL || w->layer == LAYER_DESKTOP || (w->layer == LAYER_TOPMOST && !taskbar_owns(w)))
         wm_focus(w);
     else if (w->layer == LAYER_POPUP)
@@ -1168,7 +1259,7 @@ static void mouse_down(int button) {
         break;
     case HT_LEFT: case HT_RIGHT: case HT_TOP: case HT_BOTTOM:
     case HT_TOPLEFT: case HT_TOPRIGHT: case HT_BOTTOMLEFT: case HT_BOTTOMRIGHT:
-        if (button != MOUSE_LEFT) break;
+        if (button != MOUSE_LEFT || frozen(w)) break;   /* not responding: moved, not resized */
         drag_mode = DRAG_RESIZE;
         drag_ht = ht;
         drag_win = w;
@@ -1185,7 +1276,7 @@ static void mouse_up(int button) {
     if (drag_mode != DRAG_NONE && button == MOUSE_LEFT) {
         if (drag_mode == DRAG_RESIZE) apply_pending_resize(true);
         if (drag_mode == DRAG_MOVE && drag_win && win_is_valid(drag_win) && !drag_restore_pending &&
-            (drag_win->flags & WIN_RESIZABLE)) {
+            (drag_win->flags & WIN_RESIZABLE) && !frozen(drag_win)) {
             /* edge snapping */
             int work_h = scr_h - wm_taskbar_h;
             if (wm_mouse_y <= 0 && has_max_btn(drag_win)) {
@@ -1217,7 +1308,9 @@ static void mouse_up(int button) {
             w->pressed_ht = 0;
             w->deco_dirty = true;
             if (ht == pressed) {
-                if (ht == HT_CLOSE) {
+                if (ht == HT_CLOSE && frozen(w)) {
+                    wd_show_dialog(w->app);          /* not responding: the watchdog's window decides */
+                } else if (ht == HT_CLOSE) {
                     if (w->flags & WIN_CONFIRM_CLOSE) {
                         event_t ev = { .type = EV_CLOSE_REQUEST };
                         wm_send(w, &ev);
@@ -1298,7 +1391,8 @@ static void key_event(const input_event_t *ie) {
         if ((mods & MOD_ALT) && ie->key == KEY_F4) {
             window_t *w = wm_focused;
             if (w && w->layer == LAYER_NORMAL) {
-                if (w->flags & WIN_CONFIRM_CLOSE) { event_t ev = { .type = EV_CLOSE_REQUEST }; wm_send(w, &ev); }
+                if (frozen(w)) wd_show_dialog(w->app);
+                else if (w->flags & WIN_CONFIRM_CLOSE) { event_t ev = { .type = EV_CLOSE_REQUEST }; wm_send(w, &ev); }
                 else win_close(w);
             }
             return;
@@ -1359,9 +1453,12 @@ static void process_input(void) {
 }
 
 /* ---- painting -------------------------------------------------------------------------- */
+/* needs its EV_PAINT now (a stuck app's windows wait until it responds again) */
+static bool wants_paint(const window_t *w) { return w->need_paint && !frozen(w); }
+
 static void paint_window(window_t *w) {
     if (w->deco_dirty) wm_redraw_decor(w);
-    if (!w->need_paint) return;
+    if (!wants_paint(w)) return;
     w->need_paint = false;
     rect_t pr = rect_intersect(w->paint_rect, rect_make(0, 0, w->cw, w->ch));
     if (rect_empty(pr)) return;
@@ -1371,11 +1468,13 @@ static void paint_window(window_t *w) {
     event_t ev = { .type = EV_PAINT, .x = pr.x, .y = pr.y, .w = pr.w, .h = pr.h };
     const app_desc_t *saved = wm_current_app;
     wm_current_app = w->app;
+    if (w->app) wd_cb_begin(w->app);
     if (w->handler) w->handler(w, &ev);
     if (!w->closing) {
         surface_set_clip(s, pr);
         ui_paint_all(w);
     }
+    if (w->app) wd_cb_end();
     wm_current_app = saved;
     surface_reset_clip(s);
     if (framed(w) && w->radius && pr.y + pr.h >= w->ch - w->radius) draw_border(w, true);
@@ -1404,7 +1503,7 @@ static bool animate(void) {
 static void paint_all(void) {
     for (window_t *w = wm_bottom; w; w = w->above) {
         if (!drawn(w)) continue;
-        if (w->need_paint || w->deco_dirty) paint_window(w);
+        if (wants_paint(w) || w->deco_dirty) paint_window(w);
     }
     if (btn_win && !win_is_valid(btn_win)) btn_win = NULL;
 }
@@ -1468,9 +1567,14 @@ void wm_init(void) {
     klog("wm: %dx%d", scr_w, scr_h);
 }
 
+/* The main loop. The app watchdog may start it again on another part of the stack
+   (a callback of the loop got stuck), so it keeps no state of its own. */
 void wm_run(void) {
-    klog("wm: entering main loop");
+    static bool entered;
+    if (!entered) klog("wm: entering main loop");
+    entered = true;
     for (;;) {
+        wd_loop_top();                       /* app watchdog: dialogs, Wait time slices */
         stack_guard_check();
         fpu_check();
         process_input();
@@ -1489,13 +1593,14 @@ void wm_run(void) {
         bool busy = input_pending() || ndirty || (post_head != post_tail) || have_pending_resize || fading;
         if (!busy) {
             for (window_t *w = wm_bottom; w; w = w->above)
-                if (drawn(w) && (w->need_paint || w->deco_dirty)) { busy = true; break; }
+                if (drawn(w) && (wants_paint(w) || w->deco_dirty)) { busy = true; break; }
         }
         if (!busy) {
             uint32_t due = timers_next_due();
             if (due && (int32_t)(due - g_ticks) <= 0) busy = true;
         }
         if (busy) __asm__ volatile("sti");
+        else if (wd_run_waiting()) __asm__ volatile("sti");   /* idle: time for an app the user waits for */
         else {
             uint32_t t0 = g_ticks;
             __asm__ volatile("sti; hlt");
